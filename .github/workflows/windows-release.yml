@@ -1,0 +1,127 @@
+name: Windows build and release
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Check and build installer
+    runs-on: windows-latest
+    timeout-minutes: 35
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - run: npm ci
+
+      - name: Set a unique version for this build
+        id: version
+        shell: pwsh
+        run: |
+          $package = Get-Content package.json | ConvertFrom-Json
+          $parts = $package.version.Split('.')
+          if ($parts.Length -ne 3) {
+            throw "package.json version must use MAJOR.MINOR.PATCH"
+          }
+          $patch = [int]$parts[2] + [int]$env:GITHUB_RUN_NUMBER
+          $version = "$($parts[0]).$($parts[1]).$patch"
+          npm version --no-git-tag-version $version
+          "version=$version" >> $env:GITHUB_OUTPUT
+
+      - run: npm run download:xray
+      - run: npm run lint
+      - run: npm run build
+      - run: npm test
+
+      - name: Build signed NSIS installer
+        if: ${{ secrets.WINDOWS_CSC_LINK != '' }}
+        run: npm run package:win
+        env:
+          CSC_LINK: ${{ secrets.WINDOWS_CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.WINDOWS_CSC_KEY_PASSWORD }}
+
+      - name: Build unsigned NSIS installer
+        if: ${{ secrets.WINDOWS_CSC_LINK == '' }}
+        run: npm run package:win
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+
+      - name: Prepare release files
+        shell: pwsh
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          $installer = "release/LevikVPN-Windows-$env:VERSION-x64.exe"
+          if (-not (Test-Path $installer)) {
+            throw "Installer was not created: $installer"
+          }
+          Copy-Item $installer "release/LevikVPN-Windows-x64.exe"
+          Get-ChildItem release -File |
+            Where-Object { $_.Extension -in '.exe', '.blockmap', '.yml' } |
+            Sort-Object Name |
+            ForEach-Object {
+              $hash = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+              "$hash  $($_.Name)"
+            } | Set-Content -Encoding utf8NoBOM release/SHA256SUMS.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: LevikVPN-Windows-${{ steps.version.outputs.version }}
+          path: |
+            release/*.exe
+            release/*.blockmap
+            release/latest.yml
+            release/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 14
+
+  release:
+    name: Publish GitHub Release
+    if: ${{ github.ref == 'refs/heads/main' && github.event_name != 'pull_request' }}
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: LevikVPN-Windows-${{ needs.build.outputs.version }}
+          path: release
+
+      - name: Create or refresh release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ needs.build.outputs.version }}
+          COMMIT_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          tag="v${VERSION}"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" release/* --clobber
+            gh release edit "$tag" --latest
+          else
+            gh release create "$tag" release/* \
+              --target "$COMMIT_SHA" \
+              --title "Levik VPN для Windows ${VERSION}" \
+              --notes "Автоматическая сборка из main. Установщик: LevikVPN-Windows-x64.exe" \
+              --latest
+          fi

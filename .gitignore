@@ -1,0 +1,27 @@
+node_modules/
+dist/
+release/
+vendor/xray/windows-x64/
+vendor/xray/*.zip
+vendor/xray/*.dgst
+*.log
+.DS_Store
+
+# Local configuration and credentials
+.env
+.env.*
+!.env.example
+secrets/
+*.p12
+*.pfx
+*.key
+*.pem
+*.cer
+*.crt
+
+# Local tooling and test output
+.coverage/
+coverage/
+.vitest/
+.idea/
+.vscode/

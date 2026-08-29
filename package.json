@@ -1,0 +1,72 @@
+{
+  "name": "levik-vpn-windows",
+  "version": "1.2.3",
+  "private": true,
+  "description": "Official Levik VPN client for Windows",
+  "main": "dist/main/main.js",
+  "author": "Levik VPN",
+  "license": "AGPL-3.0-only",
+  "scripts": {
+    "lint": "tsc --noEmit",
+    "build": "node scripts/build.mjs",
+    "test": "vitest run",
+    "download:xray": "node scripts/download-xray.mjs",
+    "package:win": "npm run build && electron-builder --win nsis --x64",
+    "check": "npm run lint && npm run build && npm test"
+  },
+  "devDependencies": {
+    "electron": "44.0.0",
+    "electron-builder": "26.15.3",
+    "esbuild": "0.25.10",
+    "typescript": "5.9.2",
+    "vitest": "3.2.7"
+  },
+  "build": {
+    "appId": "com.leviknet.vpn.windows",
+    "productName": "Levik VPN",
+    "artifactName": "LevikVPN-Windows-${version}-${arch}.${ext}",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "vendor/xray/windows-x64",
+        "to": "xray",
+        "filter": [
+          "**/*"
+        ]
+      }
+    ],
+    "asar": true,
+    "publish": [
+      {
+        "provider": "generic",
+        "url": "https://github.com/Nort321/levik-vpn-windows/releases/latest/download"
+      }
+    ],
+    "win": {
+      "target": [
+        "nsis"
+      ],
+      "icon": "build/icon.ico",
+      "requestedExecutionLevel": "requireAdministrator",
+      "legalTrademarks": "Levik VPN"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Levik VPN",
+      "deleteAppDataOnUninstall": false,
+      "runAfterFinish": true
+    }
+  },
+  "dependencies": {
+    "electron-updater": "^6.8.9"
+  }
+}
