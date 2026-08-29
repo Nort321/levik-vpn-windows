@@ -214,8 +214,9 @@ function updateSetting(): string {
   if (!state) return "";
   const update = state.update;
   const canInstall = update.status === "downloaded";
-  const disabled = ["checking", "downloading"].includes(update.status);
-  const label = canInstall ? "Установить" : update.status === "downloading" ? `${update.progress ?? 0}%` : "Проверить";
+  const canDownload = update.status === "available";
+  const disabled = ["checking", "downloading", "installing"].includes(update.status);
+  const label = canInstall ? "Установить" : canDownload ? "Скачать" : update.status === "downloading" ? `${update.progress ?? 0}%` : update.status === "installing" ? "Установка…" : "Проверить";
   return `<div class="setting-row"><div><div class="setting-name">Обновление приложения</div><div class="setting-help">${escapeHtml(update.message ?? `Текущая версия ${state.appVersion}`)}</div></div><button class="button compact" id="update-button" ${disabled ? "disabled" : ""}>${icon(canInstall ? "install" : "update")} ${label}</button></div>`;
 }
 
@@ -368,7 +369,11 @@ function bindPageEvents(): void {
   }));
   document.querySelectorAll<HTMLElement>("[data-renew-subscription-id]").forEach((button) => button.addEventListener("click", () => run(() => window.levik.openExternal("https://t.me/levikvpnbot"))));
   document.getElementById("manage-subscription-button")?.addEventListener("click", () => run(() => window.levik.openExternal("https://t.me/levikvpnbot")));
-  document.getElementById("update-button")?.addEventListener("click", () => run(() => state?.update.status === "downloaded" ? window.levik.installUpdate() : window.levik.checkForUpdates()));
+  document.getElementById("update-button")?.addEventListener("click", () => run(() => {
+    if (state?.update.status === "downloaded") return window.levik.installUpdate();
+    if (state?.update.status === "available") return window.levik.downloadUpdate();
+    return window.levik.checkForUpdates();
+  }));
   document.getElementById("support-button")?.addEventListener("click", () => run(() => window.levik.openExternal("https://t.me/leviksupportbot")));
   document.getElementById("logout-button")?.addEventListener("click", () => {
     if (confirm("Выйти из Levik Account на этом компьютере? Текущий VPN-туннель будет остановлен.")) void run(() => window.levik.logout());

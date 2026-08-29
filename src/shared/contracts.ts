@@ -3,7 +3,7 @@ export type ConnectionStatus = "disconnected" | "connecting" | "connected" | "re
 export type RoutingMode = "global" | "bypassRu" | "blockedOnly";
 export type ThemeMode = "system" | "dark" | "light" | "amoled";
 export type SplitTunnelMode = "off" | "bypass" | "only";
-export type UpdateStatus = "idle" | "checking" | "available" | "downloading" | "downloaded" | "upToDate" | "error";
+export type UpdateStatus = "idle" | "checking" | "available" | "downloading" | "downloaded" | "installing" | "upToDate" | "error";
 
 export interface WindowsProcess {
   name: string;
@@ -108,6 +108,7 @@ export interface LevikDesktopApi {
   revokeDevice(subscriptionId: string, deviceId: string): Promise<void>;
   setSubscriptionShield(subscriptionId: string, enabled: boolean): Promise<void>;
   checkForUpdates(): Promise<void>;
+  downloadUpdate(): Promise<void>;
   installUpdate(): Promise<void>;
   onSnapshot(listener: (snapshot: AppSnapshot) => void): () => void;
 }
@@ -130,6 +131,7 @@ export const IPC = {
   revokeDevice: "levik:revoke-device",
   setSubscriptionShield: "levik:set-subscription-shield",
   checkForUpdates: "levik:check-for-updates",
+  downloadUpdate: "levik:download-update",
   installUpdate: "levik:install-update",
   snapshotChanged: "levik:snapshot-changed",
 } as const;

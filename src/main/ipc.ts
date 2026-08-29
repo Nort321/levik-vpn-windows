@@ -57,6 +57,7 @@ export function registerIpc(controller: AppController, window: BrowserWindow): v
     return controller.setSubscriptionShield(subscriptionId, enabled);
   });
   ipcMain.handle(IPC.checkForUpdates, () => controller.checkForUpdates());
+  ipcMain.handle(IPC.downloadUpdate, () => controller.downloadUpdate());
   ipcMain.handle(IPC.installUpdate, () => controller.installUpdate());
   controller.on("changed", (snapshot) => {
     if (!window.isDestroyed()) window.webContents.send(IPC.snapshotChanged, snapshot);

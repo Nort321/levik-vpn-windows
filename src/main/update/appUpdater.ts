@@ -9,20 +9,16 @@ interface AppUpdaterEvents {
   changed: [snapshot: UpdateSnapshot];
 }
 
-const DEFAULT_UPDATE_URL = "https://github.com/Nort321/levik-vpn-windows/releases/latest/download";
-
 export class AppUpdater extends EventEmitter<AppUpdaterEvents> {
   private state: UpdateSnapshot = { status: "idle", version: null, progress: null, message: null };
 
   constructor() {
     super();
-    autoUpdater.autoDownload = true;
-    autoUpdater.autoInstallOnAppQuit = true;
+    autoUpdater.autoDownload = false;
+    autoUpdater.autoInstallOnAppQuit = false;
     autoUpdater.allowPrerelease = false;
-    autoUpdater.setFeedURL({
-      provider: "generic",
-      url: process.env.LEVIK_UPDATE_URL ?? DEFAULT_UPDATE_URL,
-    });
+    const updateUrlOverride = process.env.LEVIK_UPDATE_URL;
+    if (updateUrlOverride) autoUpdater.setFeedURL({ provider: "generic", url: updateUrlOverride });
     autoUpdater.on("checking-for-update", () => this.patch({ status: "checking", message: "Проверяем обновления…" }));
     autoUpdater.on("update-available", (info) => this.patch({ status: "available", version: info.version, progress: 0, message: `Доступна версия ${info.version}` }));
     autoUpdater.on("update-not-available", () => this.patch({ status: "upToDate", version: app.getVersion(), progress: null, message: "Установлена актуальная версия" }));
@@ -47,9 +43,28 @@ export class AppUpdater extends EventEmitter<AppUpdaterEvents> {
     }
   }
 
-  install(): void {
+  async download(): Promise<void> {
+    if (this.state.status !== "available") throw new Error("Сначала проверьте наличие обновления");
+    this.patch({ status: "downloading", progress: 0, message: "Загрузка обновления…" });
+    try {
+      await autoUpdater.downloadUpdate();
+    } catch (error) {
+      this.patch({ status: "error", progress: null, message: safeUpdateError(error) });
+      throw error;
+    }
+  }
+
+  async install(prepare: () => Promise<void>, beforeQuit: () => void): Promise<void> {
     if (this.state.status !== "downloaded") throw new Error("Обновление ещё не загружено");
-    autoUpdater.quitAndInstall(false, true);
+    this.patch({ status: "installing", progress: 100, message: "Подготовка к установке…" });
+    try {
+      await prepare();
+      beforeQuit();
+      autoUpdater.quitAndInstall(false, true);
+    } catch (error) {
+      this.patch({ status: "downloaded", progress: 100, message: `Не удалось запустить установку: ${safeUpdateError(error)}` });
+      throw error;
+    }
   }
 
   private patch(patch: Partial<UpdateSnapshot>): void {

@@ -20,6 +20,7 @@ const api: LevikDesktopApi = {
   revokeDevice: (subscriptionId, deviceId) => ipcRenderer.invoke(IPC.revokeDevice, subscriptionId, deviceId),
   setSubscriptionShield: (subscriptionId, enabled) => ipcRenderer.invoke(IPC.setSubscriptionShield, subscriptionId, enabled),
   checkForUpdates: () => ipcRenderer.invoke(IPC.checkForUpdates),
+  downloadUpdate: () => ipcRenderer.invoke(IPC.downloadUpdate),
   installUpdate: () => ipcRenderer.invoke(IPC.installUpdate),
   onSnapshot(listener) {
     const wrapped = (_event: Electron.IpcRendererEvent, snapshot: AppSnapshot) => listener(snapshot);

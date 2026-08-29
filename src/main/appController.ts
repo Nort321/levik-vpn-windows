@@ -24,6 +24,7 @@ import { AppUpdater } from "./update/appUpdater";
 
 interface AppControllerEvents {
   changed: [snapshot: AppSnapshot];
+  updateInstalling: [];
 }
 
 const DEFAULT_SETTINGS: AppSettings = {
@@ -378,9 +379,17 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     return this.updater.check(false);
   }
 
-  installUpdate(): void {
+  downloadUpdate(): Promise<void> {
     if (!this.updater) throw new Error("Модуль обновлений недоступен");
-    this.updater.install();
+    return this.updater.download();
+  }
+
+  async installUpdate(): Promise<void> {
+    if (!this.updater) throw new Error("Модуль обновлений недоступен");
+    await this.updater.install(
+      () => this.shutdown(),
+      () => this.emit("updateInstalling"),
+    );
   }
 
   async restoreAfterSystemResume(): Promise<void> {
