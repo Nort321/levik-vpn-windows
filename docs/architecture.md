@@ -19,7 +19,7 @@ This repository is independent from the Android source tree. It consumes the sam
 2. The client polls the short-lived challenge and stores the resulting access token with DPAPI.
 3. The client requests an RSA-OAEP/AES-GCM encrypted tunnel profile.
 4. The profile is decrypted locally, validated, and converted into selectable Xray outbounds.
-5. Xray creates a Windows TUN adapter through Wintun and applies system routes.
+5. Xray creates a Windows TUN adapter through Wintun and applies two half-default routes per IP family. Their longer prefixes take precedence over physical-adapter default routes, so TCP and UDP traffic from games and other non-proxy-aware applications enters the tunnel.
 6. Unexpected process termination triggers bounded exponential reconnection.
 7. Intentional disconnect or application shutdown removes the temporary profile and TUN process.
 8. Resume and unlock events probe the local Xray API and recreate an unresponsive tunnel.

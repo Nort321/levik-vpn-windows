@@ -109,7 +109,7 @@ function updateTray(snapshot?: AppSnapshot): void {
 }
 
 function trayIcon(status: ConnectionStatus): Electron.NativeImage {
-  const tone = status === "connected" ? "connected" : ["connecting", "reconnecting", "disconnecting"].includes(status) ? "connecting" : status === "error" ? "error" : "disconnected";
+  const tone = status === "connected" ? "connected" : "disconnected";
   const statusIcon = nativeImage.createFromPath(join(__dirname, "..", "assets", `tray-${tone}.png`));
   if (!statusIcon.isEmpty()) return statusIcon.resize({ width: 16, height: 16 });
   return nativeImage.createFromPath(applicationIconPath()).resize({ width: 16, height: 16 });

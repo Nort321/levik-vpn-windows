@@ -44,6 +44,15 @@ describe("Windows tunnel profile", () => {
     const config = buildXrayConfig(prepared, prepared.servers[0]!, settings);
     const inbounds = config.inbounds as Array<Record<string, unknown>>;
     expect(inbounds[0]?.protocol).toBe("tun");
+    expect(inbounds[0]?.settings).toEqual(expect.objectContaining({
+      autoSystemRoutingTable: ["0.0.0.0/1", "128.0.0.0/1", "::/1", "8000::/1"],
+      autoOutboundsInterface: "auto",
+    }));
+    const routing = config.routing as { rules: Array<Record<string, unknown>> };
+    expect(routing.rules).not.toContainEqual(expect.objectContaining({
+      network: "tcp,udp",
+      outboundTag: "levik-direct",
+    }));
   });
 
   it("rejects a profile issued for another subscription", () => {

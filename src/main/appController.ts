@@ -27,7 +27,7 @@ interface AppControllerEvents {
 }
 
 const DEFAULT_SETTINGS: AppSettings = {
-  routingMode: "bypassRu",
+  routingMode: "global",
   automaticServer: true,
   autoReconnect: true,
   killSwitch: true,
@@ -45,6 +45,12 @@ const DEFAULT_SETTINGS: AppSettings = {
   antiDpiInterval: "10-20",
   splitTunnelMode: "off",
   splitTunnelProcesses: [],
+};
+
+const SETTINGS_SCHEMA_VERSION = 2;
+
+type PersistedSettings = Partial<AppSettings> & {
+  settingsSchemaVersion?: number;
 };
 
 export class AppController extends EventEmitter<AppControllerEvents> {
@@ -313,7 +319,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     const next = validateSettings({ ...previous, ...patch });
     const reconnect = this.xray.isRunning() && affectsTunnel(previous, next);
     this.state.settings = next;
-    await this.secureStore.put("settings", Buffer.from(JSON.stringify(next)));
+    await this.secureStore.put("settings", Buffer.from(JSON.stringify(serializeSettings(next))));
     this.applyLoginItemSettings();
     this.emitChanged();
     if (!previous.automaticServer && next.automaticServer) void this.pingServers();
@@ -476,7 +482,15 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     const raw = await this.secureStore.get("settings");
     if (!raw) return DEFAULT_SETTINGS;
     try {
-      return validateSettings({ ...DEFAULT_SETTINGS, ...JSON.parse(raw.toString("utf8")) as Partial<AppSettings> });
+      const persisted = JSON.parse(raw.toString("utf8")) as PersistedSettings;
+      const migrated = persisted.settingsSchemaVersion === SETTINGS_SCHEMA_VERSION
+        ? persisted
+        : { ...persisted, routingMode: "global" as const };
+      const settings = validateSettings({ ...DEFAULT_SETTINGS, ...migrated });
+      if (persisted.settingsSchemaVersion !== SETTINGS_SCHEMA_VERSION) {
+        await this.secureStore.put("settings", Buffer.from(JSON.stringify(serializeSettings(settings))));
+      }
+      return settings;
     } catch {
       return DEFAULT_SETTINGS;
     } finally {
@@ -592,6 +606,10 @@ export class AppController extends EventEmitter<AppControllerEvents> {
       app.setLoginItemSettings({ openAtLogin: this.state.settings.launchAtLogin });
     }
   }
+}
+
+function serializeSettings(settings: AppSettings): AppSettings & { settingsSchemaVersion: number } {
+  return { ...settings, settingsSchemaVersion: SETTINGS_SCHEMA_VERSION };
 }
 
 function mapAccount(response: MobileAccountResponse): AccountSummary {

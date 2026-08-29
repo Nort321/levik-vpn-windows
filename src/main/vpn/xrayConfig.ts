@@ -8,6 +8,10 @@ const LOCAL_CIDRS = [
   "::1/128", "fc00::/7", "fe80::/10", "ff00::/8",
 ];
 
+// More-specific half-default routes always win over a physical adapter's
+// existing default route on Windows, independently of its interface metric.
+const FULL_TUN_ROUTES = ["0.0.0.0/1", "128.0.0.0/1", "::/1", "8000::/1"];
+
 const RUSSIAN_GEOSITES = ["geosite:category-ru"];
 const RUSSIAN_IPS = ["geoip:ru"];
 const BLOCKED_DOMAINS = [
@@ -129,7 +133,7 @@ function tunInbound(dnsServer: string): Record<string, unknown> {
       mtu: 1500,
       gateway: ["10.89.0.1/30", "fdfe:89::1/126"],
       dns: [dnsServer],
-      autoSystemRoutingTable: ["0.0.0.0/0", "::/0"],
+      autoSystemRoutingTable: FULL_TUN_ROUTES,
       autoOutboundsInterface: "auto",
     },
     sniffing: { enabled: true, destOverride: ["http", "tls", "quic"], routeOnly: false },

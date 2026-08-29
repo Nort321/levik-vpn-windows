@@ -185,7 +185,7 @@ function renderProfile(): string {
         <div class="subscription-list">${state.account.subscriptions.map(subscriptionCard).join("") || `<div class="empty">Нет активных подписок</div>`}</div>
       </section>
       <section class="section card"><h2 class="card-title">Настройки</h2><div class="settings-list">
-        ${selectSetting("Маршрутизация", "Какие сайты открывать через VPN", "routing-mode", state.settings.routingMode, [["global","Весь трафик"],["bypassRu","Обход ресурсов РФ"],["blockedOnly","Только заблокированное"]])}
+        ${selectSetting("Маршрутизация", "Как направлять системный трафик", "routing-mode", state.settings.routingMode, [["global","Весь трафик"],["bypassRu","Обход ресурсов РФ"],["blockedOnly","Только заблокированное"]])}
         ${switchSetting("Автовыбор сервера", "Выбирать сервер с минимальной задержкой", "automaticServer", state.settings.automaticServer)}
         ${switchSetting("Автовосстановление", "Перезапускать туннель после сбоя", "autoReconnect", state.settings.autoReconnect)}
         ${switchSetting("Автоподключение", "Подключаться при запуске Levik VPN", "autoConnectOnLaunch", state.settings.autoConnectOnLaunch)}
