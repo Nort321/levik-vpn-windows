@@ -4,6 +4,7 @@ release/
 vendor/xray/windows-x64/
 vendor/xray/*.zip
 vendor/xray/*.dgst
+vendor/kill-switch/windows-x64/
 *.log
 .DS_Store
 

@@ -9,9 +9,10 @@
   "scripts": {
     "lint": "tsc --noEmit",
     "build": "node scripts/build.mjs",
+    "build:win-helper": "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File scripts/build-kill-switch.ps1",
     "test": "vitest run",
     "download:xray": "node scripts/download-xray.mjs",
-    "package:win": "npm run build && electron-builder --win nsis --x64",
+    "package:win": "npm run build && npm run build:win-helper && electron-builder --win nsis --x64",
     "check": "npm run lint && npm run build && npm test"
   },
   "devDependencies": {
@@ -38,6 +39,13 @@
         "to": "xray",
         "filter": [
           "**/*"
+        ]
+      },
+      {
+        "from": "vendor/kill-switch/windows-x64",
+        "to": "kill-switch",
+        "filter": [
+          "levik-kill-switch.exe"
         ]
       }
     ],

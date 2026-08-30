@@ -20,6 +20,7 @@ import { buildLockdownConfig, buildXrayConfig } from "./vpn/xrayConfig";
 import { XrayManager } from "./vpn/xrayManager";
 import { measureServerLatencies } from "./vpn/serverPinger";
 import { DnsLeakProtection } from "./windows/dnsLeakProtection";
+import { WindowsKillSwitch } from "./windows/killSwitch";
 import { AppUpdater } from "./update/appUpdater";
 
 interface AppControllerEvents {
@@ -58,6 +59,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
   private readonly secureStore = new SecureStore();
   private readonly xray = new XrayManager();
   private readonly dnsLeakProtection = new DnsLeakProtection();
+  private readonly killSwitch = new WindowsKillSwitch(() => this.xray.executablePath());
   private readonly updater: AppUpdater | null;
   private identity!: DeviceIdentity;
   private api!: MobileApiClient;
@@ -104,6 +106,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
   }
 
   async initialize(): Promise<void> {
+    await this.killSwitch.cleanupLegacyConfig(app.getPath("userData"));
     this.identity = await this.loadIdentity();
     this.api = new MobileApiClient(
       process.env.LEVIK_API_ORIGIN ?? "https://leviknet.com",
@@ -115,6 +118,12 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     this.xray.on("stats", (downloadBytes, uploadBytes) => this.handleTrafficStats(downloadBytes, uploadBytes));
     this.accessToken = await this.loadString("access_token");
     this.state.settings = await this.loadSettings();
+    const recoveredKillSwitch = await this.killSwitch.recover();
+    if (recoveredKillSwitch && !this.state.settings.killSwitch) {
+      await this.killSwitch.disable();
+    } else if (recoveredKillSwitch) {
+      this.addLog("Kill Switch: восстановлена защита после предыдущего завершения приложения");
+    }
     this.profile = await this.loadProfile();
     if (this.profile) {
       this.state.servers = this.profile.servers;
@@ -243,10 +252,15 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     if (!this.state.account?.subscriptions.some((item) => item.uuid === subscriptionId)) {
       throw new Error("Подписка не найдена");
     }
-    if (this.xray.isRunning()) await this.disconnect();
+    const reconnect = this.xray.isRunning();
+    if (reconnect) await this.stopTunnelForReplacement();
     this.patch({ selectedSubscriptionId: subscriptionId, busy: true });
     try {
       await this.loadTunnelProfile(subscriptionId);
+      if (reconnect) await this.connect();
+    } catch (error) {
+      if (reconnect) this.patch({ status: "error", statusDetail: messageOf(error), sessionStartedAt: null });
+      throw error;
     } finally {
       this.patch({ busy: false });
     }
@@ -256,11 +270,16 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     const server = this.state.servers.find((item) => item.id === serverId);
     if (!server) throw new Error("Сервер не найден");
     const reconnect = this.xray.isRunning();
-    if (reconnect) await this.disconnect();
-    this.state.selectedServerId = serverId;
-    await this.secureStore.put("selected_server", Buffer.from(serverId));
-    this.emitChanged();
-    if (reconnect) await this.connect();
+    if (reconnect) await this.stopTunnelForReplacement();
+    try {
+      this.state.selectedServerId = serverId;
+      await this.secureStore.put("selected_server", Buffer.from(serverId));
+      this.emitChanged();
+      if (reconnect) await this.connect();
+    } catch (error) {
+      if (reconnect) this.patch({ status: "error", statusDetail: messageOf(error), sessionStartedAt: null });
+      throw error;
+    }
   }
 
   async connect(): Promise<void> {
@@ -278,10 +297,11 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     this.resetTrafficStats();
     this.patch({ status: "connecting", statusDetail: `Подключение через ${server.name}…`, busy: true, downloadBytes: 0, uploadBytes: 0 });
     try {
+      if (this.state.settings.killSwitch) await this.killSwitch.enable();
       if (this.state.settings.preventDnsLeaks) await this.dnsLeakProtection.enable();
       const config = buildXrayConfig(this.profile, server, this.state.settings);
       this.lastConfig = config;
-      await this.xray.start(config);
+      await this.startXray(config);
       this.lockdownActive = false;
       this.reconnectAttempts = 0;
       this.patch({
@@ -300,7 +320,10 @@ export class AppController extends EventEmitter<AppControllerEvents> {
 
   async disconnect(): Promise<void> {
     if (!this.xray.isRunning()) {
-      await this.dnsLeakProtection.disable();
+      await Promise.all([
+        this.dnsLeakProtection.disable(),
+        this.killSwitch.disable(),
+      ]);
       this.patch({ status: "disconnected", statusDetail: null, sessionStartedAt: null });
       return;
     }
@@ -308,7 +331,10 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     try {
       await this.xray.stop();
     } finally {
-      await this.dnsLeakProtection.disable();
+      await Promise.all([
+        this.dnsLeakProtection.disable(),
+        this.killSwitch.disable(),
+      ]);
     }
     this.lockdownActive = false;
     this.lastConfig = null;
@@ -324,8 +350,14 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     this.applyLoginItemSettings();
     this.emitChanged();
     if (!previous.automaticServer && next.automaticServer) void this.pingServers();
+    if (previous.killSwitch && !next.killSwitch) await this.killSwitch.disable();
+    if (!previous.killSwitch && next.killSwitch && reconnect) {
+      await this.killSwitch.enable();
+      await this.killSwitch.allowTunnel();
+    }
+    if (previous.preventDnsLeaks && !next.preventDnsLeaks) await this.dnsLeakProtection.disable();
     if (reconnect) {
-      await this.disconnect();
+      await this.stopTunnelForReplacement();
       await this.connect();
     }
   }
@@ -335,7 +367,10 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     try {
       await this.xray.stop();
     } finally {
-      await this.dnsLeakProtection.disable();
+      await Promise.all([
+        this.dnsLeakProtection.disable(),
+        this.killSwitch.disable(),
+      ]);
     }
   }
 
@@ -402,7 +437,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
       if (!config || !["connected", "reconnecting"].includes(this.state.status)) return;
       this.patch({ status: "reconnecting", statusDetail: "Восстановление после сна или разблокировки…" });
       if (this.state.settings.preventDnsLeaks) await this.dnsLeakProtection.enable();
-      await this.xray.start(config);
+      await this.startXray(config);
       this.lockdownActive = false;
       this.reconnectAttempts = 0;
       this.patch({ status: "connected", statusDetail: "Защищённое соединение восстановлено" });
@@ -526,7 +561,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     }
     const delayMs = Math.min(30_000, 1_000 * 2 ** Math.min(this.reconnectAttempts++, 5));
     if (this.state.settings.killSwitch && !this.lockdownActive) {
-      void this.xray.start(buildLockdownConfig(this.state.settings)).then(() => {
+      void this.startXray(buildLockdownConfig(this.state.settings)).then(() => {
         this.lockdownActive = true;
         this.addLog("Kill Switch: аварийная блокировка трафика активна");
       }).catch((error: unknown) => {
@@ -540,7 +575,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
   private scheduleTunnelRestore(delayMs: number): void {
     setTimeout(() => {
       if (this.state.status !== "reconnecting" || !this.lastConfig) return;
-      void this.xray.start(this.lastConfig).then(() => {
+      void this.startXray(this.lastConfig).then(() => {
         this.lockdownActive = false;
         this.reconnectAttempts = 0;
         this.patch({ status: "connected", statusDetail: "Защищённое соединение восстановлено" });
@@ -561,6 +596,22 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     if (totalDownload !== this.state.downloadBytes || totalUpload !== this.state.uploadBytes) {
       this.patch({ downloadBytes: totalDownload, uploadBytes: totalUpload });
     }
+  }
+
+  private async startXray(config: Record<string, unknown>): Promise<void> {
+    await this.xray.start(config);
+    try {
+      await this.killSwitch.allowTunnel();
+    } catch (error) {
+      await this.xray.stop();
+      throw error;
+    }
+  }
+
+  private async stopTunnelForReplacement(): Promise<void> {
+    this.patch({ status: "reconnecting", statusDetail: "Применение изменений соединения…" });
+    await this.xray.stop();
+    this.lockdownActive = false;
   }
 
   private resetTrafficStats(): void {
@@ -667,7 +718,7 @@ function validateSettings(value: AppSettings): AppSettings {
 }
 
 function affectsTunnel(before: AppSettings, after: AppSettings): boolean {
-  return before.routingMode !== after.routingMode || before.useDoh !== after.useDoh || before.dnsServer !== after.dnsServer || before.preventDnsLeaks !== after.preventDnsLeaks || before.antiDpiEnabled !== after.antiDpiEnabled || before.antiDpiPackets !== after.antiDpiPackets || before.antiDpiLength !== after.antiDpiLength || before.antiDpiInterval !== after.antiDpiInterval || before.splitTunnelMode !== after.splitTunnelMode || before.splitTunnelProcesses.join("\0") !== after.splitTunnelProcesses.join("\0");
+  return before.routingMode !== after.routingMode || before.killSwitch !== after.killSwitch || before.useDoh !== after.useDoh || before.dnsServer !== after.dnsServer || before.preventDnsLeaks !== after.preventDnsLeaks || before.antiDpiEnabled !== after.antiDpiEnabled || before.antiDpiPackets !== after.antiDpiPackets || before.antiDpiLength !== after.antiDpiLength || before.antiDpiInterval !== after.antiDpiInterval || before.splitTunnelMode !== after.splitTunnelMode || before.splitTunnelProcesses.join("\0") !== after.splitTunnelProcesses.join("\0");
 }
 
 function normalizeSplitTunnelProcess(value: string): string | null {

@@ -1,7 +1,6 @@
 import { app } from "electron";
 import { execFile, spawn } from "node:child_process";
-import type { ChildProcessWithoutNullStreams } from "node:child_process";
-import { mkdir, rm, writeFile } from "node:fs/promises";
+import type { ChildProcess, ChildProcessWithoutNullStreams } from "node:child_process";
 import { join } from "node:path";
 import { EventEmitter } from "node:events";
 import { promisify } from "node:util";
@@ -18,57 +17,46 @@ interface XrayEvents {
 export class XrayManager extends EventEmitter<XrayEvents> {
   private process: ChildProcessWithoutNullStreams | null = null;
   private stopping = false;
-  private readonly runtimeDirectory = join(app.getPath("userData"), "runtime");
-  private readonly configPath = join(this.runtimeDirectory, "xray-config.json");
   private statsTimer: ReturnType<typeof setInterval> | null = null;
   private statsQueryRunning = false;
   private statsErrorReported = false;
 
   async start(config: Record<string, unknown>): Promise<void> {
     if (process.platform !== "win32") throw new Error("VPN-туннель запускается только в Windows-сборке");
-    await this.stop();
-    await mkdir(this.runtimeDirectory, { recursive: true });
-    await writeFile(this.configPath, JSON.stringify(config), { mode: 0o600 });
-    await this.validate();
-    this.stopping = false;
-    const child = spawn(this.executablePath(), ["run", "-config", this.configPath], {
-      windowsHide: true,
-      stdio: ["pipe", "pipe", "pipe"],
-      env: { ...process.env, XRAY_LOCATION_ASSET: this.assetDirectory() },
-    });
-    child.stdin.end();
-    this.process = child;
-    child.stdout.on("data", (chunk: Buffer) => this.emitLines(chunk));
-    child.stderr.on("data", (chunk: Buffer) => this.emitLines(chunk));
-    child.once("error", (error) => this.emit("log", `Xray: ${error.message}`));
-    child.once("exit", (code) => {
-      this.stopStatsPolling();
-      const expected = this.stopping;
-      if (this.process === child) this.process = null;
-      void rm(this.configPath, { force: true });
-      this.emit("exit", code, expected);
-    });
-    await new Promise<void>((resolve, reject) => {
-      const timer = setTimeout(resolve, 1_500);
+    const configInput = Buffer.from(JSON.stringify(config), "utf8");
+    try {
+      await this.stop();
+      await this.validate(configInput);
+      this.stopping = false;
+      const child = spawn(this.executablePath(), xrayConfigArguments(false), {
+        windowsHide: true,
+        stdio: ["pipe", "pipe", "pipe"],
+        env: { ...process.env, XRAY_LOCATION_ASSET: this.assetDirectory() },
+      });
+      this.process = child;
+      child.stdout.on("data", (chunk: Buffer) => this.emitLines(chunk));
+      child.stderr.on("data", (chunk: Buffer) => this.emitLines(chunk));
+      child.once("error", (error) => this.emit("log", `Xray: ${error.message}`));
       child.once("exit", (code) => {
-        clearTimeout(timer);
-        reject(new Error(`Xray завершился при запуске (код ${code ?? "unknown"})`));
+        this.stopStatsPolling();
+        const expected = this.stopping;
+        if (this.process === child) this.process = null;
+        this.emit("exit", code, expected);
       });
-      child.once("error", (error) => {
-        clearTimeout(timer);
-        reject(error);
-      });
-    });
-    this.startStatsPolling();
+      await Promise.all([
+        writeConfigInput(child, configInput),
+        waitForStartup(child),
+      ]);
+      this.startStatsPolling();
+    } finally {
+      configInput.fill(0);
+    }
   }
 
   async stop(): Promise<void> {
     this.stopStatsPolling();
     const child = this.process;
-    if (!child) {
-      await rm(this.configPath, { force: true });
-      return;
-    }
+    if (!child) return;
     this.stopping = true;
     child.kill();
     await Promise.race([
@@ -76,7 +64,6 @@ export class XrayManager extends EventEmitter<XrayEvents> {
       new Promise<void>((resolve) => setTimeout(() => { child.kill("SIGKILL"); resolve(); }, 5_000)),
     ]);
     this.process = null;
-    await rm(this.configPath, { force: true });
   }
 
   isRunning(): boolean {
@@ -95,20 +82,26 @@ export class XrayManager extends EventEmitter<XrayEvents> {
     }
   }
 
-  private async validate(): Promise<void> {
-    await new Promise<void>((resolve, reject) => {
-      const validation = spawn(this.executablePath(), ["run", "-test", "-config", this.configPath], {
-        windowsHide: true,
-        env: { ...process.env, XRAY_LOCATION_ASSET: this.assetDirectory() },
-      });
-      let errorText = "";
-      validation.stderr.on("data", (chunk: Buffer) => { errorText = `${errorText}${chunk}`.slice(-4_096); });
-      validation.once("error", reject);
-      validation.once("exit", (code) => code === 0 ? resolve() : reject(new Error(errorText.trim() || "Xray отклонил конфигурацию")));
+  private async validate(configInput: Buffer): Promise<void> {
+    const validation = spawn(this.executablePath(), xrayConfigArguments(true), {
+      windowsHide: true,
+      stdio: ["pipe", "ignore", "pipe"],
+      env: { ...process.env, XRAY_LOCATION_ASSET: this.assetDirectory() },
     });
+    let errorText = "";
+    validation.stderr.on("data", (chunk: Buffer) => { errorText = `${errorText}${chunk}`.slice(-4_096); });
+    await Promise.all([
+      writeConfigInput(validation, configInput),
+      new Promise<void>((resolve, reject) => {
+        validation.once("error", reject);
+        validation.once("exit", (code) => code === 0
+          ? resolve()
+          : reject(new Error(errorText.trim() || "Xray отклонил конфигурацию")));
+      }),
+    ]);
   }
 
-  private executablePath(): string {
+  executablePath(): string {
     return join(this.assetDirectory(), "xray.exe");
   }
 
@@ -157,4 +150,46 @@ export class XrayManager extends EventEmitter<XrayEvents> {
       this.statsQueryRunning = false;
     }
   }
+}
+
+export function xrayConfigArguments(validateOnly: boolean): string[] {
+  return ["run", ...(validateOnly ? ["-test"] : []), "-format", "json", "-config", "stdin:"];
+}
+
+async function writeConfigInput(child: ChildProcess, configInput: Buffer): Promise<void> {
+  const stdin = child.stdin;
+  if (!stdin) throw new Error("Xray не открыл канал конфигурации");
+  await new Promise<void>((resolve, reject) => {
+    let settled = false;
+    const finish = (error?: Error): void => {
+      if (settled) return;
+      settled = true;
+      stdin.off("error", onError);
+      if (error) reject(error);
+      else resolve();
+    };
+    const onError = (error: Error): void => finish(error);
+    stdin.once("error", onError);
+    stdin.end(configInput, () => finish());
+  });
+}
+
+async function waitForStartup(child: ChildProcess): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    let settled = false;
+    const finish = (error?: Error): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      child.off("exit", onExit);
+      child.off("error", onError);
+      if (error) reject(error);
+      else resolve();
+    };
+    const onExit = (code: number | null): void => finish(new Error(`Xray завершился при запуске (код ${code ?? "unknown"})`));
+    const onError = (error: Error): void => finish(error);
+    const timer = setTimeout(() => finish(), 1_500);
+    child.once("exit", onExit);
+    child.once("error", onError);
+  });
 }
