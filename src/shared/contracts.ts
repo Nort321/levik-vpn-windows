@@ -65,6 +65,7 @@ export interface AppSnapshot {
   tab: AppTab;
   status: ConnectionStatus;
   statusDetail: string | null;
+  sessionAvailable: boolean;
   account: AccountSummary | null;
   servers: TunnelServer[];
   serverLatencies: Record<string, number | null>;

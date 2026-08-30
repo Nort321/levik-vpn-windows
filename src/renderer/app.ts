@@ -1,4 +1,5 @@
 import type { AppSettings, AppSnapshot, AppTab, TunnelServer, WindowsProcess } from "../shared/contracts";
+import { shouldShowLogin } from "../shared/sessionState";
 
 let state: AppSnapshot | null = null;
 let activeTab: AppTab = "home";
@@ -25,7 +26,7 @@ void window.levik.snapshot().then((snapshot) => {
 
 window.levik.onSnapshot((snapshot) => {
   state = snapshot;
-  if (snapshot.account) clearLoginWaiting();
+  if (snapshot.sessionAvailable) clearLoginWaiting();
   const nextSnapshotKey = snapshotRenderKey(snapshot);
   if (renderedSnapshotKey === nextSnapshotKey) {
     updateLiveData();
@@ -51,7 +52,7 @@ function render(preserveScroll = true): void {
   }
   document.documentElement.dataset.theme = state.settings.theme;
   renderedSnapshotKey = snapshotRenderKey(state);
-  if (!state.account) {
+  if (shouldShowLogin(state)) {
     renderLogin();
     return;
   }
@@ -177,14 +178,19 @@ function renderStats(): string {
 }
 
 function renderProfile(): string {
-  if (!state?.account) return "";
+  if (!state) return "";
+  const accountSection = state.account
+    ? `<section class="section card">
+        <div class="account-row"><div class="avatar">${icon("profile")}</div><div><div class="account-name">${escapeHtml(state.account.userLabel)}</div><div class="account-state">Аккаунт синхронизирован</div></div></div>
+        <div class="subscription-list">${state.account.subscriptions.map(subscriptionCard).join("") || `<div class="empty">Нет активных подписок</div>`}</div>
+      </section>`
+    : `<section class="section card">
+        <div class="account-row"><div class="avatar">${icon("profile")}</div><div><div class="account-name">Levik Account</div><div class="card-caption">Локальная сессия доступна. Данные аккаунта синхронизируются после восстановления сети.</div></div></div>
+      </section>`;
   return `
     <header class="page-header"><div><h1>Профиль и настройки</h1><div class="subtitle">Levik Account и параметры Windows-клиента</div></div><div class="toolbar"><button class="button" id="manage-subscription-button">${icon("renew")} Управление подпиской</button><button class="button" id="support-button">${icon("support")} Поддержка</button><button class="button danger" id="logout-button">${icon("logout")} Выйти</button></div></header>
     <div class="profile-grid">
-      <section class="section card">
-        <div class="account-row"><div class="avatar">${icon("profile")}</div><div><div class="account-name">${escapeHtml(state.account.userLabel)}</div><div class="account-state">Аккаунт синхронизирован</div></div></div>
-        <div class="subscription-list">${state.account.subscriptions.map(subscriptionCard).join("") || `<div class="empty">Нет активных подписок</div>`}</div>
-      </section>
+      ${accountSection}
       <section class="section card"><h2 class="card-title">Настройки</h2><div class="settings-list">
         ${selectSetting("Маршрутизация", "Как направлять системный трафик", "routing-mode", state.settings.routingMode, [["global","Весь трафик"],["bypassRu","Обход ресурсов РФ"],["blockedOnly","Только заблокированное"]])}
         ${switchSetting("Автовыбор сервера", "Выбирать сервер с минимальной задержкой", "automaticServer", state.settings.automaticServer)}
@@ -390,7 +396,7 @@ async function beginLogin(): Promise<void> {
     render();
     if (authorizationRetryTimer) clearTimeout(authorizationRetryTimer);
     authorizationRetryTimer = setTimeout(() => {
-      if (!state?.account && loginWaiting && authorizationUri) {
+      if (state && shouldShowLogin(state) && loginWaiting && authorizationUri) {
         void run(() => window.levik.openExternal(authorizationUri as string));
       }
     }, 7_500);

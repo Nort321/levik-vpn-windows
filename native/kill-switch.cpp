@@ -97,23 +97,21 @@ DWORD IgnoreMissingProvider(DWORD result) {
   return result == FWP_E_PROVIDER_NOT_FOUND ? ERROR_SUCCESS : result;
 }
 
-DWORD EnsureProvider(HANDLE engine, const GUID& providerKey, bool persistent) {
+DWORD EnsureProvider(HANDLE engine, const GUID& providerKey) {
   FWPM_PROVIDER0 provider{};
   provider.providerKey = providerKey;
   provider.displayData.name = const_cast<wchar_t*>(L"Levik VPN");
   provider.displayData.description = const_cast<wchar_t*>(L"Levik VPN network protection");
-  provider.flags = persistent ? FWPM_PROVIDER_FLAG_PERSISTENT : 0;
   const DWORD result = FwpmProviderAdd0(engine, &provider, nullptr);
   return result == FWP_E_ALREADY_EXISTS ? ERROR_SUCCESS : result;
 }
 
-DWORD EnsureSubLayer(HANDLE engine, const GUID& providerKey, const GUID& subLayerKey, bool persistent) {
+DWORD EnsureSubLayer(HANDLE engine, const GUID& providerKey, const GUID& subLayerKey) {
   FWPM_SUBLAYER0 subLayer{};
   subLayer.subLayerKey = subLayerKey;
   subLayer.displayData.name = const_cast<wchar_t*>(L"Levik VPN Kill Switch");
   subLayer.displayData.description = const_cast<wchar_t*>(L"Fail-closed outbound network policy");
   subLayer.providerKey = const_cast<GUID*>(&providerKey);
-  subLayer.flags = persistent ? FWPM_SUBLAYER_FLAG_PERSISTENT : 0;
   subLayer.weight = 0xffff;
   const DWORD result = FwpmSubLayerAdd0(engine, &subLayer, nullptr);
   return result == FWP_E_ALREADY_EXISTS ? ERROR_SUCCESS : result;
@@ -128,15 +126,13 @@ DWORD AddFilter(
     FWP_ACTION_TYPE action,
     UINT64 weight,
     FWPM_FILTER_CONDITION0* conditions,
-    UINT32 conditionCount,
-    bool persistent) {
+    UINT32 conditionCount) {
   FWPM_FILTER0 filter{};
   filter.filterKey = filterKey;
   filter.displayData.name = const_cast<wchar_t*>(L"Levik VPN Kill Switch");
   filter.providerKey = const_cast<GUID*>(&providerKey);
   filter.layerKey = layerKey;
   filter.subLayerKey = subLayerKey;
-  filter.flags = persistent ? FWPM_FILTER_FLAG_PERSISTENT : 0;
   filter.weight.type = FWP_UINT64;
   filter.weight.uint64 = &weight;
   filter.numFilterConditions = conditionCount;
@@ -156,7 +152,7 @@ DWORD AddApplicationPermit(HANDLE engine, const std::wstring& path, const GUID& 
   condition.conditionValue.type = FWP_BYTE_BLOB_TYPE;
   condition.conditionValue.byteBlob = appId;
   result = AddFilter(engine, kProviderKey, kSubLayerKey, filterKey, layerKey, FWP_ACTION_PERMIT,
-                     kPermitWeight, &condition, 1, true);
+                     kPermitWeight, &condition, 1);
   FwpmFreeMemory0(reinterpret_cast<void**>(&appId));
   return result;
 }
@@ -168,13 +164,13 @@ DWORD AddInterfacePermit(HANDLE engine, UINT64 interfaceLuid, const GUID& layerK
   condition.conditionValue.type = FWP_UINT64;
   condition.conditionValue.uint64 = &interfaceLuid;
   return AddFilter(engine, kProviderKey, kSubLayerKey, filterKey, layerKey, FWP_ACTION_PERMIT,
-                   kPermitWeight, &condition, 1, true);
+                   kPermitWeight, &condition, 1);
 }
 
 DWORD AddBlock(HANDLE engine, const GUID& providerKey, const GUID& subLayerKey,
-               const GUID& layerKey, const GUID& filterKey, bool persistent) {
+               const GUID& layerKey, const GUID& filterKey) {
   return AddFilter(engine, providerKey, subLayerKey, filterKey, layerKey, FWP_ACTION_BLOCK,
-                   kBlockWeight, nullptr, 0, persistent);
+                   kBlockWeight, nullptr, 0);
 }
 
 DWORD BeginTransaction(HANDLE engine) {
@@ -195,22 +191,26 @@ DWORD Enable(const std::wstring& appPath, const std::wstring& xrayPath) {
   if (result != ERROR_SUCCESS) return result;
   if ((result = BeginTransaction(engine.get())) != ERROR_SUCCESS) return result;
 
-  if ((result = EnsureProvider(engine.get(), kProviderKey, true)) == ERROR_SUCCESS)
-    result = EnsureSubLayer(engine.get(), kProviderKey, kSubLayerKey, true);
-
-  const std::array<const GUID*, 6> replaced = {
-      &kAppV4Key, &kAppV6Key, &kXrayV4Key, &kXrayV6Key, &kBlockV4Key, &kBlockV6Key};
+  // Replace older persistent objects atomically. Runtime objects remain active
+  // after an app crash, but Windows removes them when BFE stops during reboot.
+  const std::array<const GUID*, 8> replaced = {
+      &kAppV4Key, &kAppV6Key, &kXrayV4Key, &kXrayV6Key,
+      &kTunnelV4Key, &kTunnelV6Key, &kBlockV4Key, &kBlockV6Key};
   for (const GUID* key : replaced) {
     if (result != ERROR_SUCCESS) break;
     result = IgnoreMissingFilter(FwpmFilterDeleteByKey0(engine.get(), key));
   }
+  if (result == ERROR_SUCCESS) result = IgnoreMissingSubLayer(FwpmSubLayerDeleteByKey0(engine.get(), &kSubLayerKey));
+  if (result == ERROR_SUCCESS) result = IgnoreMissingProvider(FwpmProviderDeleteByKey0(engine.get(), &kProviderKey));
+  if (result == ERROR_SUCCESS) result = EnsureProvider(engine.get(), kProviderKey);
+  if (result == ERROR_SUCCESS) result = EnsureSubLayer(engine.get(), kProviderKey, kSubLayerKey);
 
   if (result == ERROR_SUCCESS) result = AddApplicationPermit(engine.get(), appPath, FWPM_LAYER_ALE_AUTH_CONNECT_V4, kAppV4Key);
   if (result == ERROR_SUCCESS) result = AddApplicationPermit(engine.get(), appPath, FWPM_LAYER_ALE_AUTH_CONNECT_V6, kAppV6Key);
   if (result == ERROR_SUCCESS) result = AddApplicationPermit(engine.get(), xrayPath, FWPM_LAYER_ALE_AUTH_CONNECT_V4, kXrayV4Key);
   if (result == ERROR_SUCCESS) result = AddApplicationPermit(engine.get(), xrayPath, FWPM_LAYER_ALE_AUTH_CONNECT_V6, kXrayV6Key);
-  if (result == ERROR_SUCCESS) result = AddBlock(engine.get(), kProviderKey, kSubLayerKey, FWPM_LAYER_ALE_AUTH_CONNECT_V4, kBlockV4Key, true);
-  if (result == ERROR_SUCCESS) result = AddBlock(engine.get(), kProviderKey, kSubLayerKey, FWPM_LAYER_ALE_AUTH_CONNECT_V6, kBlockV6Key, true);
+  if (result == ERROR_SUCCESS) result = AddBlock(engine.get(), kProviderKey, kSubLayerKey, FWPM_LAYER_ALE_AUTH_CONNECT_V4, kBlockV4Key);
+  if (result == ERROR_SUCCESS) result = AddBlock(engine.get(), kProviderKey, kSubLayerKey, FWPM_LAYER_ALE_AUTH_CONNECT_V6, kBlockV6Key);
   return CommitTransaction(engine.get(), result);
 }
 
@@ -256,6 +256,13 @@ DWORD Disable() {
   EngineHandle engine;
   DWORD result = OpenEngine(engine);
   if (result != ERROR_SUCCESS) return result;
+
+  FWPM_PROVIDER0* provider = nullptr;
+  result = FwpmProviderGetByKey0(engine.get(), &kProviderKey, &provider);
+  if (result == FWP_E_PROVIDER_NOT_FOUND) return ERROR_SUCCESS;
+  if (result != ERROR_SUCCESS) return result;
+  if (provider != nullptr) FwpmFreeMemory0(reinterpret_cast<void**>(&provider));
+
   if ((result = BeginTransaction(engine.get())) != ERROR_SUCCESS) return result;
 
   const std::array<const GUID*, 8> filters = {
@@ -270,15 +277,32 @@ DWORD Disable() {
   return CommitTransaction(engine.get(), result);
 }
 
+DWORD FilterPresence(HANDLE engine, const GUID& filterKey, bool& present) {
+  FWPM_FILTER0* filter = nullptr;
+  const DWORD result = FwpmFilterGetByKey0(engine, &filterKey, &filter);
+  if (filter != nullptr) FwpmFreeMemory0(reinterpret_cast<void**>(&filter));
+  if (result == ERROR_SUCCESS) {
+    present = true;
+    return ERROR_SUCCESS;
+  }
+  if (result == FWP_E_FILTER_NOT_FOUND) {
+    present = false;
+    return ERROR_SUCCESS;
+  }
+  return result;
+}
+
 DWORD Status() {
   EngineHandle engine;
   DWORD result = OpenEngine(engine);
   if (result != ERROR_SUCCESS) return result;
-  FWPM_FILTER0* filter = nullptr;
-  result = FwpmFilterGetByKey0(engine.get(), &kBlockV4Key, &filter);
-  if (result == FWP_E_FILTER_NOT_FOUND) return 2;
-  if (filter != nullptr) FwpmFreeMemory0(reinterpret_cast<void**>(&filter));
-  return result;
+  bool ipv4Block = false;
+  bool ipv6Block = false;
+  if ((result = FilterPresence(engine.get(), kBlockV4Key, ipv4Block)) != ERROR_SUCCESS) return result;
+  if ((result = FilterPresence(engine.get(), kBlockV6Key, ipv6Block)) != ERROR_SUCCESS) return result;
+  if (ipv4Block && ipv6Block) return ERROR_SUCCESS;
+  if (!ipv4Block && !ipv6Block) return 2;
+  return 3;
 }
 
 bool EqualPath(const std::wstring& left, const std::wstring& right) {
@@ -420,11 +444,30 @@ DWORD SelfTest() {
   DWORD result = OpenEngine(engine);
   if (result != ERROR_SUCCESS) return result;
   if ((result = BeginTransaction(engine.get())) != ERROR_SUCCESS) return result;
-  if ((result = EnsureProvider(engine.get(), kTestProviderKey, false)) == ERROR_SUCCESS)
-    result = EnsureSubLayer(engine.get(), kTestProviderKey, kTestSubLayerKey, false);
+  if ((result = EnsureProvider(engine.get(), kTestProviderKey)) == ERROR_SUCCESS)
+    result = EnsureSubLayer(engine.get(), kTestProviderKey, kTestSubLayerKey);
   if (result == ERROR_SUCCESS)
     result = AddBlock(engine.get(), kTestProviderKey, kTestSubLayerKey,
-                      FWPM_LAYER_ALE_AUTH_CONNECT_V4, kTestFilterKey, false);
+                      FWPM_LAYER_ALE_AUTH_CONNECT_V4, kTestFilterKey);
+
+  FWPM_PROVIDER0* provider = nullptr;
+  if (result == ERROR_SUCCESS) result = FwpmProviderGetByKey0(engine.get(), &kTestProviderKey, &provider);
+  if (result == ERROR_SUCCESS && (provider == nullptr || (provider->flags & FWPM_PROVIDER_FLAG_PERSISTENT) != 0))
+    result = ERROR_INVALID_DATA;
+  if (provider != nullptr) FwpmFreeMemory0(reinterpret_cast<void**>(&provider));
+
+  FWPM_SUBLAYER0* subLayer = nullptr;
+  if (result == ERROR_SUCCESS) result = FwpmSubLayerGetByKey0(engine.get(), &kTestSubLayerKey, &subLayer);
+  if (result == ERROR_SUCCESS && (subLayer == nullptr || (subLayer->flags & FWPM_SUBLAYER_FLAG_PERSISTENT) != 0))
+    result = ERROR_INVALID_DATA;
+  if (subLayer != nullptr) FwpmFreeMemory0(reinterpret_cast<void**>(&subLayer));
+
+  FWPM_FILTER0* filter = nullptr;
+  if (result == ERROR_SUCCESS) result = FwpmFilterGetByKey0(engine.get(), &kTestFilterKey, &filter);
+  if (result == ERROR_SUCCESS && (filter == nullptr || (filter->flags & FWPM_FILTER_FLAG_PERSISTENT) != 0))
+    result = ERROR_INVALID_DATA;
+  if (filter != nullptr) FwpmFreeMemory0(reinterpret_cast<void**>(&filter));
+
   const DWORD abortResult = FwpmTransactionAbort0(engine.get());
   return result == ERROR_SUCCESS ? abortResult : result;
 }
@@ -446,7 +489,7 @@ int wmain(int argc, wchar_t* argv[]) {
   else if (command == L"cleanup-legacy" && argc == 3) result = CleanupLegacyConfig(argv[2]);
   else if (command == L"self-test" && argc == 2) result = SelfTest();
 
-  if (result != ERROR_SUCCESS && result != 2) {
+  if (result != ERROR_SUCCESS && result != 2 && result != 3) {
     std::wcerr << ErrorMessage(result) << L" (" << result << L")\n";
   }
   return static_cast<int>(result);

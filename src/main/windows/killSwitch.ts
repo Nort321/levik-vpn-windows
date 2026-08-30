@@ -37,9 +37,22 @@ export class WindowsKillSwitch {
     if (this.platform !== "win32") return false;
     const status = await this.run(["status"]);
     if (status.exitCode === 2) return false;
-    this.assertSuccessful(status, "проверить состояние");
+    if (status.exitCode !== 3) this.assertSuccessful(status, "проверить состояние");
     await this.execute("enable", this.appExecutablePath, this.xrayExecutablePath());
     this.active = true;
+    return true;
+  }
+
+  async ensureActive(shouldRestore: () => boolean): Promise<boolean> {
+    if (this.platform !== "win32" || !this.active) return false;
+    const status = await this.run(["status"]);
+    if (status.exitCode === 0) return false;
+    if (status.exitCode !== 2 && status.exitCode !== 3) {
+      this.assertSuccessful(status, "проверить состояние");
+    }
+    if (!shouldRestore()) return false;
+    this.active = false;
+    await this.enable();
     return true;
   }
 

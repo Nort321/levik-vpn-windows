@@ -13,7 +13,7 @@ function recordingRunner(
 }
 
 describe("Windows Kill Switch lifecycle", () => {
-  it("installs the persistent boundary before allowing the tunnel", async () => {
+  it("installs the boot-scoped boundary before allowing the tunnel", async () => {
     const commands: string[][] = [];
     const killSwitch = new WindowsKillSwitch(() => "C:\\Levik\\xray.exe", {
       platform: "win32",
@@ -49,7 +49,7 @@ describe("Windows Kill Switch lifecycle", () => {
     ]]);
   });
 
-  it("restores a boundary left by an abnormal application exit", async () => {
+  it("restores a same-boot boundary left by an abnormal application exit", async () => {
     const commands: string[][] = [];
     const killSwitch = new WindowsKillSwitch(() => "C:\\Levik\\xray.exe", {
       platform: "win32",
@@ -66,7 +66,7 @@ describe("Windows Kill Switch lifecycle", () => {
     expect(killSwitch.isActive()).toBe(true);
   });
 
-  it("does not activate when no persistent boundary exists", async () => {
+  it("does not activate when no boot-scoped boundary exists", async () => {
     const commands: string[][] = [];
     const killSwitch = new WindowsKillSwitch(() => "C:\\Levik\\xray.exe", {
       platform: "win32",
@@ -76,5 +76,41 @@ describe("Windows Kill Switch lifecycle", () => {
 
     await expect(killSwitch.recover()).resolves.toBe(false);
     expect(commands).toEqual([["status"]]);
+  });
+
+  it("repairs a removed boundary while protection is still required", async () => {
+    const commands: string[][] = [];
+    const killSwitch = new WindowsKillSwitch(() => "C:\\Levik\\xray.exe", {
+      platform: "win32",
+      appExecutablePath: "C:\\Levik\\Levik VPN.exe",
+      helperExecutablePath: "C:\\Levik\\levik-kill-switch.exe",
+      run: recordingRunner(commands, [0, 2, 0]),
+    });
+
+    await killSwitch.enable();
+    await expect(killSwitch.ensureActive(() => true)).resolves.toBe(true);
+
+    expect(commands).toEqual([
+      ["enable", "C:\\Levik\\Levik VPN.exe", "C:\\Levik\\xray.exe"],
+      ["status"],
+      ["enable", "C:\\Levik\\Levik VPN.exe", "C:\\Levik\\xray.exe"],
+    ]);
+  });
+
+  it("does not race an explicit disconnect when the boundary disappears", async () => {
+    const commands: string[][] = [];
+    const killSwitch = new WindowsKillSwitch(() => "C:\\Levik\\xray.exe", {
+      platform: "win32",
+      helperExecutablePath: "C:\\Levik\\levik-kill-switch.exe",
+      run: recordingRunner(commands, [0, 2]),
+    });
+
+    await killSwitch.enable();
+    await expect(killSwitch.ensureActive(() => false)).resolves.toBe(false);
+
+    expect(commands).toEqual([
+      ["enable", expect.any(String), expect.any(String)],
+      ["status"],
+    ]);
   });
 });

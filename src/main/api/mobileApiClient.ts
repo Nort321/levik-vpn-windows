@@ -7,7 +7,11 @@ import type {
 import { RequestSigner } from "../security/requestSigner";
 
 export class MobileApiError extends Error {
-  constructor(message: string, readonly status: number | null = null) {
+  constructor(
+    message: string,
+    readonly status: number | null = null,
+    readonly authenticationRejected = false,
+  ) {
     super(message);
   }
 }
@@ -101,10 +105,14 @@ export class MobileApiClient {
         throw new MobileApiError("API вернул повреждённый JSON", response.status);
       }
       if (!response.ok) {
-        const code = isRecord(decoded) && isRecord(decoded.error) && typeof decoded.error.code === "string"
+        const code = isRecord(decoded) && decoded.ok === false && isRecord(decoded.error) && typeof decoded.error.code === "string"
           ? decoded.error.code
           : `http_${response.status}`;
-        throw new MobileApiError(apiErrorMessage(code), response.status);
+        throw new MobileApiError(
+          apiErrorMessage(code),
+          response.status,
+          code === "unauthorized",
+        );
       }
       if (!isRecord(decoded) || decoded.ok !== true) throw new MobileApiError("API отклонил ответ", response.status);
       return decoded as Response;
@@ -117,6 +125,10 @@ export class MobileApiClient {
       body.fill(0);
     }
   }
+}
+
+export function isAuthenticationRejected(error: unknown): boolean {
+  return error instanceof MobileApiError && error.authenticationRejected;
 }
 
 function apiErrorMessage(code: string): string {

@@ -20,7 +20,7 @@ This repository is independent from the Android source tree. It consumes the sam
 3. The client requests an RSA-OAEP/AES-GCM encrypted tunnel profile.
 4. The profile is decrypted locally, validated, and converted into selectable Xray outbounds.
 5. Xray creates a Windows TUN adapter through Wintun and applies two half-default routes per IP family. Their longer prefixes take precedence over physical-adapter default routes, so TCP and UDP traffic from games and other non-proxy-aware applications enters the tunnel.
-6. When Kill Switch is enabled, persistent Windows Filtering Platform rules are installed before Xray starts and remain active across process failure and bounded exponential reconnection.
+6. When Kill Switch is enabled, boot-scoped Windows Filtering Platform rules are installed before Xray starts and remain active across process failure and bounded exponential reconnection. Windows removes them during shutdown or reboot even if the application could not clean up.
 7. Intentional disconnect or application shutdown removes the WFP rules and stops the TUN process.
 8. Resume and unlock events probe the local Xray API and recreate an unresponsive tunnel.
 
@@ -30,6 +30,7 @@ This repository is independent from the Android source tree. It consumes the sam
 - Process split rules store exact Windows executable names including `.exe`; arbitrary executables can be selected through the native file dialog.
 - SMHNR protection is applied before Xray starts and the previous registry policy is restored when the tunnel stops cleanly.
 - Kill Switch permits recovery traffic only from the application and Xray until the protected TUN interface is available; existing Windows Firewall policy remains in effect.
+- An encrypted local token keeps the application in offline session mode during temporary API or network outages; only a definitive unauthorized API response returns the user to login.
 - The tray icon, tooltip, and actions follow the live connection state. Window-close behavior is user-configurable.
 - `electron-updater` consumes `latest.yml` and the matching installer from the latest public GitHub Release.
 

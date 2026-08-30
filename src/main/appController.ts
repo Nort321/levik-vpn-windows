@@ -8,7 +8,7 @@ import type {
   LoginChallenge,
   TunnelServer,
 } from "../shared/contracts";
-import { MobileApiClient } from "./api/mobileApiClient";
+import { isAuthenticationRejected, MobileApiClient } from "./api/mobileApiClient";
 import type { AuthChallengeResponse, MobileAccountResponse } from "./api/models";
 import { DeviceIdentity } from "./security/deviceIdentity";
 import type { SerializedIdentity } from "./security/deviceIdentity";
@@ -75,11 +75,14 @@ export class AppController extends EventEmitter<AppControllerEvents> {
   private lastRawUpload = 0;
   private pingPromise: Promise<void> | null = null;
   private resumePromise: Promise<void> | null = null;
+  private killSwitchHealthTimer: ReturnType<typeof setInterval> | null = null;
+  private killSwitchHealthCheckRunning = false;
   private state: AppSnapshot = {
     appVersion: app.getVersion(),
     tab: "home",
     status: "disconnected",
     statusDetail: null,
+    sessionAvailable: false,
     account: null,
     servers: [],
     serverLatencies: {},
@@ -117,6 +120,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     this.xray.on("exit", (code, expected) => this.handleXrayExit(code, expected));
     this.xray.on("stats", (downloadBytes, uploadBytes) => this.handleTrafficStats(downloadBytes, uploadBytes));
     this.accessToken = await this.loadString("access_token");
+    this.state.sessionAvailable = this.accessToken !== null;
     this.state.settings = await this.loadSettings();
     const recoveredKillSwitch = await this.killSwitch.recover();
     if (recoveredKillSwitch && !this.state.settings.killSwitch) {
@@ -124,6 +128,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     } else if (recoveredKillSwitch) {
       this.addLog("Kill Switch: восстановлена защита после предыдущего завершения приложения");
     }
+    this.startKillSwitchHealthMonitor();
     this.profile = await this.loadProfile();
     if (this.profile) {
       this.state.servers = this.profile.servers;
@@ -205,28 +210,13 @@ export class AppController extends EventEmitter<AppControllerEvents> {
         this.addLog(`Выход на сервере: ${messageOf(error)}`);
       }
     }
-    this.accessToken = null;
-    this.profile = null;
-    await Promise.all([
-      this.secureStore.remove("access_token"),
-      this.secureStore.remove("tunnel_profile"),
-      this.secureStore.remove("selected_server"),
-    ]);
-    this.patch({
-      account: null,
-      servers: [],
-      serverLatencies: {},
-      selectedServerId: null,
-      selectedSubscriptionId: null,
-      statusDetail: null,
-    });
+    await this.clearLocalSession(null);
   }
 
   async refreshAccount(): Promise<void> {
-    const token = this.requireToken();
     this.patch({ busy: true });
     try {
-      const response = await this.api.account(token);
+      const response = await this.withSession((token) => this.api.account(token));
       const account = mapAccount(response);
       const preferred = this.state.selectedSubscriptionId;
       const subscriptionId = account.subscriptions.some((item) => item.uuid === preferred)
@@ -236,13 +226,6 @@ export class AppController extends EventEmitter<AppControllerEvents> {
           ?? null;
       this.patch({ account, selectedSubscriptionId: subscriptionId });
       if (subscriptionId) await this.loadTunnelProfile(subscriptionId);
-    } catch (error) {
-      if (isUnauthorized(error)) {
-        this.accessToken = null;
-        await this.secureStore.remove("access_token");
-        this.patch({ account: null, statusDetail: "Сессия истекла. Войдите снова." });
-      }
-      throw error;
     } finally {
       this.patch({ busy: false });
     }
@@ -364,6 +347,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
 
   async shutdown(): Promise<void> {
     this.loginGeneration += 1;
+    this.stopKillSwitchHealthMonitor();
     try {
       await this.xray.stop();
     } finally {
@@ -398,14 +382,14 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     if (!subscription || !subscription.devices.items.some((item) => item.id === deviceId)) throw new Error("Устройство не найдено");
     if (!subscription.actions.revokeDevice) throw new Error("Отзыв устройства недоступен для этой подписки");
     if (deviceId === this.identity.deviceId()) throw new Error("Нельзя отвязать текущее устройство");
-    await this.api.revokeDevice(this.requireToken(), subscriptionId, deviceId);
+    await this.withSession((token) => this.api.revokeDevice(token, subscriptionId, deviceId));
     await this.refreshAccount();
   }
 
   async setSubscriptionShield(subscriptionId: string, enabled: boolean): Promise<void> {
     const subscription = this.state.account?.subscriptions.find((item) => item.uuid === subscriptionId);
     if (!subscription?.shield.supported) throw new Error("Levik Shield недоступен для этой подписки");
-    await this.api.setSubscriptionShield(this.requireToken(), subscriptionId, enabled);
+    await this.withSession((token) => this.api.setSubscriptionShield(token, subscriptionId, enabled));
     await this.refreshAccount();
   }
 
@@ -465,7 +449,13 @@ export class AppController extends EventEmitter<AppControllerEvents> {
         if (status.accessToken.length < 32 || status.accessToken.length > 4_096) throw new Error("Некорректная сессия");
         this.accessToken = status.accessToken;
         await this.secureStore.put("access_token", Buffer.from(status.accessToken));
-        await this.refreshAccount();
+        this.patch({ sessionAvailable: true });
+        try {
+          await this.refreshAccount();
+        } catch (error) {
+          if (!this.accessToken) throw error;
+          this.addLog(`Синхронизация аккаунта: ${messageOf(error)}`);
+        }
         this.patch({ statusDetail: "Вход выполнен" });
         return;
       } catch (error) {
@@ -476,7 +466,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
   }
 
   private async loadTunnelProfile(subscriptionId: string): Promise<void> {
-    const response = await this.api.tunnelProfile(this.requireToken(), subscriptionId);
+    const response = await this.withSession((token) => this.api.tunnelProfile(token, subscriptionId));
     const plaintext = decryptTunnelProfile(this.identity, response.profile);
     try {
       const profile = prepareTunnelProfile(plaintext, subscriptionId);
@@ -552,6 +542,26 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     }
   }
 
+  private async clearLocalSession(statusDetail: string | null): Promise<void> {
+    this.accessToken = null;
+    this.profile = null;
+    this.lastConfig = null;
+    await Promise.all([
+      this.secureStore.remove("access_token"),
+      this.secureStore.remove("tunnel_profile"),
+      this.secureStore.remove("selected_server"),
+    ]);
+    this.patch({
+      sessionAvailable: false,
+      account: null,
+      servers: [],
+      serverLatencies: {},
+      selectedServerId: null,
+      selectedSubscriptionId: null,
+      statusDetail,
+    });
+  }
+
   private handleXrayExit(code: number | null, expected: boolean): void {
     if (expected) return;
     this.patch({ status: "reconnecting", statusDetail: `Туннель остановлен (код ${code ?? "?"}). Восстановление…` });
@@ -608,6 +618,41 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     }
   }
 
+  private startKillSwitchHealthMonitor(): void {
+    if (this.killSwitchHealthTimer) return;
+    this.killSwitchHealthTimer = setInterval(() => void this.verifyKillSwitchBoundary(), 2_000);
+  }
+
+  private stopKillSwitchHealthMonitor(): void {
+    if (this.killSwitchHealthTimer) clearInterval(this.killSwitchHealthTimer);
+    this.killSwitchHealthTimer = null;
+  }
+
+  private async verifyKillSwitchBoundary(): Promise<void> {
+    if (this.killSwitchHealthCheckRunning || !this.killSwitchProtectionRequired() || !this.killSwitch.isActive()) return;
+    this.killSwitchHealthCheckRunning = true;
+    try {
+      const restored = await this.killSwitch.ensureActive(() => this.killSwitchProtectionRequired());
+      if (!restored) return;
+      if (!this.killSwitchProtectionRequired()) {
+        await this.killSwitch.disable();
+        return;
+      }
+      if (this.xray.isRunning()) await this.killSwitch.allowTunnel();
+      this.addLog("Kill Switch: системная защита восстановлена");
+    } catch (error) {
+      this.addLog(`Проверка Kill Switch: ${messageOf(error)}`);
+    } finally {
+      this.killSwitchHealthCheckRunning = false;
+    }
+  }
+
+  private killSwitchProtectionRequired(): boolean {
+    return this.killSwitchHealthTimer !== null
+      && this.state.settings.killSwitch
+      && ["connecting", "connected", "reconnecting", "error"].includes(this.state.status);
+  }
+
   private async stopTunnelForReplacement(): Promise<void> {
     this.patch({ status: "reconnecting", statusDetail: "Применение изменений соединения…" });
     await this.xray.stop();
@@ -644,6 +689,22 @@ export class AppController extends EventEmitter<AppControllerEvents> {
   private requireToken(): string {
     if (!this.accessToken) throw new Error("Войдите в Levik Account");
     return this.accessToken;
+  }
+
+  private async withSession<Result>(operation: (accessToken: string) => Promise<Result>): Promise<Result> {
+    try {
+      return await operation(this.requireToken());
+    } catch (error) {
+      if (isAuthenticationRejected(error)) {
+        try {
+          await this.disconnect();
+        } catch (cleanupError) {
+          this.addLog(`Завершение истёкшей сессии: ${messageOf(cleanupError)}`);
+        }
+        await this.clearLocalSession("Сессия истекла. Войдите снова.");
+      }
+      throw error;
+    }
   }
 
   private addLog(line: string): void {
@@ -737,10 +798,6 @@ function sameServers(left: TunnelServer[], right: TunnelServer[]): boolean {
 
 function validateAntiDpi(value: string, fallback: string): string {
   return /^[A-Za-z0-9,-]{1,32}$/.test(value) ? value : fallback;
-}
-
-function isUnauthorized(error: unknown): boolean {
-  return typeof error === "object" && error !== null && "status" in error && error.status === 401;
 }
 
 function messageOf(error: unknown): string {
