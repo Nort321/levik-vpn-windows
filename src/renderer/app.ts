@@ -133,7 +133,7 @@ function renderHome(): string {
       <section class="connection-card card">
         <div class="connection-label">Состояние соединения</div>
         <div class="connection-title ${connected ? "connected" : ""}">${statusTitle(state.status)}</div>
-        <button class="power-button ${connected ? "connected" : ""}" id="power-button" aria-label="${disconnectAction ? "Отключить VPN" : "Подключить VPN"}" ${transitional || state.busy ? "disabled" : ""}>${transitional ? `<span class="spinner"></span>` : icon("power")}</button>
+        <button class="power-button ${connected ? "connected" : ""} ${transitional ? "transitioning" : ""}" id="power-button" aria-label="${transitional ? statusTitle(state.status) : disconnectAction ? "Отключить VPN" : "Подключить VPN"}" aria-busy="${transitional}" ${transitional || state.busy ? "disabled" : ""}>${icon("power")}</button>
         <label class="home-server-picker">
           <span class="home-server-flag" aria-hidden="true">${countryFlagSvg(server?.countryCode ?? null)}</span>
           <select id="home-server-select" aria-label="Сервер быстрого подключения" ${state.servers.length && !state.busy ? "" : "disabled"}>

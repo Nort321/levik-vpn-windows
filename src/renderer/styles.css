@@ -141,19 +141,40 @@ h1 { font-size: 28px; letter-spacing: -0.035em; margin: 0; }
 .connection-title { font-size: 27px; font-weight: 730; margin-top: 10px; position: relative; }
 .connection-title.connected { color: var(--green); }
 .power-button {
+  display: grid; place-items: center; flex-shrink: 0; color: #f4f8ff;
   position: relative; width: 164px; height: 164px; border-radius: 50%; margin: 35px 0 28px;
   border: 1px solid rgba(104,159,255,.32); background: linear-gradient(145deg, #132a49, #0d1a2d);
   box-shadow: 0 0 0 15px rgba(54,135,255,.055), 0 20px 50px rgba(0,0,0,.36), inset 0 1px 1px rgba(255,255,255,.1);
   cursor: pointer; transition: transform 160ms ease, box-shadow 180ms ease;
 }
-.power-button:hover { transform: translateY(-2px); box-shadow: 0 0 0 18px rgba(54,135,255,.07), 0 23px 55px rgba(0,0,0,.4), inset 0 1px 1px rgba(255,255,255,.1); }
+.power-button:hover:not(:disabled) { transform: translateY(-2px); box-shadow: 0 0 0 18px rgba(54,135,255,.07), 0 23px 55px rgba(0,0,0,.4), inset 0 1px 1px rgba(255,255,255,.1); }
 .power-button.connected { background: linear-gradient(145deg, #2fc58d, #148c6b); border-color: rgba(103,244,190,.62); box-shadow: 0 0 0 15px rgba(69,214,160,.09), 0 0 55px rgba(69,214,160,.23), 0 20px 50px rgba(0,0,0,.3); }
 .power-button svg { width: 58px; height: 58px; }
 .power-button:disabled { cursor: progress; opacity: .7; }
+.power-button.transitioning { opacity: 1; }
+.power-button.transitioning::before {
+  content: ""; position: absolute; inset: -10px; border-radius: 50%; pointer-events: none;
+  border: 3px solid rgba(97,160,255,.18); border-top-color: #61a0ff; border-right-color: #61a0ff;
+  animation: spin 1.2s linear infinite;
+}
+.power-button.transitioning::after {
+  content: ""; position: absolute; inset: -10px; border-radius: 50%; pointer-events: none;
+  border: 1px solid #61a0ff; animation: connection-pulse 1.8s ease-out infinite;
+}
+@keyframes connection-pulse {
+  from { transform: scale(1); opacity: .55; }
+  to { transform: scale(1.18); opacity: 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .power-button.transitioning::before, .power-button.transitioning::after { animation: none; }
+  .power-button.transitioning::after { display: none; }
+  .power-button { transition: none; }
+}
 .home-server-picker { position: relative; width: min(310px, 100%); display: flex; align-items: center; gap: 10px; border: 1px solid var(--border); background: rgba(255,255,255,.035); border-radius: 999px; padding: 7px 12px; }
 .home-server-picker:focus-within { border-color: rgba(54,135,255,.58); box-shadow: 0 0 0 3px rgba(54,135,255,.1); }
 .home-server-picker select { min-width: 0; flex: 1; height: 27px; padding: 0 28px 0 0; border: 0; outline: 0; color: var(--text); background: transparent; cursor: pointer; font-size: 13px; }
 .home-server-picker select:disabled { cursor: not-allowed; opacity: .65; }
+select option { color: var(--text); background-color: var(--select-bg); }
 .home-server-flag { width: 27px; height: 18px; flex: none; display: block; overflow: hidden; border-radius: 4px; box-shadow: 0 0 0 1px rgba(151,177,214,.22); }
 .connection-detail { position: relative; color: var(--muted); min-height: 18px; margin-top: 16px; font-size: 13px; }
 
@@ -292,7 +313,7 @@ h1 { font-size: 28px; letter-spacing: -0.035em; margin: 0; }
 .empty { padding: 45px 24px; text-align: center; color: var(--muted); }
 .toast { position: fixed; right: 24px; bottom: 24px; max-width: 390px; padding: 13px 16px; border: 1px solid rgba(255,107,118,.25); border-radius: 12px; color: #ffd9dc; background: rgba(89,25,34,.94); box-shadow: var(--shadow); transform: translateY(22px); opacity: 0; pointer-events: none; transition: 180ms ease; }
 .toast.visible { transform: translateY(0); opacity: 1; }
-.spinner { width: 18px; height: 18px; border: 2px solid rgba(255,255,255,.2); border-top-color: white; border-radius: 50%; animation: spin .8s linear infinite; }
+.spinner { display: inline-block; flex-shrink: 0; width: 18px; height: 18px; border: 2px solid rgba(255,255,255,.2); border-top-color: white; border-radius: 50%; animation: spin .8s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 
 @media (max-width: 1180px) {

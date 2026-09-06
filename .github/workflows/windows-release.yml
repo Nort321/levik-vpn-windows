@@ -95,7 +95,7 @@ jobs:
           retention-days: 14
 
   release:
-    name: Publish GitHub Release
+    name: Prepare draft GitHub Release
     if: ${{ github.ref == 'refs/heads/main' && github.event_name != 'pull_request' }}
     needs: build
     runs-on: ubuntu-latest
@@ -120,11 +120,10 @@ jobs:
           tag="v${VERSION}"
           if gh release view "$tag" >/dev/null 2>&1; then
             gh release upload "$tag" release/* --clobber
-            gh release edit "$tag" --latest
           else
             gh release create "$tag" release/* \
               --target "$COMMIT_SHA" \
               --title "Levik VPN для Windows ${VERSION}" \
               --notes "Автоматическая сборка из main. Установщик: LevikVPN-Windows-x64.exe" \
-              --latest
+              --draft
           fi
