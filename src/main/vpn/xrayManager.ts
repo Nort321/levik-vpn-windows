@@ -5,6 +5,8 @@ import { join } from "node:path";
 import { EventEmitter } from "node:events";
 import { promisify } from "node:util";
 import { parseXrayStats, XRAY_STATS_ENDPOINT } from "./xrayStats";
+import { bindXrayOutboundInterface } from "./xrayConfig";
+import { findWindowsOutboundInterface } from "../windows/outboundInterface";
 
 const execFileAsync = promisify(execFile);
 
@@ -23,9 +25,11 @@ export class XrayManager extends EventEmitter<XrayEvents> {
 
   async start(config: Record<string, unknown>): Promise<void> {
     if (process.platform !== "win32") throw new Error("VPN-туннель запускается только в Windows-сборке");
-    const configInput = Buffer.from(JSON.stringify(config), "utf8");
+    await this.stop();
+    const interfaceName = await findWindowsOutboundInterface();
+    const configInput = Buffer.from(JSON.stringify(bindXrayOutboundInterface(config, interfaceName)), "utf8");
+    this.emit("log", `Xray: outbound interface [${interfaceName}] (TCP/UDP, direct)`);
     try {
-      await this.stop();
       await this.validate(configInput);
       this.stopping = false;
       const child = spawn(this.executablePath(), xrayConfigArguments(false), {

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { prepareTunnelProfile } from "../src/main/vpn/tunnelProfile";
-import { buildLockdownConfig, buildXrayConfig } from "../src/main/vpn/xrayConfig";
+import { bindXrayOutboundInterface, buildLockdownConfig, buildXrayConfig } from "../src/main/vpn/xrayConfig";
 import type { AppSettings } from "../src/shared/contracts";
 
 const settings: AppSettings = {
@@ -51,7 +51,7 @@ describe("Windows tunnel profile", () => {
     const routing = config.routing as { rules: Array<Record<string, unknown>> };
     expect(routing.rules).not.toContainEqual(expect.objectContaining({
       network: "tcp,udp",
-      outboundTag: "levik-direct",
+      outboundTag: "direct",
     }));
   });
 
@@ -99,9 +99,9 @@ describe("Windows tunnel profile", () => {
     const routing = config.routing as { rules: Array<Record<string, unknown>> };
     expect(config.api).toEqual(expect.objectContaining({ services: ["StatsService"] }));
     expect(outbounds.some((outbound) => outbound.tag === "levik-fragment")).toBe(true);
-    expect(routing.rules).toContainEqual(expect.objectContaining({ process: ["chrome.exe"], outboundTag: "levik-direct" }));
-    expect(routing.rules).toContainEqual(expect.objectContaining({ ip: ["geoip:ru"], outboundTag: "levik-direct" }));
-    expect(routing.rules).toContainEqual(expect.objectContaining({ domain: ["geosite:category-ru"], outboundTag: "levik-direct" }));
+    expect(routing.rules).toContainEqual(expect.objectContaining({ process: ["chrome.exe"], outboundTag: "direct" }));
+    expect(routing.rules).toContainEqual(expect.objectContaining({ ip: ["geoip:ru"], outboundTag: "direct" }));
+    expect(routing.rules).toContainEqual(expect.objectContaining({ domain: ["geosite:category-ru"], outboundTag: "direct" }));
     expect((inbounds[0]?.sniffing as { destOverride: string[] }).destOverride).not.toContain("fakedns");
   });
 
@@ -109,6 +109,45 @@ describe("Windows tunnel profile", () => {
     const config = buildLockdownConfig(settings);
     const routing = config.routing as { rules: Array<{ outboundTag: string }> };
     expect(routing.rules.at(-1)?.outboundTag).toBe("levik-block");
+  });
+
+  it.each(["global", "bypassRu", "blockedOnly"] as const)("prioritizes VALORANT TCP/UDP bypass in %s mode", (routingMode) => {
+    const profile = prepareTunnelProfile(Buffer.from(JSON.stringify({
+      version: 1, profileId: "voice", subscriptionId: "subscription-1", issuedAt: new Date().toISOString(),
+      source: { mediaType: "text/plain", content: "vless://11111111-1111-4111-8111-111111111111@example.com:443#Server" },
+      routing: { proxyDomains: ["domain:vivox.com"] },
+    })), "subscription-1");
+    const processes = ["VALORANT-Win64-Shipping.exe", "VALORANT.exe", "RiotClientServices.exe"];
+    const config = buildXrayConfig(profile, profile.servers[0]!, {
+      ...settings, routingMode, splitTunnelMode: "bypass", splitTunnelProcesses: processes,
+    });
+    const routing = config.routing as { rules: Array<Record<string, unknown>> };
+    expect(routing.rules[0]).toEqual({ type: "field", process: processes, network: "tcp,udp", outboundTag: "direct", ruleTag: "process-bypass" });
+    expect(routing.rules.findIndex((rule) => rule.outboundTag === profile.servers[0]!.tag)).toBeGreaterThan(0);
+    expect(config.log).toEqual({ loglevel: "info" });
+
+    for (const splitTunnelMode of ["off", "only", "bypass"] as const) {
+      const inactive = buildXrayConfig(profile, profile.servers[0]!, { ...settings, splitTunnelMode, splitTunnelProcesses: [] });
+      expect(inactive.log).toEqual({ loglevel: "warning" });
+      expect((inactive.routing as typeof routing).rules.some((rule) => rule.ruleTag === "process-bypass")).toBe(false);
+    }
+    const only = buildXrayConfig(profile, profile.servers[0]!, { ...settings, splitTunnelMode: "only", splitTunnelProcesses: processes });
+    expect((only.routing as typeof routing).rules).toContainEqual({ type: "field", process: processes, network: "tcp,udp", outboundTag: profile.servers[0]!.tag });
+  });
+
+  it.each(["Ethernet", "Wi-Fi"])("binds direct and automatic outbound sockets to %s without pinning an IP", (name) => {
+    const config = buildLockdownConfig(settings);
+    const original = structuredClone(config);
+    const bound = bindXrayOutboundInterface(config, name);
+    const outbounds = bound.outbounds as Array<Record<string, unknown>>;
+    const inbounds = bound.inbounds as Array<{ settings: Record<string, unknown> }>;
+    expect(inbounds[0]?.settings.autoOutboundsInterface).toBe(name);
+    expect(outbounds.find((outbound) => outbound.tag === "direct")).toEqual({
+      tag: "direct", protocol: "freedom", settings: { domainStrategy: "UseIP" },
+      streamSettings: { sockopt: { interface: name } },
+    });
+    expect(outbounds.find((outbound) => outbound.tag === "levik-block")).toEqual({ tag: "levik-block", protocol: "blackhole", settings: {} });
+    expect(config).toEqual(original);
   });
 
   it("uses the expanded blocked-only domain set", () => {

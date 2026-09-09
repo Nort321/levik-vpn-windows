@@ -34,29 +34,32 @@ export function buildXrayConfig(
   const directDomains = [...profile.directDomains];
   const proxyDomains = [...profile.proxyDomains];
   if (settings.routingMode === "blockedOnly") proxyDomains.push(...BLOCKED_DOMAINS);
+  const processBypass = settings.splitTunnelMode === "bypass" && settings.splitTunnelProcesses.length > 0;
 
   const rules: Record<string, unknown>[] = [
-    { type: "field", ip: LOCAL_CIDRS, outboundTag: "levik-direct" },
-    ...(settings.splitTunnelMode === "bypass" && settings.splitTunnelProcesses.length
-      ? [{ type: "field", process: settings.splitTunnelProcesses, outboundTag: "levik-direct" }]
+    ...(processBypass
+      ? [{ type: "field", process: settings.splitTunnelProcesses, network: "tcp,udp", outboundTag: "direct", ruleTag: "process-bypass" }]
       : []),
+    { type: "field", ip: LOCAL_CIDRS, outboundTag: "direct" },
     ...(settings.splitTunnelMode === "only" && settings.splitTunnelProcesses.length
-      ? [{ type: "field", process: settings.splitTunnelProcesses, outboundTag: server.tag }]
+      ? [{ type: "field", process: settings.splitTunnelProcesses, network: "tcp,udp", outboundTag: server.tag }]
       : []),
     ...(proxyDomains.length ? [{ type: "field", domain: unique(proxyDomains), outboundTag: server.tag }] : []),
-    ...(profile.directCidrs.length ? [{ type: "field", ip: profile.directCidrs, outboundTag: "levik-direct" }] : []),
-    ...(directDomains.length ? [{ type: "field", domain: unique(directDomains), outboundTag: "levik-direct" }] : []),
+    ...(profile.directCidrs.length ? [{ type: "field", ip: profile.directCidrs, outboundTag: "direct" }] : []),
+    ...(directDomains.length ? [{ type: "field", domain: unique(directDomains), outboundTag: "direct" }] : []),
     ...(settings.routingMode === "bypassRu" ? [
-      { type: "field", domain: RUSSIAN_GEOSITES, outboundTag: "levik-direct" },
-      { type: "field", ip: RUSSIAN_IPS, outboundTag: "levik-direct" },
+      { type: "field", domain: RUSSIAN_GEOSITES, outboundTag: "direct" },
+      { type: "field", ip: RUSSIAN_IPS, outboundTag: "direct" },
     ] : []),
   ];
   if (settings.routingMode === "blockedOnly" || settings.splitTunnelMode === "only") {
-    rules.push({ type: "field", network: "tcp,udp", outboundTag: "levik-direct" });
+    rules.push({ type: "field", network: "tcp,udp", outboundTag: "direct" });
   }
 
   return {
-    log: { loglevel: "warning" },
+    // Temporary bypass diagnostics: Xray emits ruleTag hits (including tcp:/udp:)
+    // at info level. Keep ordinary connections at the existing warning level.
+    log: { loglevel: processBypass ? "info" : "warning" },
     api: { tag: "levik-api", listen: XRAY_STATS_ENDPOINT, services: ["StatsService"] },
     dns: {
       servers: settings.useDoh
@@ -67,7 +70,7 @@ export function buildXrayConfig(
     inbounds: [tunInbound(settings.dnsServer)],
     outbounds: [
       selectedOutbound,
-      { tag: "levik-direct", protocol: "freedom", settings: { domainStrategy: "UseIP" } },
+      { tag: "direct", protocol: "freedom", settings: { domainStrategy: "UseIP" } },
       ...(settings.antiDpiEnabled && selectedOutbound !== server.outbound ? [{
         tag: "levik-fragment",
         protocol: "freedom",
@@ -104,19 +107,41 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+export function bindXrayOutboundInterface(config: Record<string, unknown>, interfaceName: string): Record<string, unknown> {
+  const bound = structuredClone(config);
+  if (Array.isArray(bound.inbounds)) {
+    for (const inbound of bound.inbounds) {
+      if (isRecord(inbound) && inbound.protocol === "tun" && isRecord(inbound.settings)) {
+        // Applies to TCP, UDP and Xray's local DNS sockets; never bind to TUN.
+        inbound.settings.autoOutboundsInterface = interfaceName;
+      }
+    }
+  }
+  if (Array.isArray(bound.outbounds)) {
+    for (const outbound of bound.outbounds) {
+      if (isRecord(outbound) && outbound.tag === "direct" && outbound.protocol === "freedom") {
+        // Explicit direct binding also uses the destination address family for
+        // UDP sockets. sendThrough would unnecessarily pin a DHCP IP/family.
+        outbound.streamSettings = { sockopt: { interface: interfaceName } };
+      }
+    }
+  }
+  return bound;
+}
+
 export function buildLockdownConfig(settings: AppSettings): Record<string, unknown> {
   return {
     log: { loglevel: "warning" },
     dns: { servers: [settings.dnsServer], queryStrategy: "UseIP" },
     inbounds: [tunInbound(settings.dnsServer)],
     outbounds: [
-      { tag: "levik-direct", protocol: "freedom", settings: { domainStrategy: "UseIP" } },
+      { tag: "direct", protocol: "freedom", settings: { domainStrategy: "UseIP" } },
       { tag: "levik-block", protocol: "blackhole", settings: {} },
     ],
     routing: {
       domainStrategy: "IPIfNonMatch",
       rules: [
-        { type: "field", ip: LOCAL_CIDRS, outboundTag: "levik-direct" },
+        { type: "field", ip: LOCAL_CIDRS, outboundTag: "direct" },
         { type: "field", network: "tcp,udp", outboundTag: "levik-block" },
       ],
     },
