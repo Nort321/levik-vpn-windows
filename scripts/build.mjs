@@ -43,6 +43,8 @@ await Promise.all([
   cp("src/renderer/styles.css", "dist/renderer/styles.css"),
   cp("build/icon.ico", "dist/assets/icon.ico"),
   cp("build/logo.png", "dist/assets/logo.png"),
+  cp("build/logo-light.png", "dist/assets/logo-light.png"),
+  cp("build/logo-dark.png", "dist/assets/logo-dark.png"),
   cp("build/tray-connected.png", "dist/assets/tray-connected.png"),
   cp("build/tray-disconnected.png", "dist/assets/tray-disconnected.png"),
 ]);

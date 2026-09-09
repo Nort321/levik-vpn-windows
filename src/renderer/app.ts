@@ -60,7 +60,8 @@ function render(preserveScroll = true): void {
     <div class="shell">
       <aside class="sidebar">
         <div class="brand">
-          <img class="brand-mark" src="../assets/logo.png" alt="" width="42" height="42" />
+          <img class="brand-mark brand-mark-light" src="../assets/logo-light.png" alt="" width="42" height="42" />
+          <img class="brand-mark brand-mark-dark" src="../assets/logo-dark.png" alt="" width="42" height="42" />
           <div><div class="brand-name">Levik VPN</div><div class="brand-caption">Windows</div></div>
         </div>
         <nav class="nav" aria-label="Основная навигация">

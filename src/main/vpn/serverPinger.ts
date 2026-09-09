@@ -8,6 +8,7 @@ import type { TunnelServer } from "../../shared/contracts";
 const TIMEOUT_MS = 3_000;
 const MAX_ENDPOINT_DEPTH = 6;
 const MAX_PARALLEL_PROBES = 8;
+const QUIC_PROBE_VERSION = 0x0a0a0a0a;
 
 interface ServerEndpoint {
   host: string;
@@ -17,7 +18,7 @@ interface ServerEndpoint {
 export async function measureServerLatency(server: TunnelServer): Promise<number | null> {
   const endpoint = extractServerEndpoint(server.outbound);
   if (!endpoint) return null;
-  const protocol = typeof server.outbound.protocol === "string" ? server.outbound.protocol.toLowerCase() : "";
+  const protocol = firstString(server.outbound.protocol, server.outbound.type)?.toLowerCase() ?? "";
   if (["hysteria", "hysteria2", "tuic", "wireguard"].includes(protocol)) {
     return await measureUdp(endpoint) ?? measureTcp(endpoint);
   }
@@ -45,7 +46,7 @@ function findEndpoint(value: unknown, depth: number): ServerEndpoint | null {
   if (depth > MAX_ENDPOINT_DEPTH) return null;
   if (isRecord(value)) {
     const host = firstString(value.address, value.host, value.server);
-    const port = numberPort(value.port);
+    const port = numberPort(value.port) ?? numberPort(value.server_port);
     if (host && port) return { host, port };
     for (const child of Object.values(value)) {
       const endpoint = findEndpoint(child, depth + 1);
@@ -84,6 +85,7 @@ async function measureUdp(endpoint: ServerEndpoint): Promise<number | null> {
     const address = await lookup(endpoint.host);
     return await new Promise((resolve) => {
       const socket = createSocket(address.family === 6 ? "udp6" : "udp4");
+      const probe = buildQuicProbePacket();
       const startedAt = performance.now();
       let settled = false;
       const timeout = setTimeout(() => finish(null), TIMEOUT_MS);
@@ -91,14 +93,28 @@ async function measureUdp(endpoint: ServerEndpoint): Promise<number | null> {
         if (settled) return;
         settled = true;
         clearTimeout(timeout);
-        socket.close();
+        try {
+          socket.close();
+        } catch {
+          // A socket that failed before binding is already closed.
+        }
         resolve(latency);
       };
-      socket.once("message", () => finish(Math.max(1, Math.round(performance.now() - startedAt))));
-      socket.once("error", () => finish(null));
-      socket.send(buildQuicProbePacket(), endpoint.port, address.address, (error) => {
-        if (error) finish(null);
+      socket.on("message", (packet) => {
+        if (isQuicProbeResponse(packet, probe)) finish(Math.max(1, Math.round(performance.now() - startedAt)));
       });
+      socket.once("error", () => finish(null));
+      try {
+        // Connected UDP sockets only accept datagrams from this endpoint.
+        socket.connect(endpoint.port, address.address, () => {
+          if (settled) return;
+          socket.send(probe, (error) => {
+            if (error) finish(null);
+          });
+        });
+      } catch {
+        finish(null);
+      }
     });
   } catch {
     return null;
@@ -108,7 +124,9 @@ async function measureUdp(endpoint: ServerEndpoint): Promise<number | null> {
 function buildQuicProbePacket(): Buffer {
   const packet = Buffer.alloc(1_200);
   packet[0] = 0xc0;
-  packet[4] = 0x01;
+  // RFC 9000 sections 5.2.2 and 6.3: request Version Negotiation with a
+  // reserved version. A fake v1 Initial cannot pass QUIC packet protection.
+  packet.writeUInt32BE(QUIC_PROBE_VERSION, 1);
   packet[5] = 0x08;
   randomBytes(8).copy(packet, 6);
   packet[14] = 0x08;
@@ -116,6 +134,21 @@ function buildQuicProbePacket(): Buffer {
   packet[24] = 0x44;
   packet[25] = 0x90;
   return packet;
+}
+
+function isQuicProbeResponse(packet: Buffer, probe: Buffer): boolean {
+  // Our probe uses two 8-byte IDs. Version Negotiation must echo them in
+  // reverse order, followed by a nonempty list of 32-bit supported versions.
+  if (packet.length < 27 || (packet.length - 23) % 4 !== 0) return false;
+  if ((packet[0]! & 0x80) === 0 || packet.readUInt32BE(1) !== 0) return false;
+  if (packet[5] !== 8 || packet[14] !== 8) return false;
+  if (!packet.subarray(6, 14).equals(probe.subarray(15, 23))) return false;
+  if (!packet.subarray(15, 23).equals(probe.subarray(6, 14))) return false;
+  for (let offset = 23; offset < packet.length; offset += 4) {
+    const version = packet.readUInt32BE(offset);
+    if (version === 0 || version === QUIC_PROBE_VERSION) return false;
+  }
+  return true;
 }
 
 function numberPort(value: unknown): number | null {
