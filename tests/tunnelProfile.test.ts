@@ -105,6 +105,24 @@ describe("Windows tunnel profile", () => {
     expect((inbounds[0]?.sniffing as { destOverride: string[] }).destOverride).not.toContain("fakedns");
   });
 
+  it("bypasses only Overwatch while keeping Battle.net and Agent on the VPN", () => {
+    const profile = prepareTunnelProfile(Buffer.from(JSON.stringify({
+      version: 1, profileId: "battle-net", subscriptionId: "subscription-1", issuedAt: new Date().toISOString(),
+      source: { mediaType: "text/plain", content: "vless://11111111-1111-4111-8111-111111111111@example.com:443#Server" },
+    })), "subscription-1");
+    const server = profile.servers[0]!;
+    const config = buildXrayConfig(profile, server, {
+      ...settings, routingMode: "global", splitTunnelMode: "bypass", splitTunnelProcesses: ["overwatch.exe"],
+    });
+    const routing = config.routing as { rules: Array<Record<string, unknown>> };
+    expect(routing.rules).toEqual([
+      { type: "field", process: ["overwatch.exe"], network: "tcp,udp", outboundTag: "direct", ruleTag: "process-bypass" },
+      { type: "field", ip: expect.arrayContaining(["127.0.0.0/8", "::1/128"]), outboundTag: "direct" },
+    ]);
+    // Unmatched launcher/agent internet traffic uses Xray's first outbound.
+    expect((config.outbounds as Array<Record<string, unknown>>)[0]?.tag).toBe(server.tag);
+  });
+
   it("builds a fail-closed Kill Switch configuration", () => {
     const config = buildLockdownConfig(settings);
     const routing = config.routing as { rules: Array<{ outboundTag: string }> };

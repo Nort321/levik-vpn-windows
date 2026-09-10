@@ -29,12 +29,16 @@ constexpr GUID kXrayV4Key = {0xa66b42da, 0xaa63, 0x41a1, {0xb9, 0x8d, 0x84, 0x45
 constexpr GUID kXrayV6Key = {0x99665898, 0x65cb, 0x4a1c, {0xa7, 0x82, 0xe6, 0x7b, 0x6c, 0xdf, 0x2a, 0xf0}};
 constexpr GUID kTunnelV4Key = {0x3936c136, 0xe200, 0x4ce6, {0xb3, 0xe1, 0xe8, 0x3a, 0x8b, 0x45, 0x15, 0xf7}};
 constexpr GUID kTunnelV6Key = {0xb13e795b, 0xcb1b, 0x4ed8, {0x9e, 0x32, 0xc2, 0x24, 0xe1, 0x4a, 0x48, 0xf5}};
+constexpr GUID kLoopbackV4Key = {0x4f785bc2, 0x630c, 0x43fa, {0xb2, 0x15, 0xd1, 0x38, 0x41, 0x70, 0xac, 0x92}};
+constexpr GUID kLoopbackV6Key = {0xcf6710f9, 0xa4bd, 0x4db6, {0x8c, 0xa6, 0x75, 0x20, 0xfa, 0x12, 0x67, 0xbe}};
 constexpr GUID kBlockV4Key = {0x6c95fc3e, 0xc5ea, 0x40d5, {0x9c, 0x6e, 0x6d, 0x73, 0xe8, 0x0a, 0xce, 0x13}};
 constexpr GUID kBlockV6Key = {0xe7528168, 0x7b6c, 0x43da, {0x99, 0xe2, 0x18, 0xd0, 0x35, 0x0e, 0x08, 0xe9}};
 
 constexpr GUID kTestProviderKey = {0x60c17e46, 0xf4a7, 0x4da7, {0xaa, 0xf4, 0xe4, 0x1c, 0xdc, 0x21, 0x65, 0x12}};
 constexpr GUID kTestSubLayerKey = {0xba0c67f7, 0x4cb1, 0x48d9, {0xa9, 0x7d, 0x24, 0x11, 0x63, 0x2d, 0x2a, 0x7b}};
 constexpr GUID kTestFilterKey = {0x56fc4f68, 0x218f, 0x4753, {0x9c, 0xf8, 0xf8, 0x06, 0x24, 0x08, 0x51, 0xb2}};
+
+constexpr GUID kTestPermitKey = {0x8101ecbf, 0x3156, 0x4989, {0xbc, 0x76, 0x86, 0x72, 0x4a, 0xaf, 0xb6, 0x40}};
 
 constexpr UINT64 kPermitWeight = 0xf000000000000000ULL;
 constexpr UINT64 kBlockWeight = 1;
@@ -167,6 +171,20 @@ DWORD AddInterfacePermit(HANDLE engine, UINT64 interfaceLuid, const GUID& layerK
                    kPermitWeight, &condition, 1);
 }
 
+DWORD AddLoopbackPermit(HANDLE engine, const GUID& providerKey, const GUID& subLayerKey,
+                        const GUID& layerKey, const GUID& filterKey) {
+  // Local IPC (for example Battle.net <-> Agent.exe) never traverses the TUN.
+  // Match Windows' loopback classification, including IPv6 and reauthorization;
+  // do not exempt launcher executables or LAN destinations from protection.
+  FWPM_FILTER_CONDITION0 condition{};
+  condition.fieldKey = FWPM_CONDITION_FLAGS;
+  condition.matchType = FWP_MATCH_FLAGS_ALL_SET;
+  condition.conditionValue.type = FWP_UINT32;
+  condition.conditionValue.uint32 = FWP_CONDITION_FLAG_IS_LOOPBACK;
+  return AddFilter(engine, providerKey, subLayerKey, filterKey, layerKey, FWP_ACTION_PERMIT,
+                   kPermitWeight, &condition, 1);
+}
+
 DWORD AddBlock(HANDLE engine, const GUID& providerKey, const GUID& subLayerKey,
                const GUID& layerKey, const GUID& filterKey) {
   return AddFilter(engine, providerKey, subLayerKey, filterKey, layerKey, FWP_ACTION_BLOCK,
@@ -193,9 +211,9 @@ DWORD Enable(const std::wstring& appPath, const std::wstring& xrayPath) {
 
   // Replace older persistent objects atomically. Runtime objects remain active
   // after an app crash, but Windows removes them when BFE stops during reboot.
-  const std::array<const GUID*, 8> replaced = {
+  const std::array<const GUID*, 10> replaced = {
       &kAppV4Key, &kAppV6Key, &kXrayV4Key, &kXrayV6Key,
-      &kTunnelV4Key, &kTunnelV6Key, &kBlockV4Key, &kBlockV6Key};
+      &kTunnelV4Key, &kTunnelV6Key, &kLoopbackV4Key, &kLoopbackV6Key, &kBlockV4Key, &kBlockV6Key};
   for (const GUID* key : replaced) {
     if (result != ERROR_SUCCESS) break;
     result = IgnoreMissingFilter(FwpmFilterDeleteByKey0(engine.get(), key));
@@ -209,6 +227,8 @@ DWORD Enable(const std::wstring& appPath, const std::wstring& xrayPath) {
   if (result == ERROR_SUCCESS) result = AddApplicationPermit(engine.get(), appPath, FWPM_LAYER_ALE_AUTH_CONNECT_V6, kAppV6Key);
   if (result == ERROR_SUCCESS) result = AddApplicationPermit(engine.get(), xrayPath, FWPM_LAYER_ALE_AUTH_CONNECT_V4, kXrayV4Key);
   if (result == ERROR_SUCCESS) result = AddApplicationPermit(engine.get(), xrayPath, FWPM_LAYER_ALE_AUTH_CONNECT_V6, kXrayV6Key);
+  if (result == ERROR_SUCCESS) result = AddLoopbackPermit(engine.get(), kProviderKey, kSubLayerKey, FWPM_LAYER_ALE_AUTH_CONNECT_V4, kLoopbackV4Key);
+  if (result == ERROR_SUCCESS) result = AddLoopbackPermit(engine.get(), kProviderKey, kSubLayerKey, FWPM_LAYER_ALE_AUTH_CONNECT_V6, kLoopbackV6Key);
   if (result == ERROR_SUCCESS) result = AddBlock(engine.get(), kProviderKey, kSubLayerKey, FWPM_LAYER_ALE_AUTH_CONNECT_V4, kBlockV4Key);
   if (result == ERROR_SUCCESS) result = AddBlock(engine.get(), kProviderKey, kSubLayerKey, FWPM_LAYER_ALE_AUTH_CONNECT_V6, kBlockV6Key);
   return CommitTransaction(engine.get(), result);
@@ -265,9 +285,9 @@ DWORD Disable() {
 
   if ((result = BeginTransaction(engine.get())) != ERROR_SUCCESS) return result;
 
-  const std::array<const GUID*, 8> filters = {
+  const std::array<const GUID*, 10> filters = {
       &kAppV4Key, &kAppV6Key, &kXrayV4Key, &kXrayV6Key,
-      &kTunnelV4Key, &kTunnelV6Key, &kBlockV4Key, &kBlockV6Key};
+      &kTunnelV4Key, &kTunnelV6Key, &kLoopbackV4Key, &kLoopbackV6Key, &kBlockV4Key, &kBlockV6Key};
   for (const GUID* key : filters) {
     if (result != ERROR_SUCCESS) break;
     result = IgnoreMissingFilter(FwpmFilterDeleteByKey0(engine.get(), key));
@@ -439,6 +459,115 @@ DWORD CleanupLegacyConfig(const std::wstring& userDataPath) {
   return DeleteLegacyConfigRelativeTo(runtimeDirectory.get());
 }
 
+// These probes run only in self-test. The committed test block is scoped to
+// this executable in a dynamic WFP session, so CI and other applications keep
+// their network access and closing the engine removes every test object.
+DWORD ProbeConnection(int family, int socketType, bool loopback) {
+  const SOCKET listener = socket(family, socketType, 0);
+  if (listener == INVALID_SOCKET) return WSAGetLastError();
+  sockaddr_storage address{};
+  int addressSize = 0;
+  if (family == AF_INET) {
+    auto* ipv4 = reinterpret_cast<sockaddr_in*>(&address);
+    ipv4->sin_family = AF_INET;
+    ipv4->sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    addressSize = sizeof(sockaddr_in);
+  } else {
+    auto* ipv6 = reinterpret_cast<sockaddr_in6*>(&address);
+    ipv6->sin6_family = AF_INET6;
+    ipv6->sin6_addr = in6addr_loopback;
+    addressSize = sizeof(sockaddr_in6);
+  }
+  DWORD result = ERROR_SUCCESS;
+  if (bind(listener, reinterpret_cast<sockaddr*>(&address), addressSize) == SOCKET_ERROR ||
+      getsockname(listener, reinterpret_cast<sockaddr*>(&address), &addressSize) == SOCKET_ERROR ||
+      (socketType == SOCK_STREAM && listen(listener, 1) == SOCKET_ERROR)) {
+    result = WSAGetLastError();
+  }
+  const SOCKET client = socket(family, socketType, 0);
+  if (client == INVALID_SOCKET && result == ERROR_SUCCESS) result = WSAGetLastError();
+  if (result == ERROR_SUCCESS) {
+    if (!loopback) {
+      // TEST-NET-1: the test block must reject this before any packet is sent.
+      auto* ipv4 = reinterpret_cast<sockaddr_in*>(&address);
+      ipv4->sin_addr.s_addr = htonl(0xc0000201);
+    }
+    u_long nonblocking = 1;
+    if (ioctlsocket(client, FIONBIO, &nonblocking) == SOCKET_ERROR) result = WSAGetLastError();
+    if (result == ERROR_SUCCESS && socketType == SOCK_DGRAM) {
+      if (sendto(client, "x", 1, 0, reinterpret_cast<sockaddr*>(&address), addressSize) == SOCKET_ERROR)
+        result = WSAGetLastError();
+    } else if (result == ERROR_SUCCESS &&
+               connect(client, reinterpret_cast<sockaddr*>(&address), addressSize) == SOCKET_ERROR) {
+      result = WSAGetLastError();
+      if (result == WSAEWOULDBLOCK) {
+        fd_set writable;
+        fd_set errors;
+        FD_ZERO(&writable);
+        FD_ZERO(&errors);
+        FD_SET(client, &writable);
+        FD_SET(client, &errors);
+        timeval timeout{2, 0};
+        const int ready = select(0, nullptr, &writable, &errors, &timeout);
+        if (ready == SOCKET_ERROR) result = WSAGetLastError();
+        else if (ready == 0) result = WSAETIMEDOUT;
+        else {
+          int socketError = 0;
+          int errorSize = sizeof(socketError);
+          result = getsockopt(client, SOL_SOCKET, SO_ERROR, reinterpret_cast<char*>(&socketError), &errorSize)
+              == SOCKET_ERROR ? WSAGetLastError() : static_cast<DWORD>(socketError);
+        }
+      }
+    }
+  }
+  if (client != INVALID_SOCKET) closesocket(client);
+  closesocket(listener);
+  return result;
+}
+
+DWORD LoopbackSelfTest(int family) {
+  EngineHandle engine;
+  FWPM_SESSION0 session{};
+  session.flags = FWPM_SESSION_FLAG_DYNAMIC;
+  DWORD result = FwpmEngineOpen0(nullptr, RPC_C_AUTHN_WINNT, nullptr, &session, engine.receive());
+  if (result != ERROR_SUCCESS) return result;
+  if ((result = BeginTransaction(engine.get())) != ERROR_SUCCESS) return result;
+  result = EnsureProvider(engine.get(), kTestProviderKey);
+  if (result == ERROR_SUCCESS) result = EnsureSubLayer(engine.get(), kTestProviderKey, kTestSubLayerKey);
+  const GUID& layer = family == AF_INET ? FWPM_LAYER_ALE_AUTH_CONNECT_V4 : FWPM_LAYER_ALE_AUTH_CONNECT_V6;
+  std::array<wchar_t, 32768> executable{};
+  const DWORD length = GetModuleFileNameW(nullptr, executable.data(), static_cast<DWORD>(executable.size()));
+  if (result == ERROR_SUCCESS && (length == 0 || length >= executable.size()))
+    result = length == 0 ? GetLastError() : ERROR_INSUFFICIENT_BUFFER;
+  FWP_BYTE_BLOB* appId = nullptr;
+  if (result == ERROR_SUCCESS) result = FwpmGetAppIdFromFileName0(executable.data(), &appId);
+  FWPM_FILTER_CONDITION0 condition{};
+  condition.fieldKey = FWPM_CONDITION_ALE_APP_ID;
+  condition.matchType = FWP_MATCH_EQUAL;
+  condition.conditionValue.type = FWP_BYTE_BLOB_TYPE;
+  condition.conditionValue.byteBlob = appId;
+  if (result == ERROR_SUCCESS)
+    result = AddFilter(engine.get(), kTestProviderKey, kTestSubLayerKey, kTestFilterKey, layer,
+                       FWP_ACTION_BLOCK, kBlockWeight, &condition, 1);
+  if (appId != nullptr) FwpmFreeMemory0(reinterpret_cast<void**>(&appId));
+  result = CommitTransaction(engine.get(), result);
+  if (result != ERROR_SUCCESS) return result;
+
+  // Reproduce the original failure before installing the production permit.
+  for (int socketType : {SOCK_STREAM, SOCK_DGRAM}) {
+    if (ProbeConnection(family, socketType, true) != WSAEACCES) return ERROR_INVALID_DATA;
+  }
+  result = AddLoopbackPermit(engine.get(), kTestProviderKey, kTestSubLayerKey, layer, kTestPermitKey);
+  if (result != ERROR_SUCCESS) return result;
+  for (int socketType : {SOCK_STREAM, SOCK_DGRAM}) {
+    result = ProbeConnection(family, socketType, true);
+    if (result != ERROR_SUCCESS) return result;
+    if (family == AF_INET && ProbeConnection(family, socketType, false) != WSAEACCES)
+      return ERROR_INVALID_DATA;
+  }
+  return ERROR_SUCCESS;
+}
+
 DWORD SelfTest() {
   EngineHandle engine;
   DWORD result = OpenEngine(engine);
@@ -469,7 +598,16 @@ DWORD SelfTest() {
   if (filter != nullptr) FwpmFreeMemory0(reinterpret_cast<void**>(&filter));
 
   const DWORD abortResult = FwpmTransactionAbort0(engine.get());
-  return result == ERROR_SUCCESS ? abortResult : result;
+  if (result != ERROR_SUCCESS) return result;
+  if (abortResult != ERROR_SUCCESS) return abortResult;
+
+  WSADATA winsock{};
+  result = WSAStartup(MAKEWORD(2, 2), &winsock);
+  if (result != ERROR_SUCCESS) return result;
+  result = LoopbackSelfTest(AF_INET);
+  if (result == ERROR_SUCCESS) result = LoopbackSelfTest(AF_INET6);
+  WSACleanup();
+  return result;
 }
 
 }  // namespace
