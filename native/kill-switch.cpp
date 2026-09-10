@@ -495,8 +495,25 @@ DWORD ProbeConnection(int family, int socketType, bool loopback) {
     u_long nonblocking = 1;
     if (ioctlsocket(client, FIONBIO, &nonblocking) == SOCKET_ERROR) result = WSAGetLastError();
     if (result == ERROR_SUCCESS && socketType == SOCK_DGRAM) {
-      if (sendto(client, "x", 1, 0, reinterpret_cast<sockaddr*>(&address), addressSize) == SOCKET_ERROR)
+      if (sendto(client, "x", 1, 0, reinterpret_cast<sockaddr*>(&address), addressSize) == SOCKET_ERROR) {
         result = WSAGetLastError();
+      } else {
+        // UDP send success only means the datagram was queued. WFP may drop
+        // it silently, so verify delivery at the local receiving socket.
+        fd_set readable;
+        FD_ZERO(&readable);
+        FD_SET(listener, &readable);
+        timeval timeout{2, 0};
+        const int ready = select(0, &readable, nullptr, nullptr, &timeout);
+        if (ready == SOCKET_ERROR) result = WSAGetLastError();
+        else if (ready == 0) result = WSAETIMEDOUT;
+        else {
+          char payload = 0;
+          const int received = recv(listener, &payload, 1, 0);
+          if (received == SOCKET_ERROR) result = WSAGetLastError();
+          else if (received != 1 || payload != 'x') result = ERROR_INVALID_DATA;
+        }
+      }
     } else if (result == ERROR_SUCCESS &&
                connect(client, reinterpret_cast<sockaddr*>(&address), addressSize) == SOCKET_ERROR) {
       result = WSAGetLastError();
@@ -525,11 +542,15 @@ DWORD ProbeConnection(int family, int socketType, bool loopback) {
   return result;
 }
 
-DWORD ExpectProbe(int family, int socketType, bool loopback, DWORD expected) {
+DWORD ExpectProbe(int family, int socketType, bool loopback, bool blocked) {
   const DWORD actual = ProbeConnection(family, socketType, loopback);
-  if (actual == expected) return ERROR_SUCCESS;
+  // TCP must be explicitly denied. UDP can be denied at send or silently
+  // dropped; the latter is tested only against our own local receiver.
+  const bool denied = actual == WSAEACCES ||
+      (socketType == SOCK_DGRAM && loopback && actual == WSAETIMEDOUT);
+  if (blocked ? denied : actual == ERROR_SUCCESS) return ERROR_SUCCESS;
   std::wcerr << L"Self-test probe: family=" << family << L" type=" << socketType
-             << L" loopback=" << loopback << L" expected=" << expected << L" actual=" << actual << L"\n";
+             << L" loopback=" << loopback << L" blocked=" << blocked << L" actual=" << actual << L"\n";
   return ERROR_INVALID_DATA;
 }
 
@@ -563,16 +584,16 @@ DWORD LoopbackSelfTest(int family) {
 
   // Reproduce the original failure before installing the production permit.
   for (int socketType : {SOCK_STREAM, SOCK_DGRAM}) {
-    result = ExpectProbe(family, socketType, true, WSAEACCES);
+    result = ExpectProbe(family, socketType, true, true);
     if (result != ERROR_SUCCESS) return result;
   }
   result = AddLoopbackPermit(engine.get(), kTestProviderKey, kTestSubLayerKey, layer, kTestPermitKey);
   if (result != ERROR_SUCCESS) return result;
   for (int socketType : {SOCK_STREAM, SOCK_DGRAM}) {
-    result = ExpectProbe(family, socketType, true, ERROR_SUCCESS);
+    result = ExpectProbe(family, socketType, true, false);
     if (result != ERROR_SUCCESS) return result;
-    if (family == AF_INET) {
-      result = ExpectProbe(family, socketType, false, WSAEACCES);
+    if (family == AF_INET && socketType == SOCK_STREAM) {
+      result = ExpectProbe(family, socketType, false, true);
       if (result != ERROR_SUCCESS) return result;
     }
   }
