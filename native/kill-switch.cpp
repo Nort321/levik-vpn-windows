@@ -525,6 +525,14 @@ DWORD ProbeConnection(int family, int socketType, bool loopback) {
   return result;
 }
 
+DWORD ExpectProbe(int family, int socketType, bool loopback, DWORD expected) {
+  const DWORD actual = ProbeConnection(family, socketType, loopback);
+  if (actual == expected) return ERROR_SUCCESS;
+  std::wcerr << L"Self-test probe: family=" << family << L" type=" << socketType
+             << L" loopback=" << loopback << L" expected=" << expected << L" actual=" << actual << L"\n";
+  return ERROR_INVALID_DATA;
+}
+
 DWORD LoopbackSelfTest(int family) {
   EngineHandle engine;
   FWPM_SESSION0 session{};
@@ -555,15 +563,18 @@ DWORD LoopbackSelfTest(int family) {
 
   // Reproduce the original failure before installing the production permit.
   for (int socketType : {SOCK_STREAM, SOCK_DGRAM}) {
-    if (ProbeConnection(family, socketType, true) != WSAEACCES) return ERROR_INVALID_DATA;
+    result = ExpectProbe(family, socketType, true, WSAEACCES);
+    if (result != ERROR_SUCCESS) return result;
   }
   result = AddLoopbackPermit(engine.get(), kTestProviderKey, kTestSubLayerKey, layer, kTestPermitKey);
   if (result != ERROR_SUCCESS) return result;
   for (int socketType : {SOCK_STREAM, SOCK_DGRAM}) {
-    result = ProbeConnection(family, socketType, true);
+    result = ExpectProbe(family, socketType, true, ERROR_SUCCESS);
     if (result != ERROR_SUCCESS) return result;
-    if (family == AF_INET && ProbeConnection(family, socketType, false) != WSAEACCES)
-      return ERROR_INVALID_DATA;
+    if (family == AF_INET) {
+      result = ExpectProbe(family, socketType, false, WSAEACCES);
+      if (result != ERROR_SUCCESS) return result;
+    }
   }
   return ERROR_SUCCESS;
 }
