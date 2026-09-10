@@ -1,6 +1,7 @@
 import type { AppSettings, TunnelServer } from "../../shared/contracts";
 import type { PreparedTunnelProfile } from "./tunnelProfile";
 import { XRAY_STATS_ENDPOINT } from "./xrayStats";
+import { resolveProcessCompanions } from "../../shared/processes";
 
 const LOCAL_CIDRS = [
   "0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8", "169.254.0.0/16",
@@ -34,16 +35,18 @@ export function buildXrayConfig(
   const directDomains = [...profile.directDomains];
   const proxyDomains = [...profile.proxyDomains];
   if (settings.routingMode === "blockedOnly") proxyDomains.push(...BLOCKED_DOMAINS);
-  const processBypass = settings.splitTunnelMode === "bypass" && settings.splitTunnelProcesses.length > 0;
+  const processes = resolveProcessCompanions(settings.splitTunnelProcesses);
+  const processBypass = settings.splitTunnelMode === "bypass" && processes.length > 0;
 
   const rules: Record<string, unknown>[] = [
     ...(processBypass
-      ? [{ type: "field", process: settings.splitTunnelProcesses, network: "tcp,udp", outboundTag: "direct", ruleTag: "process-bypass" }]
+      ? [{ type: "field", process: processes, network: "tcp,udp", outboundTag: "direct", ruleTag: "process-bypass" }]
       : []),
     { type: "field", ip: LOCAL_CIDRS, outboundTag: "direct" },
-    ...(settings.splitTunnelMode === "only" && settings.splitTunnelProcesses.length
-      ? [{ type: "field", process: settings.splitTunnelProcesses, network: "tcp,udp", outboundTag: server.tag }]
+    ...(settings.splitTunnelMode === "only" && processes.length
+      ? [{ type: "field", process: processes, network: "tcp,udp", outboundTag: server.tag }]
       : []),
+    ...(settings.splitTunnelMode === "only" ? [{ type: "field", network: "tcp,udp", outboundTag: "direct" }] : []),
     ...(proxyDomains.length ? [{ type: "field", domain: unique(proxyDomains), outboundTag: server.tag }] : []),
     ...(profile.directCidrs.length ? [{ type: "field", ip: profile.directCidrs, outboundTag: "direct" }] : []),
     ...(directDomains.length ? [{ type: "field", domain: unique(directDomains), outboundTag: "direct" }] : []),
@@ -52,7 +55,7 @@ export function buildXrayConfig(
       { type: "field", ip: RUSSIAN_IPS, outboundTag: "direct" },
     ] : []),
   ];
-  if (settings.routingMode === "blockedOnly" || settings.splitTunnelMode === "only") {
+  if (settings.routingMode === "blockedOnly" && settings.splitTunnelMode !== "only") {
     rules.push({ type: "field", network: "tcp,udp", outboundTag: "direct" });
   }
 
@@ -161,7 +164,7 @@ function tunInbound(dnsServer: string): Record<string, unknown> {
       autoSystemRoutingTable: FULL_TUN_ROUTES,
       autoOutboundsInterface: "auto",
     },
-    sniffing: { enabled: true, destOverride: ["http", "tls", "quic"], routeOnly: false },
+    sniffing: { enabled: true, destOverride: ["http", "tls", "quic"], routeOnly: true },
   };
 }
 

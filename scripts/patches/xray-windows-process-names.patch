@@ -1,0 +1,81 @@
+--- a/app/router/condition.go
++++ b/app/router/condition.go
+@@ -380,7 +380,7 @@
+ 			return true
+ 		}
+ 	}
+-	if slices.Contains(m.ProcessNames, name) {
++	if processNamesContain(m.ProcessNames, name) {
+ 		return true
+ 	}
+ 	if slices.Contains(m.AbsPaths, absPath) {
+--- /dev/null
++++ b/app/router/process_name_levik.go
+@@ -0,0 +1,23 @@
++package router
++
++import (
++	"runtime"
++	"slices"
++	"strings"
++)
++
++// Windows executable identity is case-insensitive, including the extension.
++// Normalize at connection lookup time so saved selections work for processes
++// launched after the tunnel and for selections written by older clients.
++func equalWindowsProcessName(expected, actual string) bool {
++	return strings.EqualFold(strings.TrimSuffix(strings.ToLower(expected), ".exe"), strings.TrimSuffix(strings.ToLower(actual), ".exe"))
++}
++
++func processNamesContain(names []string, actual string) bool {
++	if runtime.GOOS != "windows" {
++		return slices.Contains(names, actual)
++	}
++	return slices.ContainsFunc(names, func(expected string) bool {
++		return equalWindowsProcessName(expected, actual)
++	})
++}
+--- /dev/null
++++ b/app/router/process_name_levik_test.go
+@@ -0,0 +1,41 @@
++package router
++
++import (
++	"runtime"
++	"testing"
++)
++
++func TestLevikWindowsProcessName(t *testing.T) {
++	for _, tc := range []struct {
++		expected, actual string
++		match            bool
++	}{
++		{"overwatch", "Overwatch", true},
++		{"overwatch.exe", "Overwatch.EXE", true},
++		{"Battle.net Helper", "battle.NET helper", true},
++		{"Игровой Клиент.exe", "игровой клиент.EXE", true},
++		{"VivoxVoiceService", "VIVOXVOICESERVICE", true},
++		{"Overwatch", "Overwatch Launcher", false},
++		{"Overwatch", "NotOverwatch", false},
++		{"Overwatch", "Overwatch.exe.bak", false},
++	} {
++		if got := equalWindowsProcessName(tc.expected, tc.actual); got != tc.match {
++			t.Errorf("%q / %q = %v, want %v", tc.expected, tc.actual, got, tc.match)
++		}
++	}
++}
++
++func TestLevikProcessSelection(t *testing.T) {
++	matcher := NewProcessNameMatcher([]string{"overwatch.exe", "VivoxVoiceService.exe", "Battle.net Helper.EXE"})
++	for _, name := range []string{"Overwatch", "VIVOXVOICESERVICE", "battle.net helper"} {
++		if got := processNamesContain(matcher.ProcessNames, name); got != (runtime.GOOS == "windows") {
++			t.Errorf("%q matched = %v on %s", name, got, runtime.GOOS)
++		}
++	}
++	if processNamesContain(matcher.ProcessNames, "Agent") || processNamesContain(nil, "Overwatch") {
++		t.Fatal("unselected process matched")
++	}
++	if !processNamesContain(matcher.ProcessNames, "overwatch") {
++		t.Fatal("exact executable match was lost")
++	}
++}

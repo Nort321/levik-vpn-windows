@@ -2,42 +2,45 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { win32 } from "node:path";
 import type { WindowsProcess } from "../../shared/contracts";
+import { mergeProcessList, normalizeExecutableName } from "../../shared/processes";
 
 const execFileAsync = promisify(execFile);
 
 export async function listWindowsProcesses(): Promise<WindowsProcess[]> {
   if (process.platform !== "win32") return [];
   const script = [
-    "Get-Process | Where-Object { $_.Name } |",
-    "Select-Object Name,Path | Sort-Object Name -Unique |",
-    "ConvertTo-Json -Compress",
+    "$ErrorActionPreference = 'Stop';",
+    "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false);",
+    "try { $items = Get-CimInstance Win32_Process | Select-Object Name,@{Name='Path';Expression={$_.ExecutablePath}} }",
+    "catch { $items = Get-Process | Where-Object { $_.Name } | Select-Object Name,Path };",
+    "@($items) | ConvertTo-Json -Compress",
   ].join(" ");
   const { stdout } = await execFileAsync("powershell.exe", [
     "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script,
   ], { windowsHide: true, timeout: 10_000, maxBuffer: 2 * 1024 * 1024 });
-  const decoded = JSON.parse(stdout || "[]") as unknown;
+  return parseWindowsProcesses(stdout);
+}
+
+export function parseWindowsProcesses(stdout: string): WindowsProcess[] {
+  const decoded = JSON.parse(stdout.trim().replace(/^\uFEFF/, "") || "[]") as unknown;
   const values = Array.isArray(decoded) ? decoded : [decoded];
-  return values.flatMap((value): WindowsProcess[] => {
+  const processes = values.flatMap((value): WindowsProcess[] => {
     if (!isRecord(value) || typeof value.Name !== "string") return [];
     const executablePath = typeof value.Path === "string" ? value.Path.trim() : "";
-    const rawName = executablePath ? win32.basename(executablePath) : `${value.Name.trim()}.exe`;
+    const processName = value.Name.trim();
+    const rawName = executablePath ? win32.basename(executablePath) : /\.exe$/i.test(processName) ? processName : `${processName}.exe`;
     const name = normalizeExecutableName(rawName);
     if (!name) return [];
-    return [{ name, path: executablePath ? executablePath.replaceAll("\\", "/") : null }];
+    return [{ name, path: executablePath ? executablePath.replaceAll("\\", "/") : null, running: true }];
   });
+  return mergeProcessList(processes, []).sort((left, right) => left.name.localeCompare(right.name));
 }
 
 export function windowsProcessFromPath(executablePath: string): WindowsProcess | null {
   const normalizedPath = executablePath.trim();
   const name = normalizeExecutableName(win32.basename(normalizedPath));
   if (!name) return null;
-  return { name, path: normalizedPath.replaceAll("\\", "/") };
-}
-
-function normalizeExecutableName(value: string): string | null {
-  const name = value.trim();
-  if (!/^[^<>:"/\\|?*\u0000-\u001f]{1,128}\.exe$/i.test(name)) return null;
-  return name;
+  return { name, path: normalizedPath.replaceAll("\\", "/"), running: null };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

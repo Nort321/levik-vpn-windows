@@ -22,6 +22,7 @@ import { measureServerLatencies } from "./vpn/serverPinger";
 import { DnsLeakProtection } from "./windows/dnsLeakProtection";
 import { WindowsKillSwitch } from "./windows/killSwitch";
 import { AppUpdater } from "./update/appUpdater";
+import { normalizeProcessSelection } from "../shared/processes";
 
 interface AppControllerEvents {
   changed: [snapshot: AppSnapshot];
@@ -771,21 +772,12 @@ function validateSettings(value: AppSettings): AppSettings {
     antiDpiLength: validateAntiDpi(value.antiDpiLength, "100-200"),
     antiDpiInterval: validateAntiDpi(value.antiDpiInterval, "10-20"),
     splitTunnelMode: (["off", "bypass", "only"] as const).includes(value.splitTunnelMode) ? value.splitTunnelMode : "off",
-    splitTunnelProcesses: [...new Set(value.splitTunnelProcesses.flatMap((name) => {
-      const normalized = normalizeSplitTunnelProcess(name);
-      return normalized ? [normalized] : [];
-    }))].slice(0, 200),
+    splitTunnelProcesses: normalizeProcessSelection(value.splitTunnelProcesses),
   };
 }
 
 function affectsTunnel(before: AppSettings, after: AppSettings): boolean {
   return before.routingMode !== after.routingMode || before.killSwitch !== after.killSwitch || before.useDoh !== after.useDoh || before.dnsServer !== after.dnsServer || before.preventDnsLeaks !== after.preventDnsLeaks || before.antiDpiEnabled !== after.antiDpiEnabled || before.antiDpiPackets !== after.antiDpiPackets || before.antiDpiLength !== after.antiDpiLength || before.antiDpiInterval !== after.antiDpiInterval || before.splitTunnelMode !== after.splitTunnelMode || before.splitTunnelProcesses.join("\0") !== after.splitTunnelProcesses.join("\0");
-}
-
-function normalizeSplitTunnelProcess(value: string): string | null {
-  const trimmed = value.trim();
-  const name = /\.exe$/i.test(trimmed) ? trimmed : `${trimmed}.exe`;
-  return /^[^<>:"/\\|?*\u0000-\u001f]{1,128}\.exe$/i.test(name) ? name : null;
 }
 
 function hasMeasuredLatency(latencies: Record<string, number | null>): boolean {

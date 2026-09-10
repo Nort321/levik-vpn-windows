@@ -33,6 +33,11 @@ jobs:
 
       - run: npm ci
 
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.26.8'
+          cache: false
+
       - name: Set a unique version for this build
         id: version
         shell: pwsh
@@ -95,7 +100,7 @@ jobs:
           retention-days: 14
 
   release:
-    name: Prepare draft GitHub Release
+    name: Publish GitHub Release
     if: ${{ github.ref == 'refs/heads/main' && github.event_name != 'pull_request' }}
     needs: build
     runs-on: ubuntu-latest
@@ -127,3 +132,4 @@ jobs:
               --notes "Автоматическая сборка из main. Установщик: LevikVPN-Windows-x64.exe" \
               --draft
           fi
+          gh release edit "$tag" --draft=false --prerelease=false --latest

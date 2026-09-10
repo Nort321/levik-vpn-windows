@@ -1,5 +1,6 @@
 import type { AppSettings, AppSnapshot, AppTab, TunnelServer, WindowsProcess } from "../shared/contracts";
 import { shouldShowLogin } from "../shared/sessionState";
+import { mergeProcessList, normalizeProcessSelection, processStatusLabel, resolveProcessCompanions, sortProcessList } from "../shared/processes";
 
 let state: AppSnapshot | null = null;
 let activeTab: AppTab = "home";
@@ -8,6 +9,7 @@ let authorizationUri: string | null = null;
 let authorizationRetryTimer: ReturnType<typeof setTimeout> | null = null;
 let showProcessDialog = false;
 let processDialogLoading = false;
+let processDialogRequest = 0;
 let processList: WindowsProcess[] = [];
 let pendingProcesses = new Set<string>();
 let processSearchQuery = "";
@@ -202,7 +204,7 @@ function renderProfile(): string {
         ${switchSetting("Защита от DNS-утечек", "Отключать Windows SMHNR во время работы VPN", "preventDnsLeaks", state.settings.preventDnsLeaks)}
         ${switchSetting("Anti-DPI", "Фрагментировать TLS ClientHello для обхода фильтрации", "antiDpiEnabled", state.settings.antiDpiEnabled)}
         ${selectSetting("Раздельное туннелирование", "Маршрутизация по процессам Windows", "split-tunnel-mode", state.settings.splitTunnelMode, [["off","Выключено"],["bypass","Исключить выбранные"],["only","Только выбранные"]])}
-        ${state.settings.splitTunnelMode !== "off" ? `<div class="setting-row"><div><div class="setting-name">Приложения</div><div class="setting-help">${state.settings.splitTunnelProcesses.length ? `Выбрано: ${state.settings.splitTunnelProcesses.length}` : "Выберите процессы из запущенных приложений"}</div></div><button class="button compact" id="process-picker-button">${icon("process")} Выбрать</button></div>` : ""}
+        ${state.settings.splitTunnelMode !== "off" ? `<div class="setting-row"><div><div class="setting-name">Приложения</div><div class="setting-help">${state.settings.splitTunnelProcesses.length ? `Выбрано: ${resolveProcessCompanions(state.settings.splitTunnelProcesses).length}` : "Выберите процессы из запущенных приложений"}</div></div><button class="button compact" id="process-picker-button">${icon("process")} Выбрать</button></div>` : ""}
         ${switchSetting("Запуск с Windows", "Открывать Levik VPN после входа", "launchAtLogin", state.settings.launchAtLogin)}
         ${switchSetting("Закрытие в трей", "Кнопка закрытия скрывает приложение", "closeToTray", state.settings.closeToTray)}
         ${selectSetting("Оформление", "Единый стиль Levik VPN", "theme", state.settings.theme, [["system","Системная"],["dark","Тёмная"],["light","Светлая"],["amoled","AMOLED"]])}
@@ -229,13 +231,15 @@ function updateSetting(): string {
 }
 
 function renderProcessDialog(): string {
-  const selected = pendingProcesses;
+  const explicit = new Set([...pendingProcesses].map((name) => name.toLowerCase()));
+  const selected = new Set(resolveProcessCompanions([...pendingProcesses]).map((name) => name.toLowerCase()));
+  const items = sortProcessList(mergeProcessList(processList, [...pendingProcesses]), [...pendingProcesses]);
   return `<div class="dialog-backdrop" id="process-dialog-backdrop">
     <section class="process-dialog card" role="dialog" aria-modal="true" aria-labelledby="process-dialog-title">
       <header class="dialog-header"><div><h2 id="process-dialog-title">Приложения Windows</h2><p>Выберите процессы для правила раздельного туннелирования.</p></div><button class="button icon-button" id="close-process-dialog" aria-label="Закрыть">${icon("close")}</button></header>
       <label class="process-search"><span>${icon("search")}</span><input id="process-search-input" type="search" placeholder="Поиск по названию или пути" autocomplete="off" value="${escapeAttribute(processSearchQuery)}" ${processDialogLoading ? "disabled" : ""} /></label>
-      ${processDialogLoading ? `<div class="dialog-loading"><span class="spinner"></span> Получаем список процессов…</div>` : processList.length ? `<div class="process-list">${processList.map((item) => `<button class="process-row ${selected.has(item.name) ? "selected" : ""}" data-process-name="${escapeAttribute(item.name)}" data-process-filter="${escapeAttribute(`${item.name} ${item.path ?? ""}`.toLocaleLowerCase("ru"))}" aria-pressed="${selected.has(item.name)}"><span class="process-icon">${icon("process")}</span><span class="process-copy"><span class="process-name">${escapeHtml(item.name)}</span><span class="process-path">${escapeHtml(item.path ?? "Процесс сейчас не запущен")}</span></span><span class="process-check">${selected.has(item.name) ? icon("check") : ""}</span></button>`).join("")}</div>` : `<div class="empty">Запущенные процессы не найдены</div>`}
-      <footer class="dialog-actions"><button class="button" id="browse-executable-button">${icon("browse")} Обзор…</button><span class="dialog-spacer"></span><button class="button" id="cancel-process-dialog">Отмена</button><button class="button primary" id="save-process-dialog" ${processDialogLoading ? "disabled" : ""}>${icon("save")} Сохранить выбор</button></footer>
+      ${processDialogLoading ? `<div class="dialog-loading"><span class="spinner"></span> Получаем список процессов…</div>` : items.length ? `<div class="process-list">${items.map((item) => `<button class="process-row ${selected.has(item.name.toLowerCase()) ? "selected" : ""}" data-process-name="${escapeAttribute(item.name)}" ${selected.has(item.name.toLowerCase()) && !explicit.has(item.name.toLowerCase()) ? "disabled" : ""} data-process-filter="${escapeAttribute(`${item.name} ${item.path ?? ""}`.toLocaleLowerCase("ru"))}" aria-pressed="${selected.has(item.name.toLowerCase())}"><span class="process-icon">${icon("process")}</span><span class="process-copy"><span class="process-name">${escapeHtml(item.name)}</span><span class="process-path">${escapeHtml(`${processStatusLabel(item)}${selected.has(item.name.toLowerCase()) && !explicit.has(item.name.toLowerCase()) ? " · Связан с выбранной игрой" : ""}`)}</span></span><span class="process-check">${selected.has(item.name.toLowerCase()) ? icon("check") : ""}</span></button>`).join("")}</div>` : `<div class="empty">Запущенные процессы не найдены</div>`}
+      <footer class="dialog-actions"><button class="button" id="browse-executable-button" ${processDialogLoading ? "disabled" : ""}>${icon("browse")} Обзор…</button><span class="dialog-spacer"></span><button class="button" id="cancel-process-dialog">Отмена</button><button class="button primary" id="save-process-dialog" ${processDialogLoading ? "disabled" : ""}>${icon("save")} Сохранить выбор</button></footer>
     </section>
   </div>`;
 }
@@ -329,13 +333,13 @@ function bindPageEvents(): void {
   document.querySelectorAll<HTMLElement>("[data-process-name]").forEach((button) => button.addEventListener("click", () => {
     const processName = button.dataset.processName;
     if (!processName) return;
-    if (pendingProcesses.has(processName)) pendingProcesses.delete(processName);
+    const existing = [...pendingProcesses].find((name) => name.toLowerCase() === processName.toLowerCase());
+    if (existing) pendingProcesses.delete(existing);
     else pendingProcesses.add(processName);
-    const selected = pendingProcesses.has(processName);
-    button.classList.toggle("selected", selected);
-    button.setAttribute("aria-pressed", String(selected));
-    const check = button.querySelector<HTMLElement>(".process-check");
-    if (check) check.innerHTML = selected ? icon("check") : "";
+    render();
+    document.querySelectorAll<HTMLButtonElement>("[data-process-name]").forEach((row) => {
+      if (row.dataset.processName === processName) row.focus({ preventScroll: true });
+    });
   }));
   document.getElementById("process-search-input")?.addEventListener("input", (event) => {
     processSearchQuery = (event.target as HTMLInputElement).value;
@@ -348,7 +352,7 @@ function bindPageEvents(): void {
   document.getElementById("browse-executable-button")?.addEventListener("click", () => void run(async () => {
     const selected = await window.levik.selectExecutable();
     if (!selected) return;
-    pendingProcesses.add(selected.name);
+    pendingProcesses = new Set(normalizeProcessSelection([...pendingProcesses, selected.name]));
     if (!processList.some((item) => item.name.toLocaleLowerCase("en") === selected.name.toLocaleLowerCase("en"))) {
       processList = [...processList, selected].sort((left, right) => left.name.localeCompare(right.name));
     }
@@ -419,28 +423,29 @@ async function openProcessDialog(): Promise<void> {
   if (!state) return;
   showProcessDialog = true;
   processDialogLoading = true;
-  pendingProcesses = new Set(state.settings.splitTunnelProcesses);
+  const request = ++processDialogRequest;
+  pendingProcesses = new Set(normalizeProcessSelection(state.settings.splitTunnelProcesses));
+  processList = [];
   processSearchQuery = "";
   render();
   try {
     const running = await window.levik.listProcesses();
-    const runningNames = new Set(running.map((item) => item.name));
-    processList = [
-      ...running,
-      ...state.settings.splitTunnelProcesses
-        .filter((name) => !runningNames.has(name))
-        .map((name) => ({ name, path: null })),
-    ];
+    if (request !== processDialogRequest) return;
+    processList = mergeProcessList(running, [...pendingProcesses]);
   } catch (error) {
+    if (request !== processDialogRequest) return;
     showToast(error instanceof Error ? error.message : String(error));
-    processList = [];
+    processList = mergeProcessList([], [...pendingProcesses]).map((item) => ({ ...item, running: null }));
   } finally {
-    processDialogLoading = false;
-    if (showProcessDialog) render();
+    if (request === processDialogRequest) {
+      processDialogLoading = false;
+      if (showProcessDialog) render();
+    }
   }
 }
 
 function closeProcessDialog(): void {
+  processDialogRequest += 1;
   showProcessDialog = false;
   processDialogLoading = false;
   render();

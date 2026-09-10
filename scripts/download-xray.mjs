@@ -5,9 +5,11 @@ import { pipeline } from "node:stream/promises";
 import { Readable } from "node:stream";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { buildPatchedXray, XRAY_VERSION } from "./build-xray.mjs";
 
 const execFileAsync = promisify(execFile);
-const version = process.env.LEVIK_XRAY_VERSION ?? "v26.7.28";
+const version = process.env.LEVIK_XRAY_VERSION ?? XRAY_VERSION;
+if (version !== XRAY_VERSION) throw new Error("Update the pinned Xray source and process patch before changing LEVIK_XRAY_VERSION");
 const asset = "Xray-windows-64.zip";
 const base = `https://github.com/XTLS/Xray-core/releases/download/${version}`;
 const vendorDir = "vendor/xray/windows-x64";
@@ -44,8 +46,8 @@ if (process.platform === "win32") {
   await execFileAsync("unzip", ["-q", archive, "-d", vendorDir]);
 }
 
-await writeFile(`${vendorDir}/VERSION`, `${version}\n`);
+await buildPatchedXray(vendorDir);
+await writeFile(`${vendorDir}/VERSION`, `${version}+levik-process-v1\n`);
 await rm(archive, { force: true });
 await rm(`${archive}.dgst`, { force: true });
 console.log(`Verified ${asset} ${version} (${sha256})`);
-

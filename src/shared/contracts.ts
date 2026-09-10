@@ -8,6 +8,7 @@ export type UpdateStatus = "idle" | "checking" | "available" | "downloading" | "
 export interface WindowsProcess {
   name: string;
   path: string | null;
+  running: boolean | null;
 }
 
 export interface DeviceItem {

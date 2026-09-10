@@ -25,6 +25,10 @@ export class XrayManager extends EventEmitter<XrayEvents> {
 
   async start(config: Record<string, unknown>): Promise<void> {
     if (process.platform !== "win32") throw new Error("VPN-туннель запускается только в Windows-сборке");
+    const { stdout: version } = await execFileAsync(this.executablePath(), ["version"], {
+      windowsHide: true, timeout: 5_000, maxBuffer: 64 * 1024,
+    });
+    assertProcessRoutingSupport(config, version);
     await this.stop();
     const interfaceName = await findWindowsOutboundInterface();
     const configInput = Buffer.from(JSON.stringify(bindXrayOutboundInterface(config, interfaceName)), "utf8");
@@ -153,6 +157,16 @@ export class XrayManager extends EventEmitter<XrayEvents> {
     } finally {
       this.statsQueryRunning = false;
     }
+  }
+}
+
+export function assertProcessRoutingSupport(config: Record<string, unknown>, version: string): void {
+  const routing = config.routing;
+  if (!routing || typeof routing !== "object" || !("rules" in routing) || !Array.isArray(routing.rules)) return;
+  const hasProcessRules = routing.rules.some((rule: unknown) => rule !== null && typeof rule === "object"
+    && "process" in rule && Array.isArray(rule.process) && rule.process.length > 0);
+  if (hasProcessRules && !version.includes("levik-process-v1")) {
+    throw new Error("Для раздельного туннелирования требуется обновлённое VPN-ядро. Переустановите актуальную версию Levik VPN.");
   }
 }
 

@@ -105,7 +105,7 @@ describe("Windows tunnel profile", () => {
     expect((inbounds[0]?.sniffing as { destOverride: string[] }).destOverride).not.toContain("fakedns");
   });
 
-  it("bypasses only Overwatch while keeping Battle.net and Agent on the VPN", () => {
+  it("bypasses Overwatch and its companions while keeping Battle.net and Agent on the VPN", () => {
     const profile = prepareTunnelProfile(Buffer.from(JSON.stringify({
       version: 1, profileId: "battle-net", subscriptionId: "subscription-1", issuedAt: new Date().toISOString(),
       source: { mediaType: "text/plain", content: "vless://11111111-1111-4111-8111-111111111111@example.com:443#Server" },
@@ -116,11 +116,30 @@ describe("Windows tunnel profile", () => {
     });
     const routing = config.routing as { rules: Array<Record<string, unknown>> };
     expect(routing.rules).toEqual([
-      { type: "field", process: ["overwatch.exe"], network: "tcp,udp", outboundTag: "direct", ruleTag: "process-bypass" },
+      { type: "field", process: ["overwatch.exe", "Overwatch Launcher.exe", "VivoxVoiceService.exe"], network: "tcp,udp", outboundTag: "direct", ruleTag: "process-bypass" },
       { type: "field", ip: expect.arrayContaining(["127.0.0.0/8", "::1/128"]), outboundTag: "direct" },
     ]);
-    // Unmatched launcher/agent internet traffic uses Xray's first outbound.
+    // Unmatched Battle.net/Agent internet traffic uses Xray's first outbound.
     expect((config.outbounds as Array<Record<string, unknown>>)[0]?.tag).toBe(server.tag);
+  });
+
+  it.each(["global", "bypassRu", "blockedOnly"] as const)("routes only selected applications before domain policies in %s mode", (routingMode) => {
+    const profile = prepareTunnelProfile(Buffer.from(JSON.stringify({
+      version: 1, profileId: "process-only", subscriptionId: "subscription-1", issuedAt: new Date().toISOString(),
+      source: { mediaType: "text/plain", content: "vless://11111111-1111-4111-8111-111111111111@example.com:443#Server" },
+      routing: { proxyDomains: ["domain:vivox.com"] },
+    })), "subscription-1");
+    const server = profile.servers[0]!;
+    const config = buildXrayConfig(profile, server, {
+      ...settings, routingMode, splitTunnelMode: "only", splitTunnelProcesses: ["overwatch.exe", "Browser Helper.EXE"],
+    });
+    const rules = (config.routing as { rules: Array<Record<string, unknown>> }).rules;
+    expect(rules[1]).toEqual({ type: "field", process: ["overwatch.exe", "Browser Helper.EXE", "Overwatch Launcher.exe", "VivoxVoiceService.exe"], network: "tcp,udp", outboundTag: server.tag });
+    expect(rules[2]).toEqual({ type: "field", network: "tcp,udp", outboundTag: "direct" });
+    expect(rules.findIndex((rule) => rule.domain)).toBeGreaterThan(2);
+    const empty = buildXrayConfig(profile, server, { ...settings, routingMode, splitTunnelMode: "only", splitTunnelProcesses: [] });
+    expect((empty.routing as { rules: typeof rules }).rules[1]).toEqual({ type: "field", network: "tcp,udp", outboundTag: "direct" });
+    expect((config.inbounds as Array<{ sniffing: { routeOnly: boolean } }>)[0]?.sniffing.routeOnly).toBe(true);
   });
 
   it("builds a fail-closed Kill Switch configuration", () => {
