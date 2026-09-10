@@ -1,0 +1,2 @@
+# Source archives retain LF endings, so patches must do the same on Windows.
+scripts/patches/*.patch text eol=lf
