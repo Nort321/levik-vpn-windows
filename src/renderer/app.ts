@@ -124,7 +124,7 @@ function renderLogin(): void {
   document.getElementById("login-button")?.addEventListener("click", () => void beginLogin("browser"));
   document.getElementById("qr-login-button")?.addEventListener("click", () => void beginLogin("qr"));
   document.getElementById("cancel-login-button")?.addEventListener("click", () => {
-    window.levik.cancelLogin();
+    void run(() => window.levik.cancelLogin());
     clearLoginWaiting();
     render();
   });
