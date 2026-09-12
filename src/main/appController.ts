@@ -169,6 +169,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
 
   async beginLogin(): Promise<LoginChallenge> {
     if (this.state.busy) throw new Error("Дождитесь завершения текущей операции");
+    let generation = this.loginGeneration;
     this.patch({ busy: true, statusDetail: null });
     try {
       const challenge = await this.api.createChallenge({
@@ -181,7 +182,8 @@ export class AppController extends EventEmitter<AppControllerEvents> {
         requestSigningAlgorithm: "RS256",
         profileEncryptionAlgorithm: "RSA-OAEP+A256GCM",
       });
-      const generation = ++this.loginGeneration;
+      if (generation !== this.loginGeneration) throw new Error("Вход отменён");
+      generation = ++this.loginGeneration;
       void this.pollLogin(challenge, generation);
       const verificationUri = challenge.activationUriComplete ?? challenge.verificationUriComplete;
       if (!verificationUri) throw new Error("Сервер не вернул ссылку авторизации");
@@ -191,7 +193,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
         expiresAt: challenge.expiresAt,
       };
     } finally {
-      this.patch({ busy: false });
+      if (generation === this.loginGeneration) this.patch({ busy: false });
     }
   }
 
