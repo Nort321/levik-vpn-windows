@@ -4,7 +4,7 @@ import type { AppSettings, AppSnapshot, LevikDesktopApi } from "../shared/contra
 
 const api: LevikDesktopApi = {
   snapshot: () => ipcRenderer.invoke(IPC.snapshot) as Promise<AppSnapshot>,
-  login: () => ipcRenderer.invoke(IPC.login),
+  login: (openExternal = true) => ipcRenderer.invoke(IPC.login, openExternal),
   cancelLogin: () => ipcRenderer.invoke(IPC.cancelLogin),
   logout: () => ipcRenderer.invoke(IPC.logout),
   refreshAccount: () => ipcRenderer.invoke(IPC.refreshAccount),
@@ -19,6 +19,7 @@ const api: LevikDesktopApi = {
   pingServers: () => ipcRenderer.invoke(IPC.pingServers),
   revokeDevice: (subscriptionId, deviceId) => ipcRenderer.invoke(IPC.revokeDevice, subscriptionId, deviceId),
   setSubscriptionShield: (subscriptionId, enabled) => ipcRenderer.invoke(IPC.setSubscriptionShield, subscriptionId, enabled),
+  authorizeActivation: (code) => ipcRenderer.invoke(IPC.authorizeActivation, code),
   checkForUpdates: () => ipcRenderer.invoke(IPC.checkForUpdates),
   downloadUpdate: () => ipcRenderer.invoke(IPC.downloadUpdate),
   installUpdate: () => ipcRenderer.invoke(IPC.installUpdate),

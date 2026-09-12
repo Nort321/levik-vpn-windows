@@ -394,6 +394,11 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     await this.refreshAccount();
   }
 
+  async authorizeActivation(code: string): Promise<void> {
+    const normalized = normalizeActivationCode(code);
+    await this.withSession((token) => this.api.authorizeActivation(token, normalized));
+  }
+
   checkForUpdates(): Promise<void> {
     if (!this.updater) throw new Error("Модуль обновлений недоступен");
     return this.updater.check(false);
@@ -728,6 +733,14 @@ export class AppController extends EventEmitter<AppControllerEvents> {
       app.setLoginItemSettings({ openAtLogin: this.state.settings.launchAtLogin });
     }
   }
+}
+
+function normalizeActivationCode(value: string): string {
+  const normalized = value.normalize("NFKC").trim().toUpperCase();
+  if (!/^[A-HJ-NP-Z2-9]{4}(?:-[A-HJ-NP-Z2-9]{4}){3}$/.test(normalized)) {
+    throw new Error("Введите код в формате XXXX-XXXX-XXXX-XXXX");
+  }
+  return normalized;
 }
 
 function serializeSettings(settings: AppSettings): AppSettings & { settingsSchemaVersion: number } {

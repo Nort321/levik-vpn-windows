@@ -94,7 +94,7 @@ export interface LoginChallenge {
 
 export interface LevikDesktopApi {
   snapshot(): Promise<AppSnapshot>;
-  login(): Promise<LoginChallenge>;
+  login(openExternal?: boolean): Promise<LoginChallenge>;
   cancelLogin(): Promise<void>;
   logout(): Promise<void>;
   refreshAccount(): Promise<void>;
@@ -109,6 +109,7 @@ export interface LevikDesktopApi {
   pingServers(): Promise<void>;
   revokeDevice(subscriptionId: string, deviceId: string): Promise<void>;
   setSubscriptionShield(subscriptionId: string, enabled: boolean): Promise<void>;
+  authorizeActivation(code: string): Promise<void>;
   checkForUpdates(): Promise<void>;
   downloadUpdate(): Promise<void>;
   installUpdate(): Promise<void>;
@@ -132,6 +133,7 @@ export const IPC = {
   pingServers: "levik:ping-servers",
   revokeDevice: "levik:revoke-device",
   setSubscriptionShield: "levik:set-subscription-shield",
+  authorizeActivation: "levik:authorize-activation",
   checkForUpdates: "levik:check-for-updates",
   downloadUpdate: "levik:download-update",
   installUpdate: "levik:install-update",

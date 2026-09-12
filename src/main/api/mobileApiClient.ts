@@ -58,6 +58,16 @@ export class MobileApiClient {
     await this.request("POST", "/api/mobile/v1/subscriptions/shield", { subscriptionId, enabled }, accessToken);
   }
 
+  async authorizeActivation(accessToken: string, code: string): Promise<void> {
+    const response = await this.request<{ ok: true; state?: unknown }>(
+      "POST",
+      "/api/mobile/v1/activation/authorize",
+      { code },
+      accessToken,
+    );
+    if (response.state !== "authorized") throw new MobileApiError("API отклонил авторизацию устройства");
+  }
+
   private async request<Response>(
     method: "GET" | "POST",
     path: string,
@@ -137,6 +147,9 @@ function apiErrorMessage(code: string): string {
     subscription_not_found: "Подписка не найдена",
     subscription_inactive: "Подписка неактивна или истекла",
     unauthorized: "Сессия истекла. Войдите снова.",
+    invalid_activation_code: "Проверьте код активации",
+    activation_not_found: "Код активации не найден или срок его действия истёк",
+    rate_limited: "Слишком много попыток. Попробуйте позже.",
   };
   return known[code] ?? code;
 }

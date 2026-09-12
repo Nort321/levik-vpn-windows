@@ -7,9 +7,10 @@ import { listWindowsProcesses, windowsProcessFromPath } from "./windows/processe
 
 export function registerIpc(controller: AppController, window: BrowserWindow): void {
   ipcMain.handle(IPC.snapshot, () => controller.snapshot());
-  ipcMain.handle(IPC.login, async () => {
+  ipcMain.handle(IPC.login, async (_event, shouldOpenExternal: unknown = true) => {
+    if (typeof shouldOpenExternal !== "boolean") throw new Error("Некорректный способ входа");
     const challenge = await controller.beginLogin();
-    await openAllowedExternal(challenge.verificationUri);
+    if (shouldOpenExternal) await openAllowedExternal(challenge.verificationUri);
     return challenge;
   });
   ipcMain.handle(IPC.cancelLogin, () => controller.cancelLogin());
@@ -55,6 +56,10 @@ export function registerIpc(controller: AppController, window: BrowserWindow): v
   ipcMain.handle(IPC.setSubscriptionShield, (_event, subscriptionId: unknown, enabled: unknown) => {
     if (typeof subscriptionId !== "string" || typeof enabled !== "boolean") throw new Error("Некорректные настройки Shield");
     return controller.setSubscriptionShield(subscriptionId, enabled);
+  });
+  ipcMain.handle(IPC.authorizeActivation, (_event, code: unknown) => {
+    if (typeof code !== "string") throw new Error("Некорректный код активации");
+    return controller.authorizeActivation(code);
   });
   ipcMain.handle(IPC.checkForUpdates, () => controller.checkForUpdates());
   ipcMain.handle(IPC.downloadUpdate, () => controller.downloadUpdate());

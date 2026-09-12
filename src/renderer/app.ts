@@ -1,11 +1,15 @@
 import type { AppSettings, AppSnapshot, AppTab, TunnelServer, WindowsProcess } from "../shared/contracts";
 import { shouldShowLogin } from "../shared/sessionState";
 import { mergeProcessList, normalizeProcessSelection, processStatusLabel, resolveProcessCompanions, sortProcessList } from "../shared/processes";
+import QRCode from "qrcode";
 
 let state: AppSnapshot | null = null;
 let activeTab: AppTab = "home";
 let loginWaiting = false;
+let loginMode: "browser" | "qr" = "browser";
 let authorizationUri: string | null = null;
+let authorizationCode: string | null = null;
+let authorizationQrSvg: string | null = null;
 let authorizationRetryTimer: ReturnType<typeof setTimeout> | null = null;
 let showProcessDialog = false;
 let processDialogLoading = false;
@@ -17,6 +21,8 @@ let serverSearchQuery = "";
 let favoritesOnly = false;
 let devicesSubscriptionId: string | null = null;
 let toastTimer: ReturnType<typeof setTimeout> | null = null;
+let activationCodeInput = "";
+let activationSubmitting = false;
 let renderedSnapshotKey: string | null = null;
 
 const root = requiredElement("app");
@@ -95,20 +101,33 @@ function render(preserveScroll = true): void {
 }
 
 function renderLogin(): void {
+  const qrActive = loginWaiting && loginMode === "qr";
   root.innerHTML = `
     <main class="login">
       <section class="login-card card">
         <div class="login-shield">${icon("shield")}</div>
         <h1>Добро пожаловать в Levik VPN</h1>
         <p>Войдите в Levik Account, чтобы синхронизировать подписку и получить защищённый профиль для этого компьютера.</p>
-        <button class="button primary login-primary" id="login-button" ${state?.busy || loginWaiting ? "disabled" : ""}>
+        ${qrActive ? `
+          <div class="login-qr" role="img" aria-label="QR-код для входа">${authorizationQrSvg ?? `<span class="spinner"></span>`}</div>
+          ${authorizationCode ? `<div class="login-code">${escapeHtml(authorizationCode)}</div>` : ""}
+          <p class="login-qr-caption">Если у вас уже выполнен вход на другом устройстве, отсканируйте этот QR-код приложением Levik VPN для быстрого входа</p>
+          <button class="button login-secondary" id="cancel-login-button">${icon("close")} Отмена</button>
+        ` : `<button class="button primary login-primary" id="login-button" ${state?.busy || loginWaiting ? "disabled" : ""}>
           ${state?.busy ? `<span class="spinner"></span>` : icon("login")} ${loginWaiting ? "Ожидание подтверждения…" : "Войти через Levik Account"}
         </button>
         ${loginWaiting && authorizationUri ? `<button class="button compact login-secondary" id="reopen-login-button">${icon("external")} Повторно открыть подтверждение</button>` : ""}
+        ${!loginWaiting ? `<button class="button login-secondary" id="qr-login-button">${icon("qr")} Вход по QR-коду</button>` : ""}`}
         <div class="login-status">${escapeHtml(state?.statusDetail ?? (loginWaiting ? "Завершите вход в открывшемся браузере" : ""))}</div>
       </section>
     </main>`;
-  document.getElementById("login-button")?.addEventListener("click", () => void beginLogin());
+  document.getElementById("login-button")?.addEventListener("click", () => void beginLogin("browser"));
+  document.getElementById("qr-login-button")?.addEventListener("click", () => void beginLogin("qr"));
+  document.getElementById("cancel-login-button")?.addEventListener("click", () => {
+    window.levik.cancelLogin();
+    clearLoginWaiting();
+    render();
+  });
   document.getElementById("reopen-login-button")?.addEventListener("click", () => {
     const uri = authorizationUri;
     if (uri) void run(() => window.levik.openExternal(uri));
@@ -194,6 +213,7 @@ function renderProfile(): string {
     <header class="page-header"><div><h1>Профиль и настройки</h1><div class="subtitle">Levik Account и параметры Windows-клиента</div></div><div class="toolbar"><button class="button" id="manage-subscription-button">${icon("renew")} Управление подпиской</button><button class="button" id="support-button">${icon("support")} Поддержка</button><button class="button danger" id="logout-button">${icon("logout")} Выйти</button></div></header>
     <div class="profile-grid">
       ${accountSection}
+      <section class="section card"><h2 class="card-title">Авторизовать устройство</h2><div class="card-caption">Введите код, показанный на экране другого устройства.</div><form class="activation-form" id="activation-form"><label for="activation-code">Код активации</label><div class="activation-controls"><input id="activation-code" type="text" inputmode="text" autocomplete="one-time-code" maxlength="19" placeholder="XXXX-XXXX-XXXX-XXXX" value="${escapeAttribute(activationCodeInput)}" ${activationSubmitting ? "disabled" : ""} /><button class="button primary" type="submit" ${activationSubmitting ? "disabled" : ""}>${activationSubmitting ? `<span class="spinner"></span>` : icon("link")} Авторизовать</button></div></form></section>
       <section class="section card"><h2 class="card-title">Настройки</h2><div class="settings-list">
         ${selectSetting("Маршрутизация", "Как направлять системный трафик", "routing-mode", state.settings.routingMode, [["global","Весь трафик"],["bypassRu","Обход ресурсов РФ"],["blockedOnly","Только заблокированное"]])}
         ${switchSetting("Автовыбор сервера", "Выбирать сервер с минимальной задержкой", "automaticServer", state.settings.automaticServer)}
@@ -390,21 +410,35 @@ function bindPageEvents(): void {
   document.getElementById("logout-button")?.addEventListener("click", () => {
     if (confirm("Выйти из Levik Account на этом компьютере? Текущий VPN-туннель будет остановлен.")) void run(() => window.levik.logout());
   });
+  document.getElementById("activation-code")?.addEventListener("input", (event) => {
+    activationCodeInput = (event.target as HTMLInputElement).value.toUpperCase().replace(/[^A-Z0-9-]/g, "").slice(0, 19);
+  });
+  document.getElementById("activation-form")?.addEventListener("submit", (event) => {
+    event.preventDefault();
+    void authorizeActivation();
+  });
 }
 
-async function beginLogin(): Promise<void> {
+async function beginLogin(mode: "browser" | "qr"): Promise<void> {
+  loginMode = mode;
   loginWaiting = true;
   render();
   try {
-    const challenge = await window.levik.login();
+    const challenge = await window.levik.login(mode === "browser");
     authorizationUri = challenge.verificationUri;
+    authorizationCode = challenge.verificationCode;
+    authorizationQrSvg = mode === "qr"
+      ? await QRCode.toString(challenge.verificationUri, { type: "svg", width: 232, margin: 1 })
+      : null;
     render();
-    if (authorizationRetryTimer) clearTimeout(authorizationRetryTimer);
+    if (mode === "browser" && authorizationRetryTimer) clearTimeout(authorizationRetryTimer);
+    if (mode === "browser") {
     authorizationRetryTimer = setTimeout(() => {
       if (state && shouldShowLogin(state) && loginWaiting && authorizationUri) {
         void run(() => window.levik.openExternal(authorizationUri as string));
       }
     }, 7_500);
+    }
   } catch (error) {
     clearLoginWaiting();
     render();
@@ -415,8 +449,26 @@ async function beginLogin(): Promise<void> {
 function clearLoginWaiting(): void {
   loginWaiting = false;
   authorizationUri = null;
+  authorizationCode = null;
+  authorizationQrSvg = null;
   if (authorizationRetryTimer) clearTimeout(authorizationRetryTimer);
   authorizationRetryTimer = null;
+}
+
+async function authorizeActivation(): Promise<void> {
+  if (activationSubmitting) return;
+  activationSubmitting = true;
+  render();
+  try {
+    await window.levik.authorizeActivation(activationCodeInput);
+    activationCodeInput = "";
+    showToast("Устройство авторизовано");
+  } catch (error) {
+    showToast(error instanceof Error ? error.message : String(error));
+  } finally {
+    activationSubmitting = false;
+    render();
+  }
 }
 
 async function openProcessDialog(): Promise<void> {
@@ -612,7 +664,7 @@ function escapeAttribute(value: string): string {
   return escapeHtml(value.replace(/[\r\n]/g, ""));
 }
 
-type IconName = "shield" | "home" | "servers" | "stats" | "profile" | "power" | "refresh" | "server" | "clock" | "download" | "upload" | "support" | "logout" | "login" | "external" | "process" | "close" | "check" | "search" | "star" | "pulse" | "browse" | "save" | "devices" | "unlink" | "renew" | "update" | "install";
+type IconName = "shield" | "home" | "servers" | "stats" | "profile" | "power" | "refresh" | "server" | "clock" | "download" | "upload" | "support" | "logout" | "login" | "external" | "process" | "close" | "check" | "search" | "star" | "pulse" | "browse" | "save" | "devices" | "unlink" | "renew" | "update" | "install" | "qr" | "link";
 
 function icon(name: IconName): string {
   const paths: Record<IconName, string> = {
@@ -644,6 +696,8 @@ function icon(name: IconName): string {
     renew: '<path d="M20 7v5h-5"/><path d="M19 12a7 7 0 1 0-2 5"/><path d="M12 8v4l3 2"/>',
     update: '<path d="M12 3v12M7 10l5 5 5-5"/><path d="M5 21h14"/>',
     install: '<path d="M12 3v11M8 10l4 4 4-4"/><rect x="4" y="17" width="16" height="4" rx="1"/>',
+    qr: '<rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><path d="M15 14h2v2h-2zM19 14h2v4h-2zM14 19h4v2h-4zM20 20h1v1h-1z"/>',
+    link: '<path d="M10 13a5 5 0 0 0 7.5.5l2-2a5 5 0 0 0-7-7l-1.1 1.1"/><path d="M14 11a5 5 0 0 0-7.5-.5l-2 2a5 5 0 0 0 7 7l1.1-1.1"/>',
   };
   return `<svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">${paths[name]}</svg>`;
 }

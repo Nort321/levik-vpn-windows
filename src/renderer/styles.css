@@ -336,6 +336,15 @@ select option { color: var(--text); background-color: var(--select-bg); }
 .login .button.compact { min-height: 38px; }
 .login-secondary { color: var(--muted); }
 .login-status { min-height: 18px; color: var(--green); font-size: 12px; margin-top: 14px; }
+.login-qr { width: 248px; min-height: 248px; margin: 18px auto 8px; padding: 8px; display: grid; place-items: center; border-radius: 16px; background: white; color: #07101f; }
+.login-qr svg { width: 232px; height: 232px; display: block; }
+.login-code { margin-top: 10px; color: var(--text); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 18px; font-weight: 700; letter-spacing: .08em; }
+.login .login-qr-caption { margin: 12px 0 0; font-size: 12px; line-height: 1.45; }
+.activation-form { display: grid; gap: 9px; margin-top: 16px; }
+.activation-form label { color: var(--muted); font-size: 11px; }
+.activation-controls { display: flex; gap: 10px; }
+.activation-controls input { min-width: 0; flex: 1; height: 42px; padding: 0 12px; border: 1px solid var(--border); border-radius: 10px; color: var(--text); background: var(--select-bg); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .04em; text-transform: uppercase; }
+.activation-controls .button { flex: none; }
 
 .dialog-backdrop { position: fixed; inset: 0; z-index: 20; display: grid; place-items: center; padding: 24px; background: var(--dialog-backdrop, rgba(2,7,14,.72)); backdrop-filter: blur(12px); }
 .process-dialog { width: min(620px, 100%); max-height: min(760px, 86vh); padding: 20px; display: flex; flex-direction: column; overflow: hidden; }
