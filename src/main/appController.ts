@@ -835,7 +835,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
 
   private applyLoginItemSettings(): void {
     if (process.platform === "win32") {
-      app.setLoginItemSettings({ openAtLogin: this.state.settings.launchAtLogin });
+      app.setLoginItemSettings?.({ openAtLogin: this.state.settings.launchAtLogin });
     }
   }
 }

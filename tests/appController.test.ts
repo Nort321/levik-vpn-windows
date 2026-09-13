@@ -6,6 +6,7 @@ vi.mock("electron", () => ({
     getPath: () => "/tmp/levik-vpn-windows-test",
     getVersion: () => "1.2.3",
     isPackaged: true,
+    setLoginItemSettings: vi.fn(),
   },
 }));
 
