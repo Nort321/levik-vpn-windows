@@ -16,8 +16,9 @@ import { RequestSigner } from "./security/requestSigner";
 import { SecureStore } from "./security/secureStore";
 import { decryptTunnelProfile, prepareTunnelProfile } from "./vpn/tunnelProfile";
 import type { PreparedTunnelProfile } from "./vpn/tunnelProfile";
-import { buildLockdownConfig, buildXrayConfig } from "./vpn/xrayConfig";
+import { buildXrayConfig } from "./vpn/xrayConfig";
 import { XrayManager } from "./vpn/xrayManager";
+import { isTunnelHealthy } from "./vpn/tunnelHealth";
 import { measureServerLatencies } from "./vpn/serverPinger";
 import { DnsLeakProtection } from "./windows/dnsLeakProtection";
 import { WindowsKillSwitch } from "./windows/killSwitch";
@@ -69,7 +70,13 @@ export class AppController extends EventEmitter<AppControllerEvents> {
   private loginGeneration = 0;
   private reconnectAttempts = 0;
   private lastConfig: Record<string, unknown> | null = null;
-  private lockdownActive = false;
+  private connectionGeneration = 0;
+  private tunnelOperation: Promise<void> = Promise.resolve();
+  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private tunnelHealthTimer: ReturnType<typeof setInterval> | null = null;
+  private tunnelHealthCheckRunning = false;
+  private tunnelHealthFailures = 0;
+  private readonly failedServerIds = new Set<string>();
   private trafficDownloadOffset = 0;
   private trafficUploadOffset = 0;
   private lastRawDownload = 0;
@@ -128,8 +135,10 @@ export class AppController extends EventEmitter<AppControllerEvents> {
       await this.killSwitch.disable();
     } else if (recoveredKillSwitch) {
       this.addLog("Kill Switch: восстановлена защита после предыдущего завершения приложения");
+      this.patch({ status: "error", statusDetail: "Kill Switch защищает трафик после сбоя. Подключите VPN или нажмите Отключить, чтобы снять блокировку." });
     }
     this.startKillSwitchHealthMonitor();
+    this.tunnelHealthTimer = setInterval(() => void this.verifyTunnelHealth(), 15_000);
     this.profile = await this.loadProfile();
     if (this.profile) {
       this.state.servers = this.profile.servers;
@@ -238,14 +247,15 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     if (!this.state.account?.subscriptions.some((item) => item.uuid === subscriptionId)) {
       throw new Error("Подписка не найдена");
     }
-    const reconnect = this.xray.isRunning();
+    const reconnect = this.connectionRequested();
+    const generation = this.connectionGeneration + (reconnect ? 1 : 0);
     if (reconnect) await this.stopTunnelForReplacement();
     this.patch({ selectedSubscriptionId: subscriptionId, busy: true });
     try {
       await this.loadTunnelProfile(subscriptionId);
-      if (reconnect) await this.connect();
+      if (reconnect && generation === this.connectionGeneration) await this.connect();
     } catch (error) {
-      if (reconnect) this.patch({ status: "error", statusDetail: messageOf(error), sessionStartedAt: null });
+      if (reconnect && generation === this.connectionGeneration) this.patch({ status: "error", statusDetail: messageOf(error), sessionStartedAt: null });
       throw error;
     } finally {
       this.patch({ busy: false });
@@ -255,21 +265,25 @@ export class AppController extends EventEmitter<AppControllerEvents> {
   async selectServer(serverId: string): Promise<void> {
     const server = this.state.servers.find((item) => item.id === serverId);
     if (!server) throw new Error("Сервер не найден");
-    const reconnect = this.xray.isRunning();
+    const reconnect = this.connectionRequested();
+    const generation = this.connectionGeneration + (reconnect ? 1 : 0);
     if (reconnect) await this.stopTunnelForReplacement();
     try {
       this.state.selectedServerId = serverId;
       await this.secureStore.put("selected_server", Buffer.from(serverId));
       this.emitChanged();
-      if (reconnect) await this.connect();
+      if (reconnect && generation === this.connectionGeneration) await this.connect();
     } catch (error) {
-      if (reconnect) this.patch({ status: "error", statusDetail: messageOf(error), sessionStartedAt: null });
+      if (reconnect && generation === this.connectionGeneration) this.patch({ status: "error", statusDetail: messageOf(error), sessionStartedAt: null });
       throw error;
     }
   }
 
   async connect(): Promise<void> {
     if (this.xray.isRunning() || this.state.status === "connecting") return;
+    const generation = this.connectionGeneration;
+    // Profile refresh can expire the session and call disconnect(), so perform
+    // it outside the serialized process lifecycle to avoid waiting on ourselves.
     if (!this.profile) {
       const subscriptionId = this.state.selectedSubscriptionId;
       if (!subscriptionId) throw new Error("Выберите активную подписку");
@@ -278,6 +292,11 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     if (this.state.settings.automaticServer && !hasMeasuredLatency(this.state.serverLatencies)) {
       await this.pingServers();
     }
+    return this.runTunnelOperation(() => this.connectTunnel(generation));
+  }
+
+  private async connectTunnel(generation: number): Promise<void> {
+    if (generation !== this.connectionGeneration || this.xray.isRunning()) return;
     const server = this.selectedServer();
     if (!server || !this.profile) throw new Error("Выберите VPN-сервер");
     this.resetTrafficStats();
@@ -287,8 +306,11 @@ export class AppController extends EventEmitter<AppControllerEvents> {
       if (this.state.settings.preventDnsLeaks) await this.dnsLeakProtection.enable();
       const config = buildXrayConfig(this.profile, server, this.state.settings);
       this.lastConfig = config;
-      await this.startXray(config);
-      this.lockdownActive = false;
+      await this.startXray(config, generation);
+      if (!await isTunnelHealthy()) throw new Error("VPN-сервер не передаёт трафик. Выберите другой сервер или повторите подключение.");
+      this.assertCurrentConnection(generation);
+      this.tunnelHealthFailures = 0;
+      this.failedServerIds.clear();
       this.reconnectAttempts = 0;
       this.patch({
         status: "connected",
@@ -296,69 +318,80 @@ export class AppController extends EventEmitter<AppControllerEvents> {
         sessionStartedAt: Date.now(),
       });
     } catch (error) {
-      await this.dnsLeakProtection.disable().catch((cleanupError: unknown) => this.addLog(`DNS-защита: ${messageOf(cleanupError)}`));
-      this.patch({ status: "error", statusDetail: messageOf(error), sessionStartedAt: null });
-      throw error;
+      this.lastConfig = null;
+      let failure: unknown = error;
+      try {
+        await this.xray.stop();
+      } finally {
+        try {
+          await this.releaseProtection();
+        } catch (cleanupError) {
+          failure = cleanupError;
+        }
+        if (generation === this.connectionGeneration) {
+          this.patch({ status: "error", statusDetail: messageOf(failure), sessionStartedAt: null });
+        }
+      }
+      throw failure;
     } finally {
       this.patch({ busy: false });
     }
   }
 
-  async disconnect(): Promise<void> {
-    if (!this.xray.isRunning()) {
-      await Promise.all([
-        this.dnsLeakProtection.disable(),
-        this.killSwitch.disable(),
-      ]);
-      this.patch({ status: "disconnected", statusDetail: null, sessionStartedAt: null });
-      return;
-    }
-    this.patch({ status: "disconnecting", statusDetail: "Отключение…" });
-    try {
-      await this.xray.stop();
-    } finally {
-      await Promise.all([
-        this.dnsLeakProtection.disable(),
-        this.killSwitch.disable(),
-      ]);
-    }
-    this.lockdownActive = false;
+  disconnect(): Promise<void> {
+    this.cancelTunnelRecovery();
     this.lastConfig = null;
-    this.patch({ status: "disconnected", statusDetail: null, sessionStartedAt: null });
+    this.patch({ status: "disconnecting", statusDetail: "Отключение…" });
+    return this.runTunnelOperation(async () => {
+      try {
+        await this.xray.stop();
+      } finally {
+        try {
+          await this.releaseProtection();
+          this.patch({ status: "disconnected", statusDetail: null, sessionStartedAt: null, busy: false });
+        } catch (error) {
+          this.patch({ status: "error", statusDetail: messageOf(error), sessionStartedAt: null, busy: false });
+          throw error;
+        }
+      }
+    });
+  }
+
+  private async releaseProtection(): Promise<void> {
+    const results = await Promise.allSettled([
+      this.dnsLeakProtection.disable(), this.killSwitch.disable(),
+    ]);
+    for (const result of results) {
+      if (result.status === "rejected") this.addLog(`Снятие защиты: ${messageOf(result.reason)}`);
+    }
+    const failure = results.find((result) => result.status === "rejected");
+    if (failure?.status === "rejected") throw failure.reason;
   }
 
   async updateSettings(patch: Partial<AppSettings>): Promise<void> {
     const previous = this.state.settings;
     const next = validateSettings({ ...previous, ...patch });
-    const reconnect = this.xray.isRunning() && affectsTunnel(previous, next);
+    const reconnect = this.connectionRequested() && affectsTunnel(previous, next);
+    const generation = this.connectionGeneration;
     this.state.settings = next;
     await this.secureStore.put("settings", Buffer.from(JSON.stringify(serializeSettings(next))));
     this.applyLoginItemSettings();
     this.emitChanged();
     if (!previous.automaticServer && next.automaticServer) void this.pingServers();
     if (previous.killSwitch && !next.killSwitch) await this.killSwitch.disable();
-    if (!previous.killSwitch && next.killSwitch && reconnect) {
-      await this.killSwitch.enable();
-      await this.killSwitch.allowTunnel();
-    }
     if (previous.preventDnsLeaks && !next.preventDnsLeaks) await this.dnsLeakProtection.disable();
-    if (reconnect) {
+    if (reconnect && generation === this.connectionGeneration) {
       await this.stopTunnelForReplacement();
-      await this.connect();
+      if (generation + 1 === this.connectionGeneration) await this.connect();
     }
   }
 
   async shutdown(): Promise<void> {
     this.loginGeneration += 1;
     this.stopKillSwitchHealthMonitor();
-    try {
-      await this.xray.stop();
-    } finally {
-      await Promise.all([
-        this.dnsLeakProtection.disable(),
-        this.killSwitch.disable(),
-      ]);
-    }
+    if (this.tunnelHealthTimer) clearInterval(this.tunnelHealthTimer);
+    this.tunnelHealthTimer = null;
+    await this.disconnect();
   }
 
   async pingServers(): Promise<void> {
@@ -421,22 +454,11 @@ export class AppController extends EventEmitter<AppControllerEvents> {
 
   async restoreAfterSystemResume(): Promise<void> {
     if (this.resumePromise) return this.resumePromise;
-    if (!this.lastConfig || !["connected", "reconnecting"].includes(this.state.status)) return;
+    const generation = this.connectionGeneration;
     this.resumePromise = (async () => {
       await delay(1_500);
-      if (await this.xray.isHealthy()) return;
-      const config = this.lastConfig;
-      if (!config || !["connected", "reconnecting"].includes(this.state.status)) return;
-      this.patch({ status: "reconnecting", statusDetail: "Восстановление после сна или разблокировки…" });
-      if (this.state.settings.preventDnsLeaks) await this.dnsLeakProtection.enable();
-      await this.startXray(config);
-      this.lockdownActive = false;
-      this.reconnectAttempts = 0;
-      this.patch({ status: "connected", statusDetail: "Защищённое соединение восстановлено" });
-    })().catch((error: unknown) => {
-      this.addLog(`Восстановление после сна: ${messageOf(error)}`);
-      this.handleXrayExit(null, false);
-    }).finally(() => { this.resumePromise = null; });
+      if (generation === this.connectionGeneration) await this.verifyTunnelHealth(true);
+    })().finally(() => { this.resumePromise = null; });
     return this.resumePromise;
   }
 
@@ -571,37 +593,105 @@ export class AppController extends EventEmitter<AppControllerEvents> {
   }
 
   private handleXrayExit(code: number | null, expected: boolean): void {
-    if (expected) return;
-    this.patch({ status: "reconnecting", statusDetail: `Туннель остановлен (код ${code ?? "?"}). Восстановление…` });
-    if (!this.state.settings.autoReconnect || !this.lastConfig) {
-      this.patch({ status: "error", statusDetail: "VPN-туннель неожиданно остановлен", sessionStartedAt: null });
-      return;
-    }
-    const delayMs = Math.min(30_000, 1_000 * 2 ** Math.min(this.reconnectAttempts++, 5));
-    if (this.state.settings.killSwitch && !this.lockdownActive) {
-      void this.startXray(buildLockdownConfig(this.state.settings)).then(() => {
-        this.lockdownActive = true;
-        this.addLog("Kill Switch: аварийная блокировка трафика активна");
-      }).catch((error: unknown) => {
-        this.addLog(`Kill Switch: ${messageOf(error)}`);
-      }).finally(() => this.scheduleTunnelRestore(delayMs));
-    } else {
-      this.scheduleTunnelRestore(delayMs);
-    }
+    // Startup/recovery failures are handled by the operation awaiting start().
+    if (expected || this.state.status !== "connected" || !this.lastConfig) return;
+    this.beginTunnelRecovery(`Туннель остановлен (код ${code ?? "?"}). Восстановление…`);
+  }
+
+  private beginTunnelRecovery(detail: string): void {
+    if (this.state.selectedServerId) this.failedServerIds.add(this.state.selectedServerId);
+    this.patch({ status: "reconnecting", statusDetail: detail });
+    this.scheduleTunnelRestore(1_000);
   }
 
   private scheduleTunnelRestore(delayMs: number): void {
-    setTimeout(() => {
-      if (this.state.status !== "reconnecting" || !this.lastConfig) return;
-      void this.startXray(this.lastConfig).then(() => {
-        this.lockdownActive = false;
-        this.reconnectAttempts = 0;
-        this.patch({ status: "connected", statusDetail: "Защищённое соединение восстановлено" });
-      }).catch((error: unknown) => {
-        this.addLog(`Переподключение: ${messageOf(error)}`);
-        this.handleXrayExit(null, false);
-      });
+    if (this.reconnectTimer) return;
+    const generation = this.connectionGeneration;
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null;
+      void this.runTunnelOperation(async () => {
+        if (generation !== this.connectionGeneration || this.state.status !== "reconnecting" || !this.lastConfig) return;
+        try {
+          // WFP retains the fail-closed boundary while the TUN is absent.
+          // Starting a blackhole core here races Wintun teardown and resets TCP.
+          await this.xray.stop();
+          this.assertCurrentConnection(generation);
+          if (!this.state.settings.autoReconnect) {
+            this.patch({ status: "error", statusDetail: "VPN-соединение потеряно. Подключитесь снова или нажмите Отключить, чтобы снять блокировку.", sessionStartedAt: null });
+            return;
+          }
+          if (this.state.settings.automaticServer && this.profile) {
+            await this.pingServers();
+            this.assertCurrentConnection(generation);
+            let candidates = this.state.servers.filter((server) => !this.failedServerIds.has(server.id));
+            if (!candidates.length) {
+              this.failedServerIds.clear();
+              candidates = this.state.servers;
+            }
+            const reachable = candidates.filter((server) => this.state.serverLatencies[server.id] != null);
+            const server = this.bestServer(reachable.length ? reachable : candidates);
+            if (server) {
+              this.patch({ selectedServerId: server.id });
+              await this.secureStore.put("selected_server", Buffer.from(server.id));
+              this.lastConfig = buildXrayConfig(this.profile, server, this.state.settings);
+            }
+          }
+          this.assertCurrentConnection(generation);
+          if (this.state.settings.killSwitch) await this.killSwitch.enable();
+          if (this.state.settings.preventDnsLeaks) await this.dnsLeakProtection.enable();
+          await this.startXray(this.lastConfig, generation);
+          if (!await isTunnelHealthy()) throw new Error("VPN-сервер не передаёт трафик");
+          this.assertCurrentConnection(generation);
+          this.reconnectAttempts = 0;
+          this.tunnelHealthFailures = 0;
+          this.failedServerIds.clear();
+          this.patch({ status: "connected", statusDetail: `Защищено через ${this.selectedServer()?.name ?? "VPN"}` });
+        } catch (error) {
+          await this.xray.stop();
+          if (generation !== this.connectionGeneration) return;
+          if (this.state.selectedServerId) this.failedServerIds.add(this.state.selectedServerId);
+          this.addLog(`Переподключение: ${messageOf(error)}`);
+          this.scheduleTunnelRestore(Math.min(30_000, 1_000 * 2 ** Math.min(++this.reconnectAttempts, 5)));
+        }
+      }).catch((error: unknown) => this.addLog(`Восстановление туннеля: ${messageOf(error)}`));
     }, delayMs);
+  }
+
+  private async verifyTunnelHealth(immediate = false): Promise<void> {
+    if (this.tunnelHealthCheckRunning || this.state.status !== "connected") return;
+    const generation = this.connectionGeneration;
+    this.tunnelHealthCheckRunning = true;
+    try {
+      const healthy = await this.xray.isHealthy() && await isTunnelHealthy();
+      if (generation !== this.connectionGeneration || this.state.status !== "connected") return;
+      this.tunnelHealthFailures = healthy ? 0 : this.tunnelHealthFailures + 1;
+      if (!healthy && (immediate || this.tunnelHealthFailures >= 3)) {
+        this.beginTunnelRecovery("VPN-сервер перестал передавать трафик. Восстановление…");
+      }
+    } catch (error) {
+      this.addLog(`Проверка туннеля: ${messageOf(error)}`);
+    } finally {
+      this.tunnelHealthCheckRunning = false;
+    }
+  }
+
+  private runTunnelOperation(operation: () => Promise<void>): Promise<void> {
+    const pending = this.tunnelOperation.then(operation);
+    this.tunnelOperation = pending.catch(() => {});
+    return pending;
+  }
+
+  private cancelTunnelRecovery(): void {
+    this.connectionGeneration += 1;
+    if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = null;
+    this.reconnectAttempts = 0;
+    this.tunnelHealthFailures = 0;
+    this.failedServerIds.clear();
+  }
+
+  private assertCurrentConnection(generation: number): void {
+    if (generation !== this.connectionGeneration) throw new Error("Подключение отменено");
   }
 
   private handleTrafficStats(downloadBytes: number, uploadBytes: number): void {
@@ -616,10 +706,13 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     }
   }
 
-  private async startXray(config: Record<string, unknown>): Promise<void> {
+  private async startXray(config: Record<string, unknown>, generation: number): Promise<void> {
+    this.assertCurrentConnection(generation);
     await this.xray.start(config);
     try {
+      this.assertCurrentConnection(generation);
       await this.killSwitch.allowTunnel();
+      this.assertCurrentConnection(generation);
     } catch (error) {
       await this.xray.stop();
       throw error;
@@ -662,9 +755,14 @@ export class AppController extends EventEmitter<AppControllerEvents> {
   }
 
   private async stopTunnelForReplacement(): Promise<void> {
+    this.cancelTunnelRecovery();
     this.patch({ status: "reconnecting", statusDetail: "Применение изменений соединения…" });
-    await this.xray.stop();
-    this.lockdownActive = false;
+    await this.runTunnelOperation(() => this.xray.stop());
+    this.lastConfig = null;
+  }
+
+  private connectionRequested(): boolean {
+    return this.xray.isRunning() || ["connecting", "connected", "reconnecting"].includes(this.state.status);
   }
 
   private resetTrafficStats(): void {

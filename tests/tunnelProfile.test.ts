@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { prepareTunnelProfile } from "../src/main/vpn/tunnelProfile";
-import { bindXrayOutboundInterface, buildLockdownConfig, buildXrayConfig } from "../src/main/vpn/xrayConfig";
+import { bindXrayOutboundInterface, buildXrayConfig } from "../src/main/vpn/xrayConfig";
 import type { AppSettings } from "../src/shared/contracts";
 
 const settings: AppSettings = {
@@ -115,7 +115,7 @@ describe("Windows tunnel profile", () => {
       ...settings, routingMode: "global", splitTunnelMode: "bypass", splitTunnelProcesses: ["overwatch.exe"],
     });
     const routing = config.routing as { rules: Array<Record<string, unknown>> };
-    expect(routing.rules).toEqual([
+    expect(routing.rules.slice(1)).toEqual([
       { type: "field", process: ["overwatch.exe", "Overwatch Launcher.exe", "VivoxVoiceService.exe"], network: "tcp,udp", outboundTag: "direct", ruleTag: "process-bypass" },
       { type: "field", ip: expect.arrayContaining(["127.0.0.0/8", "::1/128"]), outboundTag: "direct" },
     ]);
@@ -134,18 +134,28 @@ describe("Windows tunnel profile", () => {
       ...settings, routingMode, splitTunnelMode: "only", splitTunnelProcesses: ["overwatch.exe", "Browser Helper.EXE"],
     });
     const rules = (config.routing as { rules: Array<Record<string, unknown>> }).rules;
-    expect(rules[1]).toEqual({ type: "field", process: ["overwatch.exe", "Browser Helper.EXE", "Overwatch Launcher.exe", "VivoxVoiceService.exe"], network: "tcp,udp", outboundTag: server.tag });
-    expect(rules[2]).toEqual({ type: "field", network: "tcp,udp", outboundTag: "direct" });
-    expect(rules.findIndex((rule) => rule.domain)).toBeGreaterThan(2);
+    expect(rules[2]).toEqual({ type: "field", process: ["overwatch.exe", "Browser Helper.EXE", "Overwatch Launcher.exe", "VivoxVoiceService.exe"], network: "tcp,udp", outboundTag: server.tag });
+    expect(rules[3]).toEqual({ type: "field", network: "tcp,udp", outboundTag: "direct" });
+    expect(rules.findIndex((rule) => rule.domain)).toBeGreaterThan(3);
     const empty = buildXrayConfig(profile, server, { ...settings, routingMode, splitTunnelMode: "only", splitTunnelProcesses: [] });
-    expect((empty.routing as { rules: typeof rules }).rules[1]).toEqual({ type: "field", network: "tcp,udp", outboundTag: "direct" });
+    expect((empty.routing as { rules: typeof rules }).rules[2]).toEqual({ type: "field", network: "tcp,udp", outboundTag: "direct" });
     expect((config.inbounds as Array<{ sniffing: { routeOnly: boolean } }>)[0]?.sniffing.routeOnly).toBe(true);
   });
 
-  it("builds a fail-closed Kill Switch configuration", () => {
-    const config = buildLockdownConfig(settings);
-    const routing = config.routing as { rules: Array<{ outboundTag: string }> };
-    expect(routing.rules.at(-1)?.outboundTag).toBe("levik-block");
+  it.each(["off", "only", "bypass"] as const)("forces health probes through the VPN with split mode %s", (splitTunnelMode) => {
+    const profile = prepareTunnelProfile(Buffer.from(JSON.stringify({
+      version: 1, profileId: "health", subscriptionId: "subscription-1", issuedAt: new Date().toISOString(),
+      source: { mediaType: "text/plain", content: "vless://11111111-1111-4111-8111-111111111111@example.com:443#Server" },
+    })), "subscription-1");
+    const config = buildXrayConfig(profile, profile.servers[0]!, {
+      ...settings, splitTunnelMode, splitTunnelProcesses: ["Levik VPN.exe"], routingMode: "blockedOnly",
+    });
+    const routing = config.routing as { rules: Array<Record<string, unknown>> };
+    expect(routing.rules[0]).toEqual({ type: "field", inboundTag: ["levik-health"], outboundTag: profile.servers[0]!.tag });
+    expect(config.inbounds).toContainEqual({
+      tag: "levik-health", listen: "127.0.0.1", port: 47186,
+      protocol: "http", settings: { allowTransparent: false },
+    });
   });
 
   it.each(["global", "bypassRu", "blockedOnly"] as const)("prioritizes VALORANT TCP/UDP bypass in %s mode", (routingMode) => {
@@ -159,8 +169,8 @@ describe("Windows tunnel profile", () => {
       ...settings, routingMode, splitTunnelMode: "bypass", splitTunnelProcesses: processes,
     });
     const routing = config.routing as { rules: Array<Record<string, unknown>> };
-    expect(routing.rules[0]).toEqual({ type: "field", process: processes, network: "tcp,udp", outboundTag: "direct", ruleTag: "process-bypass" });
-    expect(routing.rules.findIndex((rule) => rule.outboundTag === profile.servers[0]!.tag)).toBeGreaterThan(0);
+    expect(routing.rules[1]).toEqual({ type: "field", process: processes, network: "tcp,udp", outboundTag: "direct", ruleTag: "process-bypass" });
+    expect(routing.rules.findIndex((rule) => !rule.inboundTag && rule.outboundTag === profile.servers[0]!.tag)).toBeGreaterThan(0);
     expect(config.log).toEqual({ loglevel: "info" });
 
     for (const splitTunnelMode of ["off", "only", "bypass"] as const) {
@@ -173,7 +183,11 @@ describe("Windows tunnel profile", () => {
   });
 
   it.each(["Ethernet", "Wi-Fi"])("binds direct and automatic outbound sockets to %s without pinning an IP", (name) => {
-    const config = buildLockdownConfig(settings);
+    const profile = prepareTunnelProfile(Buffer.from(JSON.stringify({
+      version: 1, profileId: "binding", subscriptionId: "subscription-1", issuedAt: new Date().toISOString(),
+      source: { mediaType: "text/plain", content: "vless://11111111-1111-4111-8111-111111111111@example.com:443#Server" },
+    })), "subscription-1");
+    const config = buildXrayConfig(profile, profile.servers[0]!, settings);
     const original = structuredClone(config);
     const bound = bindXrayOutboundInterface(config, name);
     const outbounds = bound.outbounds as Array<Record<string, unknown>>;

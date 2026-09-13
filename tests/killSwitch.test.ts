@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { WindowsKillSwitch } from "../src/main/windows/killSwitch";
 import type { KillSwitchCommandRunner } from "../src/main/windows/killSwitch";
 
@@ -112,5 +112,62 @@ describe("Windows Kill Switch lifecycle", () => {
       ["enable", expect.any(String), expect.any(String)],
       ["status"],
     ]);
+  });
+});
+
+
+describe("Wintun readiness", () => {
+  afterEach(() => { vi.useRealTimers(); });
+
+  it("retries a registering adapter and succeeds without removing WFP protection", async () => {
+    vi.useFakeTimers();
+    const commands: string[][] = [];
+    const killSwitch = new WindowsKillSwitch(() => "xray.exe", {
+      platform: "win32", helperExecutablePath: "helper.exe", run: recordingRunner(commands, [0, 1168, 1168, 0]),
+    });
+    await killSwitch.enable();
+    const pending = killSwitch.allowTunnel();
+    await vi.advanceTimersByTimeAsync(500);
+    await pending;
+    expect(commands.filter((command) => command[0] === "allow-tunnel")).toHaveLength(3);
+    expect(killSwitch.isActive()).toBe(true);
+  });
+
+  it("bounds retries when the adapter never appears", async () => {
+    vi.useFakeTimers();
+    const commands: string[][] = [];
+    const killSwitch = new WindowsKillSwitch(() => "xray.exe", {
+      platform: "win32", helperExecutablePath: "helper.exe", run: recordingRunner(commands, [0, ...Array<number>(21).fill(1168)]),
+    });
+    await killSwitch.enable();
+    const pending = expect(killSwitch.allowTunnel()).rejects.toThrow("1168");
+    await vi.advanceTimersByTimeAsync(5_000);
+    await pending;
+    expect(commands).toHaveLength(22);
+  });
+
+  it("does not retry permission errors", async () => {
+    const commands: string[][] = [];
+    const killSwitch = new WindowsKillSwitch(() => "xray.exe", {
+      platform: "win32", helperExecutablePath: "helper.exe", run: recordingRunner(commands, [0, 5]),
+    });
+    await killSwitch.enable();
+    await expect(killSwitch.allowTunnel()).rejects.toThrow("5");
+    expect(commands).toHaveLength(2);
+  });
+
+  it("stops retrying after protection is disabled", async () => {
+    vi.useFakeTimers();
+    const commands: string[][] = [];
+    const killSwitch = new WindowsKillSwitch(() => "xray.exe", {
+      platform: "win32", helperExecutablePath: "helper.exe", run: recordingRunner(commands, [0, 1168, 0]),
+    });
+    await killSwitch.enable();
+    const pending = killSwitch.allowTunnel();
+    await Promise.resolve();
+    await killSwitch.disable();
+    await vi.advanceTimersByTimeAsync(250);
+    await pending;
+    expect(commands.map((command) => command[0])).toEqual(["enable", "allow-tunnel", "disable"]);
   });
 });

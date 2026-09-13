@@ -69,7 +69,16 @@ export class WindowsKillSwitch {
 
   async allowTunnel(): Promise<void> {
     if (this.platform !== "win32" || !this.active) return;
-    await this.execute("allow-tunnel", "LevikVPN");
+    // Wintun can still be registering after Xray has passed its startup grace period.
+    // Retry only ERROR_NOT_FOUND; permission/filter errors must fail immediately.
+    for (let attempt = 0; attempt <= 20 && this.active; attempt += 1) {
+      const result = await this.run(["allow-tunnel", "LevikVPN"]);
+      if (result.exitCode !== 1168 || attempt === 20) {
+        this.assertSuccessful(result, "allow-tunnel");
+        return;
+      }
+      await new Promise<void>((resolve) => setTimeout(resolve, 250));
+    }
   }
 
   async disable(): Promise<void> {

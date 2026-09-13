@@ -1,6 +1,7 @@
 import type { AppSettings, TunnelServer } from "../../shared/contracts";
 import type { PreparedTunnelProfile } from "./tunnelProfile";
 import { XRAY_STATS_ENDPOINT } from "./xrayStats";
+import { TUNNEL_HEALTH_PORT, TUNNEL_HEALTH_TAG } from "./tunnelHealth";
 import { resolveProcessCompanions } from "../../shared/processes";
 
 const LOCAL_CIDRS = [
@@ -39,6 +40,8 @@ export function buildXrayConfig(
   const processBypass = settings.splitTunnelMode === "bypass" && processes.length > 0;
 
   const rules: Record<string, unknown>[] = [
+    // Probe the selected VPN even when application/domain rules bypass it.
+    { type: "field", inboundTag: [TUNNEL_HEALTH_TAG], outboundTag: server.tag },
     ...(processBypass
       ? [{ type: "field", process: processes, network: "tcp,udp", outboundTag: "direct", ruleTag: "process-bypass" }]
       : []),
@@ -70,7 +73,10 @@ export function buildXrayConfig(
         : [settings.dnsServer],
       queryStrategy: "UseIP",
     },
-    inbounds: [tunInbound(settings.dnsServer)],
+    inbounds: [tunInbound(settings.dnsServer), {
+      tag: TUNNEL_HEALTH_TAG, listen: "127.0.0.1", port: TUNNEL_HEALTH_PORT,
+      protocol: "http", settings: { allowTransparent: false },
+    }],
     outbounds: [
       selectedOutbound,
       { tag: "direct", protocol: "freedom", settings: { domainStrategy: "UseIP" } },
@@ -130,25 +136,6 @@ export function bindXrayOutboundInterface(config: Record<string, unknown>, inter
     }
   }
   return bound;
-}
-
-export function buildLockdownConfig(settings: AppSettings): Record<string, unknown> {
-  return {
-    log: { loglevel: "warning" },
-    dns: { servers: [settings.dnsServer], queryStrategy: "UseIP" },
-    inbounds: [tunInbound(settings.dnsServer)],
-    outbounds: [
-      { tag: "direct", protocol: "freedom", settings: { domainStrategy: "UseIP" } },
-      { tag: "levik-block", protocol: "blackhole", settings: {} },
-    ],
-    routing: {
-      domainStrategy: "IPIfNonMatch",
-      rules: [
-        { type: "field", ip: LOCAL_CIDRS, outboundTag: "direct" },
-        { type: "field", network: "tcp,udp", outboundTag: "levik-block" },
-      ],
-    },
-  };
 }
 
 function tunInbound(dnsServer: string): Record<string, unknown> {
