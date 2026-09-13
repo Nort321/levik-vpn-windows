@@ -299,6 +299,9 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     if (generation !== this.connectionGeneration || this.xray.isRunning()) return;
     const server = this.selectedServer();
     if (!server || !this.profile) throw new Error("Выберите VPN-сервер");
+    // A replacement or retry inherits the existing fail-closed boundary.
+    // Only a fresh connection may release protection on startup failure.
+    const retainProtectionOnFailure = this.state.settings.killSwitch && this.killSwitch.isActive();
     this.resetTrafficStats();
     this.patch({ status: "connecting", statusDetail: `Подключение через ${server.name}…`, busy: true, downloadBytes: 0, uploadBytes: 0 });
     try {
@@ -324,7 +327,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
         await this.xray.stop();
       } finally {
         try {
-          await this.releaseProtection();
+          if (!retainProtectionOnFailure) await this.releaseProtection();
         } catch (cleanupError) {
           failure = cleanupError;
         }
@@ -599,6 +602,8 @@ export class AppController extends EventEmitter<AppControllerEvents> {
   }
 
   private beginTunnelRecovery(detail: string): void {
+    // In-flight probes belong to the failed tunnel, not its replacement.
+    this.connectionGeneration += 1;
     if (this.state.selectedServerId) this.failedServerIds.add(this.state.selectedServerId);
     this.patch({ status: "reconnecting", statusDetail: detail });
     this.scheduleTunnelRestore(1_000);

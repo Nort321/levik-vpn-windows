@@ -86,9 +86,10 @@ function tunnelController() {
     start: vi.fn(async (_config: Record<string, unknown>) => { running = true; }),
     stop: vi.fn(async () => { running = false; }),
   };
+  let protectedTraffic = false;
   const killSwitch = {
-    enable: vi.fn(async () => {}), allowTunnel: vi.fn(async () => {}),
-    disable: vi.fn(async () => {}), isActive: vi.fn(() => true),
+    enable: vi.fn(async () => { protectedTraffic = true; }), allowTunnel: vi.fn(async () => {}),
+    disable: vi.fn(async () => { protectedTraffic = false; }), isActive: vi.fn(() => protectedTraffic),
   };
   const dns = { enable: vi.fn(async () => {}), disable: vi.fn(async () => {}) };
   Reflect.set(controller, "profile", profile);
@@ -143,6 +144,53 @@ describe("AppController tunnel recovery", () => {
     await expect(controller.connect()).rejects.toThrow("disable failed");
     expect(dns.disable).toHaveBeenCalledOnce();
     expect(controller.snapshot()).toMatchObject({ status: "error", busy: false });
+  });
+
+  it.each([
+    ["server", "startup"], ["server", "authorization"], ["server", "health"],
+    ["settings", "startup"], ["settings", "authorization"], ["settings", "health"],
+  ] as const)("retains WFP after %s replacement fails during %s until explicit disconnect", async (replacement, failure) => {
+    const { controller, xray, killSwitch, dns, second } = tunnelController();
+    await controller.updateSettings({ automaticServer: false });
+    await controller.connect();
+    if (failure === "startup") xray.start.mockRejectedValueOnce(new Error("startup failed"));
+    if (failure === "authorization") killSwitch.allowTunnel.mockRejectedValueOnce(new Error("adapter unavailable"));
+    if (failure === "health") vi.mocked(isTunnelHealthy).mockResolvedValueOnce(false);
+
+    await expect(replacement === "server"
+      ? controller.selectServer(second.id)
+      : controller.updateSettings({ routingMode: "bypassRu" })).rejects.toThrow();
+
+    expect(xray.isRunning()).toBe(false);
+    expect(killSwitch.isActive()).toBe(true);
+    expect(killSwitch.disable).not.toHaveBeenCalled();
+    expect(dns.disable).not.toHaveBeenCalled();
+    expect(controller.snapshot()).toMatchObject({
+      status: "error", busy: false, sessionStartedAt: null, settings: { killSwitch: true },
+    });
+    expect(controller.snapshot().statusDetail).toBeTruthy();
+
+    // Retrying a failed replacement must preserve the same boundary too.
+    vi.mocked(isTunnelHealthy).mockResolvedValueOnce(false);
+    await expect(controller.connect()).rejects.toThrow("не передаёт трафик");
+    expect(killSwitch.isActive()).toBe(true);
+    expect(killSwitch.disable).not.toHaveBeenCalled();
+
+    await controller.disconnect();
+    expect(killSwitch.disable).toHaveBeenCalledOnce();
+    expect(killSwitch.isActive()).toBe(false);
+    expect(dns.disable).toHaveBeenCalledOnce();
+    expect(controller.snapshot().status).toBe("disconnected");
+  });
+
+  it("releases protection when a settings replacement explicitly disables the kill switch", async () => {
+    const { controller, killSwitch, dns } = tunnelController();
+    await controller.connect();
+    vi.mocked(isTunnelHealthy).mockResolvedValueOnce(false);
+    await expect(controller.updateSettings({ killSwitch: false })).rejects.toThrow("не передаёт трафик");
+    expect(killSwitch.isActive()).toBe(false);
+    expect(dns.disable).toHaveBeenCalledOnce();
+    expect(controller.snapshot()).toMatchObject({ status: "error", settings: { killSwitch: false } });
   });
 
   it("requires actual VPN traffic before reporting connected", async () => {
@@ -240,6 +288,33 @@ describe("AppController tunnel recovery", () => {
     finishProbe?.(false);
     await health;
     expect(controller.snapshot().status).toBe("connected");
+  });
+
+  it.each([true, false])("ignores a deferred probe spanning automatic recovery (immediate=%s)", async (immediate) => {
+    const { controller, xray, second } = tunnelController();
+    await controller.connect();
+    let finishProbe: ((healthy: boolean) => void) | undefined;
+    vi.mocked(isTunnelHealthy).mockImplementationOnce(() => new Promise<boolean>((resolve) => { finishProbe = resolve; }));
+    const health = checkTunnel(controller, immediate);
+    await Promise.resolve();
+    expect(finishProbe).toBeDefined();
+
+    exited(controller);
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(controller.snapshot()).toMatchObject({ status: "connected", selectedServerId: second.id });
+    finishProbe?.(false);
+    await health;
+    expect(controller.snapshot()).toMatchObject({ status: "connected", selectedServerId: second.id });
+
+    // Stale periodic results must not count toward the new tunnel's threshold.
+    vi.mocked(isTunnelHealthy).mockResolvedValue(false);
+    await checkTunnel(controller);
+    await checkTunnel(controller);
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(controller.snapshot().status).toBe("connected");
+    expect(xray.start).toHaveBeenCalledTimes(2);
+    await checkTunnel(controller);
+    expect(controller.snapshot().status).toBe("reconnecting");
   });
 
   it("preserves a manually selected server during recovery", async () => {
