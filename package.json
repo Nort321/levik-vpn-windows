@@ -1,6 +1,6 @@
 {
   "name": "levik-vpn-windows",
-  "version": "1.2.3",
+  "version": "1.2.4",
   "private": true,
   "description": "Official Levik VPN client for Windows",
   "main": "dist/main/main.js",

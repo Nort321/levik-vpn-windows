@@ -32,7 +32,8 @@ export function buildXrayConfig(
   server: TunnelServer,
   settings: AppSettings,
 ): Record<string, unknown> {
-  const selectedOutbound = withAntiDpi(server, settings);
+  const antiDpiOutbound = withAntiDpi(server, settings);
+  const selectedOutbound = withAlternateXhttpMux(antiDpiOutbound);
   const directDomains = [...profile.directDomains];
   const proxyDomains = [...profile.proxyDomains];
   if (settings.routingMode === "blockedOnly") proxyDomains.push(...BLOCKED_DOMAINS);
@@ -80,7 +81,7 @@ export function buildXrayConfig(
     outbounds: [
       selectedOutbound,
       { tag: "direct", protocol: "freedom", settings: { domainStrategy: "UseIP" } },
-      ...(settings.antiDpiEnabled && selectedOutbound !== server.outbound ? [{
+      ...(settings.antiDpiEnabled && antiDpiOutbound !== server.outbound ? [{
         tag: "levik-fragment",
         protocol: "freedom",
         settings: {
@@ -98,6 +99,22 @@ export function buildXrayConfig(
     policy: { system: { statsInboundDownlink: true, statsInboundUplink: true, statsOutboundDownlink: true, statsOutboundUplink: true } },
     stats: {},
   };
+}
+
+function withAlternateXhttpMux(outbound: Record<string, unknown>): Record<string, unknown> {
+  if ("mux" in outbound || outbound.protocol !== "vless") return outbound;
+  const stream = outbound.streamSettings;
+  if (!isRecord(stream) || typeof stream.network !== "string") return outbound;
+  if (!["xhttp", "splithttp"].includes(stream.network.toLowerCase())) return outbound;
+  const settings = outbound.settings;
+  if (!isRecord(settings) || !Array.isArray(settings.vnext) || settings.vnext.length === 0) return outbound;
+  if (!settings.vnext.every((server: unknown) => isRecord(server)
+    && typeof server.address === "string"
+    && server.address.toLowerCase() === "leva.levikfartik.ru")) return outbound;
+
+  // This edge requires the patched server's Mux keepalive for idle XHTTP downlinks.
+  // Explicit profile settings take precedence; other hosts keep their own behavior.
+  return { ...outbound, mux: { enabled: true, concurrency: 1 } };
 }
 
 function withAntiDpi(server: TunnelServer, settings: AppSettings): Record<string, unknown> {
