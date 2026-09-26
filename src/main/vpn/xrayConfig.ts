@@ -3,6 +3,7 @@ import type { PreparedTunnelProfile } from "./tunnelProfile";
 import { XRAY_STATS_ENDPOINT } from "./xrayStats";
 import { TUNNEL_HEALTH_PORT, TUNNEL_HEALTH_TAG } from "./tunnelHealth";
 import { resolveProcessCompanions } from "../../shared/processes";
+import { isIP } from "node:net";
 
 const LOCAL_CIDRS = [
   "0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8", "169.254.0.0/16",
@@ -21,7 +22,8 @@ const BLOCKED_DOMAINS = [
   "domain:x.com", "domain:twitter.com", "domain:twimg.com", "domain:openai.com", "domain:chatgpt.com",
   "domain:oaistatic.com", "domain:oaiusercontent.com", "domain:claude.ai", "domain:anthropic.com",
   "domain:notion.so", "domain:notion.site", "domain:discord.com", "domain:discordapp.com",
-  "domain:discord.gg", "domain:canva.com", "domain:linkedin.com", "domain:licdn.com",
+  "domain:discord.gg", "domain:discord.media", "domain:discordapp.net", "domain:discordcdn.com",
+  "geosite:discord", "domain:canva.com", "domain:linkedin.com", "domain:licdn.com",
   "domain:spotify.com", "domain:rutracker.org", "domain:flibusta.is", "domain:meduza.io",
   "domain:bbc.com", "domain:dw.com", "domain:svoboda.org", "domain:rferl.org",
   "domain:zona.media", "domain:theins.ru", "domain:novayagazeta.eu", "domain:holod.media",
@@ -33,7 +35,8 @@ export function buildXrayConfig(
   settings: AppSettings,
 ): Record<string, unknown> {
   const antiDpiOutbound = withAntiDpi(server, settings);
-  const selectedOutbound = withAlternateXhttpMux(antiDpiOutbound);
+  const selectedOutbound = withBootstrapResolution(withAlternateXhttpMux(antiDpiOutbound));
+  const bootstrapDomains = endpointDomains(server.outbound.settings);
   const directDomains = [...profile.directDomains];
   const proxyDomains = [...profile.proxyDomains];
   if (settings.routingMode === "blockedOnly") proxyDomains.push(...BLOCKED_DOMAINS);
@@ -43,6 +46,9 @@ export function buildXrayConfig(
   const rules: Record<string, unknown>[] = [
     // Probe the selected VPN even when application/domain rules bypass it.
     { type: "field", inboundTag: [TUNNEL_HEALTH_TAG], outboundTag: server.tag },
+    // System DNS must reach the configured resolver before process/LAN bypass.
+    { type: "field", inboundTag: ["levik-tun-in"], port: "53", outboundTag: "levik-dns-out" },
+    { type: "field", inboundTag: ["levik-dns"], outboundTag: server.tag },
     ...(processBypass
       ? [{ type: "field", process: processes, network: "tcp,udp", outboundTag: "direct", ruleTag: "process-bypass" }]
       : []),
@@ -69,9 +75,19 @@ export function buildXrayConfig(
     log: { loglevel: processBypass ? "info" : "warning" },
     api: { tag: "levik-api", listen: XRAY_STATS_ENDPOINT, services: ["StatsService"] },
     dns: {
-      servers: settings.useDoh
-        ? [{ address: "https://1.1.1.1/dns-query", skipFallback: false }, settings.dnsServer]
-        : [settings.dnsServer],
+      tag: "levik-dns",
+      servers: [
+        // Resolving the VPN endpoint through that same VPN creates a cycle.
+        // Only endpoint names use physical-interface HTTPS bootstrap DNS.
+        ...bootstrapDomains.length ? ["1.1.1.1", "8.8.8.8"].map((ip) => ({
+          address: `https+local://${ip}/dns-query`, domains: bootstrapDomains,
+          skipFallback: true,
+        })) : [],
+        ...settings.useDoh
+          ? ["https://1.1.1.1/dns-query", "https://8.8.8.8/dns-query"]
+          : [settings.dnsServer],
+      ],
+      disableFallbackIfMatch: true,
       queryStrategy: "UseIP",
     },
     inbounds: [tunInbound(settings.dnsServer), {
@@ -80,6 +96,8 @@ export function buildXrayConfig(
     }],
     outbounds: [
       selectedOutbound,
+      // The pinned core answers non-address queries immediately with NODATA.
+      { tag: "levik-dns-out", protocol: "dns", settings: {} },
       { tag: "direct", protocol: "freedom", settings: { domainStrategy: "UseIP" } },
       ...(settings.antiDpiEnabled && antiDpiOutbound !== server.outbound ? [{
         tag: "levik-fragment",
@@ -99,6 +117,22 @@ export function buildXrayConfig(
     policy: { system: { statsInboundDownlink: true, statsInboundUplink: true, statsOutboundDownlink: true, statsOutboundUplink: true } },
     stats: {},
   };
+}
+
+function endpointDomains(value: unknown): string[] {
+  if (Array.isArray(value)) return unique(value.flatMap(endpointDomains));
+  if (!isRecord(value)) return [];
+  return unique(Object.entries(value).flatMap(([key, item]) =>
+    key === "address" && typeof item === "string" && !isIP(item)
+      ? [`full:${item}`] : endpointDomains(item)));
+}
+
+function withBootstrapResolution(outbound: Record<string, unknown>): Record<string, unknown> {
+  const stream = isRecord(outbound.streamSettings) ? outbound.streamSettings : {};
+  const sockopt = isRecord(stream.sockopt) ? stream.sockopt : {};
+  const strategy = typeof sockopt.domainStrategy === "string" && sockopt.domainStrategy !== "AsIs"
+    ? sockopt.domainStrategy : "UseIPv4v6";
+  return { ...outbound, streamSettings: { ...stream, sockopt: { ...sockopt, domainStrategy: strategy } } };
 }
 
 function withAlternateXhttpMux(outbound: Record<string, unknown>): Record<string, unknown> {

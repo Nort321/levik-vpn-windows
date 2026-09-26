@@ -115,7 +115,7 @@ describe("Windows tunnel profile", () => {
       ...settings, routingMode: "global", splitTunnelMode: "bypass", splitTunnelProcesses: ["overwatch.exe"],
     });
     const routing = config.routing as { rules: Array<Record<string, unknown>> };
-    expect(routing.rules.slice(1)).toEqual([
+    expect(routing.rules.slice(3)).toEqual([
       { type: "field", process: ["overwatch.exe", "Overwatch Launcher.exe", "VivoxVoiceService.exe"], network: "tcp,udp", outboundTag: "direct", ruleTag: "process-bypass" },
       { type: "field", ip: expect.arrayContaining(["127.0.0.0/8", "::1/128"]), outboundTag: "direct" },
     ]);
@@ -134,11 +134,11 @@ describe("Windows tunnel profile", () => {
       ...settings, routingMode, splitTunnelMode: "only", splitTunnelProcesses: ["overwatch.exe", "Browser Helper.EXE"],
     });
     const rules = (config.routing as { rules: Array<Record<string, unknown>> }).rules;
-    expect(rules[2]).toEqual({ type: "field", process: ["overwatch.exe", "Browser Helper.EXE", "Overwatch Launcher.exe", "VivoxVoiceService.exe"], network: "tcp,udp", outboundTag: server.tag });
-    expect(rules[3]).toEqual({ type: "field", network: "tcp,udp", outboundTag: "direct" });
-    expect(rules.findIndex((rule) => rule.domain)).toBeGreaterThan(3);
+    expect(rules[4]).toEqual({ type: "field", process: ["overwatch.exe", "Browser Helper.EXE", "Overwatch Launcher.exe", "VivoxVoiceService.exe"], network: "tcp,udp", outboundTag: server.tag });
+    expect(rules[5]).toEqual({ type: "field", network: "tcp,udp", outboundTag: "direct" });
+    expect(rules.findIndex((rule) => rule.domain)).toBeGreaterThan(5);
     const empty = buildXrayConfig(profile, server, { ...settings, routingMode, splitTunnelMode: "only", splitTunnelProcesses: [] });
-    expect((empty.routing as { rules: typeof rules }).rules[2]).toEqual({ type: "field", network: "tcp,udp", outboundTag: "direct" });
+    expect((empty.routing as { rules: typeof rules }).rules[4]).toEqual({ type: "field", network: "tcp,udp", outboundTag: "direct" });
     expect((config.inbounds as Array<{ sniffing: { routeOnly: boolean } }>)[0]?.sniffing.routeOnly).toBe(true);
   });
 
@@ -169,7 +169,7 @@ describe("Windows tunnel profile", () => {
       ...settings, routingMode, splitTunnelMode: "bypass", splitTunnelProcesses: processes,
     });
     const routing = config.routing as { rules: Array<Record<string, unknown>> };
-    expect(routing.rules[1]).toEqual({ type: "field", process: processes, network: "tcp,udp", outboundTag: "direct", ruleTag: "process-bypass" });
+    expect(routing.rules[3]).toEqual({ type: "field", process: processes, network: "tcp,udp", outboundTag: "direct", ruleTag: "process-bypass" });
     expect(routing.rules.findIndex((rule) => !rule.inboundTag && rule.outboundTag === profile.servers[0]!.tag)).toBeGreaterThan(0);
     expect(config.log).toEqual({ loglevel: "info" });
 
