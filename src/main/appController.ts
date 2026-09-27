@@ -1,6 +1,7 @@
 import { app } from "electron";
 import { EventEmitter } from "node:events";
 import { platform, release } from "node:os";
+import { isIPv4 } from "node:net";
 import type {
   AccountSummary,
   AppSettings,
@@ -60,7 +61,7 @@ type PersistedSettings = Partial<AppSettings> & {
 export class AppController extends EventEmitter<AppControllerEvents> {
   private readonly secureStore = new SecureStore();
   private readonly xray = new XrayManager();
-  private readonly dnsLeakProtection = new DnsLeakProtection();
+  private readonly dnsLeakProtection = new DnsLeakProtection(this.secureStore);
   private readonly killSwitch = new WindowsKillSwitch(() => this.xray.executablePath());
   private readonly updater: AppUpdater | null;
   private identity!: DeviceIdentity;
@@ -118,6 +119,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
 
   async initialize(): Promise<void> {
     await this.killSwitch.cleanupLegacyConfig(app.getPath("userData"));
+    await this.dnsLeakProtection.disable();
     this.identity = await this.loadIdentity();
     this.api = new MobileApiClient(
       process.env.LEVIK_API_ORIGIN ?? "https://leviknet.com",
@@ -310,7 +312,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
       const config = buildXrayConfig(this.profile, server, this.state.settings);
       this.lastConfig = config;
       await this.startXray(config, generation);
-      if (!await isTunnelHealthy()) throw new Error("VPN-сервер не передаёт трафик. Выберите другой сервер или повторите подключение.");
+      await this.verifyTunnelReadiness(generation);
       this.assertCurrentConnection(generation);
       this.tunnelHealthFailures = 0;
       this.failedServerIds.clear();
@@ -325,15 +327,12 @@ export class AppController extends EventEmitter<AppControllerEvents> {
       let failure: unknown = error;
       try {
         await this.xray.stop();
-      } finally {
-        try {
-          if (!retainProtectionOnFailure) await this.releaseProtection();
-        } catch (cleanupError) {
-          failure = cleanupError;
-        }
-        if (generation === this.connectionGeneration) {
-          this.patch({ status: "error", statusDetail: messageOf(failure), sessionStartedAt: null });
-        }
+        if (!retainProtectionOnFailure) await this.releaseProtection();
+      } catch (cleanupError) {
+        failure = cleanupError;
+      }
+      if (generation === this.connectionGeneration) {
+        this.patch({ status: "error", statusDetail: messageOf(failure), sessionStartedAt: null });
       }
       throw failure;
     } finally {
@@ -348,14 +347,11 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     return this.runTunnelOperation(async () => {
       try {
         await this.xray.stop();
-      } finally {
-        try {
-          await this.releaseProtection();
-          this.patch({ status: "disconnected", statusDetail: null, sessionStartedAt: null, busy: false });
-        } catch (error) {
-          this.patch({ status: "error", statusDetail: messageOf(error), sessionStartedAt: null, busy: false });
-          throw error;
-        }
+        await this.releaseProtection();
+        this.patch({ status: "disconnected", statusDetail: null, sessionStartedAt: null, busy: false });
+      } catch (error) {
+        this.patch({ status: "error", statusDetail: messageOf(error), sessionStartedAt: null, busy: false });
+        throw error;
       }
     });
   }
@@ -391,10 +387,10 @@ export class AppController extends EventEmitter<AppControllerEvents> {
 
   async shutdown(): Promise<void> {
     this.loginGeneration += 1;
+    await this.disconnect();
     this.stopKillSwitchHealthMonitor();
     if (this.tunnelHealthTimer) clearInterval(this.tunnelHealthTimer);
     this.tunnelHealthTimer = null;
-    await this.disconnect();
   }
 
   async pingServers(): Promise<void> {
@@ -645,14 +641,18 @@ export class AppController extends EventEmitter<AppControllerEvents> {
           if (this.state.settings.killSwitch) await this.killSwitch.enable();
           if (this.state.settings.preventDnsLeaks) await this.dnsLeakProtection.enable();
           await this.startXray(this.lastConfig, generation);
-          if (!await isTunnelHealthy()) throw new Error("VPN-сервер не передаёт трафик");
+          await this.verifyTunnelReadiness(generation);
           this.assertCurrentConnection(generation);
           this.reconnectAttempts = 0;
           this.tunnelHealthFailures = 0;
           this.failedServerIds.clear();
           this.patch({ status: "connected", statusDetail: `Защищено через ${this.selectedServer()?.name ?? "VPN"}` });
         } catch (error) {
-          await this.xray.stop();
+          try {
+            await this.xray.stop();
+          } catch (stopError) {
+            this.addLog(`Остановка туннеля: ${messageOf(stopError)}`);
+          }
           if (generation !== this.connectionGeneration) return;
           if (this.state.selectedServerId) this.failedServerIds.add(this.state.selectedServerId);
           this.addLog(`Переподключение: ${messageOf(error)}`);
@@ -678,6 +678,15 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     } finally {
       this.tunnelHealthCheckRunning = false;
     }
+  }
+
+  private async verifyTunnelReadiness(generation: number): Promise<void> {
+    const healthy = await isTunnelHealthy({
+      startup: true,
+      shouldContinue: () => generation === this.connectionGeneration && this.xray.isRunning(),
+    });
+    this.assertCurrentConnection(generation);
+    if (!healthy) throw new Error("Не удалось подтвердить доступ в интернет через VPN. Повторите подключение или выберите другой сервер.");
   }
 
   private runTunnelOperation(operation: () => Promise<void>): Promise<void> {
@@ -767,7 +776,8 @@ export class AppController extends EventEmitter<AppControllerEvents> {
   }
 
   private connectionRequested(): boolean {
-    return this.xray.isRunning() || ["connecting", "connected", "reconnecting"].includes(this.state.status);
+    return this.xray.isRunning() || ["connecting", "connected", "reconnecting"].includes(this.state.status)
+      || (this.state.status === "error" && this.killSwitch.isActive());
   }
 
   private resetTrafficStats(): void {
@@ -871,7 +881,7 @@ function mapAccount(response: MobileAccountResponse): AccountSummary {
 function validateSettings(value: AppSettings): AppSettings {
   if (!(["global", "bypassRu", "blockedOnly"] as const).includes(value.routingMode)) throw new Error("Некорректный режим маршрутизации");
   if (!(["system", "dark", "light", "amoled"] as const).includes(value.theme)) throw new Error("Некорректная тема");
-  if (!/^(?:\d{1,3}\.){3}\d{1,3}$/.test(value.dnsServer)) throw new Error("Некорректный DNS-сервер");
+  if (!isIPv4(value.dnsServer)) throw new Error("Некорректный DNS-сервер");
   return {
     routingMode: value.routingMode,
     automaticServer: Boolean(value.automaticServer),

@@ -101,6 +101,37 @@ describe("VPN end-to-end health probe", () => {
     expect(tlsMock).toHaveBeenCalledOnce();
   });
 
+  it("retries transient startup failures without accepting an unverified connection", async () => {
+    const pending = isTunnelHealthy({ startup: true });
+    requests[0]!.emit("error", new Error("temporarily unavailable"));
+    await Promise.resolve();
+    requests[1]!.emit("error", new Error("temporarily unavailable"));
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(requests).toHaveLength(3);
+    establishProxy(2);
+    tlsSockets[0]!.emit("secureConnect");
+    await expect(pending).resolves.toBe(true);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("does not continue readiness probes after disconnect", async () => {
+    let current = true;
+    const pending = isTunnelHealthy({ startup: true, shouldContinue: () => current });
+    current = false;
+    requests[0]!.emit("error", new Error("connection cancelled"));
+    await expect(pending).resolves.toBe(false);
+    expect(requests).toHaveLength(1);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("bounds startup retries when neither destination responds", async () => {
+    const pending = isTunnelHealthy({ startup: true });
+    await vi.advanceTimersByTimeAsync(25_000);
+    await expect(pending).resolves.toBe(false);
+    expect(requests).toHaveLength(4);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
   it("fails safely when the local listener is unavailable", async () => {
     const pending = isTunnelHealthy();
     requests[0]!.emit("error", new Error("ECONNREFUSED"));

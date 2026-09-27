@@ -171,3 +171,44 @@ describe("Wintun readiness", () => {
     expect(commands.map((command) => command[0])).toEqual(["enable", "allow-tunnel", "disable"]);
   });
 });
+
+describe("Kill Switch repair races", () => {
+  it("retries after a failed repair instead of silently abandoning protection", async () => {
+    const commands: string[][] = [];
+    const policy = new WindowsKillSwitch(() => "xray.exe", {
+      platform: "win32", helperExecutablePath: "helper.exe",
+      run: recordingRunner(commands, [0, 2, 5, 2, 0]),
+    });
+    await policy.enable();
+    await expect(policy.ensureActive(() => true)).rejects.toThrow("5");
+    await expect(policy.ensureActive(() => true)).resolves.toBe(true);
+    expect(commands.map((command) => command[0])).toEqual(["enable", "status", "enable", "status", "enable"]);
+  });
+
+  it("waits for a pending repair before disabling so no filters are left behind", async () => {
+    let finishRepair: (() => void) | undefined;
+    let enables = 0;
+    let systemActive = false;
+    const policy = new WindowsKillSwitch(() => "xray.exe", {
+      platform: "win32", helperExecutablePath: "helper.exe",
+      run: async ([command]) => {
+        if (command === "status") return { exitCode: 2, errorText: "" };
+        if (command === "enable") {
+          if (++enables === 2) await new Promise<void>((resolve) => { finishRepair = resolve; });
+          systemActive = true;
+        }
+        if (command === "disable") systemActive = false;
+        return { exitCode: 0, errorText: "" };
+      },
+    });
+    await policy.enable();
+    const repair = policy.ensureActive(() => true);
+    for (let tick = 0; tick < 10 && !finishRepair; tick++) await Promise.resolve();
+    expect(finishRepair).toBeDefined();
+    const disconnect = policy.disable();
+    finishRepair?.();
+    await Promise.all([repair, disconnect]);
+    expect(systemActive).toBe(false);
+    expect(policy.isActive()).toBe(false);
+  });
+});

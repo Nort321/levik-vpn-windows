@@ -18,9 +18,9 @@ interface XrayEvents {
 
 export class XrayManager extends EventEmitter<XrayEvents> {
   private process: ChildProcessWithoutNullStreams | null = null;
-  private stopping = false;
+  private readonly stopping = new WeakSet<ChildProcess>();
   private statsTimer: ReturnType<typeof setInterval> | null = null;
-  private statsQueryRunning = false;
+  private statsQueryRunning: ChildProcess | null = null;
   private statsErrorReported = false;
 
   async start(config: Record<string, unknown>): Promise<void> {
@@ -35,7 +35,6 @@ export class XrayManager extends EventEmitter<XrayEvents> {
     this.emit("log", `Xray: outbound interface [${interfaceName}] (TCP/UDP, direct)`);
     try {
       await this.validate(configInput);
-      this.stopping = false;
       const child = spawn(this.executablePath(), xrayConfigArguments(false), {
         windowsHide: true,
         stdio: ["pipe", "pipe", "pipe"],
@@ -46,16 +45,20 @@ export class XrayManager extends EventEmitter<XrayEvents> {
       child.stderr.on("data", (chunk: Buffer) => this.emitLines(chunk));
       child.once("error", (error) => this.emit("log", `Xray: ${error.message}`));
       child.once("exit", (code) => {
+        if (this.process !== child) return;
         this.stopStatsPolling();
-        const expected = this.stopping;
-        if (this.process === child) this.process = null;
+        const expected = this.stopping.has(child);
+        this.process = null;
         this.emit("exit", code, expected);
       });
       await Promise.all([
-        writeConfigInput(child, configInput),
         waitForStartup(child),
+        writeConfigInput(child, configInput),
       ]);
       this.startStatsPolling();
+    } catch (error) {
+      await this.stop();
+      throw error;
     } finally {
       configInput.fill(0);
     }
@@ -65,13 +68,9 @@ export class XrayManager extends EventEmitter<XrayEvents> {
     this.stopStatsPolling();
     const child = this.process;
     if (!child) return;
-    this.stopping = true;
-    child.kill();
-    await Promise.race([
-      new Promise<void>((resolve) => child.once("exit", () => resolve())),
-      new Promise<void>((resolve) => setTimeout(() => { child.kill("SIGKILL"); resolve(); }, 5_000)),
-    ]);
-    this.process = null;
+    this.stopping.add(child);
+    await stopChild(child);
+    if (this.process === child) this.process = null;
   }
 
   isRunning(): boolean {
@@ -79,12 +78,13 @@ export class XrayManager extends EventEmitter<XrayEvents> {
   }
 
   async isHealthy(): Promise<boolean> {
-    if (!this.process) return false;
+    const child = this.process;
+    if (!child) return false;
     try {
       await execFileAsync(this.executablePath(), [
         "api", "statsquery", `--server=${XRAY_STATS_ENDPOINT}`, "-pattern", "inbound>>>levik-tun-in>>>",
       ], { windowsHide: true, timeout: 3_500, maxBuffer: 256 * 1024 });
-      return this.process !== null;
+      return this.process === child;
     } catch {
       return false;
     }
@@ -98,15 +98,22 @@ export class XrayManager extends EventEmitter<XrayEvents> {
     });
     let errorText = "";
     validation.stderr.on("data", (chunk: Buffer) => { errorText = `${errorText}${chunk}`.slice(-4_096); });
-    await Promise.all([
-      writeConfigInput(validation, configInput),
-      new Promise<void>((resolve, reject) => {
-        validation.once("error", reject);
-        validation.once("exit", (code) => code === 0
-          ? resolve()
-          : reject(new Error(errorText.trim() || "Xray отклонил конфигурацию")));
-      }),
-    ]);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.all([
+        new Promise<void>((resolve, reject) => {
+          timer = setTimeout(() => reject(new Error("Превышено время проверки конфигурации VPN")), 10_000);
+          validation.once("error", reject);
+          validation.once("exit", (code) => code === 0
+            ? resolve()
+            : reject(new Error(errorText.trim() || "Xray отклонил конфигурацию")));
+        }),
+        writeConfigInput(validation, configInput),
+      ]);
+    } finally {
+      clearTimeout(timer);
+      await stopChild(validation);
+    }
   }
 
   executablePath(): string {
@@ -134,12 +141,12 @@ export class XrayManager extends EventEmitter<XrayEvents> {
   private stopStatsPolling(): void {
     if (this.statsTimer) clearInterval(this.statsTimer);
     this.statsTimer = null;
-    this.statsQueryRunning = false;
   }
 
   private async queryStats(): Promise<void> {
-    if (!this.process || this.statsQueryRunning) return;
-    this.statsQueryRunning = true;
+    const child = this.process;
+    if (!child || this.statsQueryRunning === child) return;
+    this.statsQueryRunning = child;
     try {
       const { stdout } = await execFileAsync(this.executablePath(), [
         "api", "statsquery",
@@ -147,17 +154,39 @@ export class XrayManager extends EventEmitter<XrayEvents> {
         "-pattern", "inbound>>>levik-tun-in>>>traffic>>>",
       ], { windowsHide: true, timeout: 3_500, maxBuffer: 256 * 1024 });
       const values = parseXrayStats(stdout);
+      if (this.process !== child) return;
       this.statsErrorReported = false;
       if (this.process) this.emit("stats", values.downlink, values.uplink);
     } catch (error) {
-      if (!this.statsErrorReported && this.process) {
+      if (!this.statsErrorReported && this.process === child) {
         this.statsErrorReported = true;
         this.emit("log", `Статистика Xray: ${error instanceof Error ? error.message : "ошибка запроса"}`);
       }
     } finally {
-      this.statsQueryRunning = false;
+      if (this.statsQueryRunning === child) this.statsQueryRunning = null;
     }
   }
+}
+
+export async function stopChild(child: ChildProcess): Promise<void> {
+  if (child.exitCode !== null || child.signalCode !== null || child.pid === undefined) return;
+  await new Promise<void>((resolve, reject) => {
+    const finish = (error?: Error): void => {
+      clearTimeout(forceTimer);
+      clearTimeout(deadline);
+      child.off("exit", onExit);
+      child.off("error", onError);
+      if (error) reject(error); else resolve();
+    };
+    const onExit = (): void => finish();
+    const onError = (error: Error): void => finish(error);
+    const forceTimer = setTimeout(() => child.kill("SIGKILL"), 5_000);
+    const deadline = setTimeout(() => finish(new Error("Не удалось остановить процесс VPN")), 10_000);
+    // Subscribe before killing: a fast exit must not be lost.
+    child.once("exit", onExit);
+    child.once("error", onError);
+    child.kill();
+  });
 }
 
 export function assertProcessRoutingSupport(config: Record<string, unknown>, version: string): void {

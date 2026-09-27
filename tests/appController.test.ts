@@ -173,7 +173,7 @@ describe("AppController tunnel recovery", () => {
 
     // Retrying a failed replacement must preserve the same boundary too.
     vi.mocked(isTunnelHealthy).mockResolvedValueOnce(false);
-    await expect(controller.connect()).rejects.toThrow("не передаёт трафик");
+    await expect(controller.connect()).rejects.toThrow("подтвердить доступ");
     expect(killSwitch.isActive()).toBe(true);
     expect(killSwitch.disable).not.toHaveBeenCalled();
 
@@ -188,7 +188,7 @@ describe("AppController tunnel recovery", () => {
     const { controller, killSwitch, dns } = tunnelController();
     await controller.connect();
     vi.mocked(isTunnelHealthy).mockResolvedValueOnce(false);
-    await expect(controller.updateSettings({ killSwitch: false })).rejects.toThrow("не передаёт трафик");
+    await expect(controller.updateSettings({ killSwitch: false })).rejects.toThrow("подтвердить доступ");
     expect(killSwitch.isActive()).toBe(false);
     expect(dns.disable).toHaveBeenCalledOnce();
     expect(controller.snapshot()).toMatchObject({ status: "error", settings: { killSwitch: false } });
@@ -197,7 +197,7 @@ describe("AppController tunnel recovery", () => {
   it("requires actual VPN traffic before reporting connected", async () => {
     const { controller, xray, killSwitch } = tunnelController();
     vi.mocked(isTunnelHealthy).mockResolvedValue(false);
-    await expect(controller.connect()).rejects.toThrow("не передаёт трафик");
+    await expect(controller.connect()).rejects.toThrow("подтвердить доступ");
     expect(xray.isRunning()).toBe(false);
     expect(killSwitch.disable).toHaveBeenCalledOnce();
     expect(controller.snapshot().status).toBe("error");
@@ -387,6 +387,38 @@ describe("AppController tunnel recovery", () => {
     await Promise.all([settings, disconnect]);
     expect(xray.start).toHaveBeenCalledOnce();
     expect(controller.snapshot().status).toBe("disconnected");
+  });
+
+  it("keeps protection and reports an error when the core cannot be stopped", async () => {
+    const { controller, xray, killSwitch, dns } = tunnelController();
+    await controller.connect();
+    xray.stop.mockRejectedValueOnce(new Error("core still running"));
+    await expect(controller.disconnect()).rejects.toThrow("core still running");
+    expect(killSwitch.disable).not.toHaveBeenCalled();
+    expect(dns.disable).not.toHaveBeenCalled();
+    expect(controller.snapshot()).toMatchObject({ status: "error", busy: false });
+    await controller.disconnect();
+    expect(killSwitch.disable).toHaveBeenCalledOnce();
+  });
+
+  it("rejects invalid DNS octets without disrupting a connected tunnel", async () => {
+    const { controller, xray } = tunnelController();
+    await controller.connect();
+    await expect(controller.updateSettings({ dnsServer: "999.1.1.1" })).rejects.toThrow("DNS");
+    expect(xray.stop).not.toHaveBeenCalled();
+    expect(controller.snapshot().status).toBe("connected");
+  });
+
+  it("reconnects when another server is selected after a protected replacement failure", async () => {
+    const { controller, killSwitch, first, second } = tunnelController();
+    await controller.updateSettings({ automaticServer: false });
+    await controller.connect();
+    vi.mocked(isTunnelHealthy).mockResolvedValueOnce(false);
+    await expect(controller.selectServer(second.id)).rejects.toThrow("подтвердить доступ");
+    expect(killSwitch.isActive()).toBe(true);
+    await controller.selectServer(first.id);
+    expect(controller.snapshot()).toMatchObject({ status: "connected", selectedServerId: first.id });
+    expect(killSwitch.disable).not.toHaveBeenCalled();
   });
 
   it("uses end-to-end health after resume even when the stats API still works", async () => {

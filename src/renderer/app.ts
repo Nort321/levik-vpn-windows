@@ -568,7 +568,7 @@ async function run(operation: () => Promise<unknown>): Promise<void> {
 
 function showToast(message: string): void {
   const toast = requiredElement("toast");
-  toast.textContent = message;
+  toast.textContent = message.replace(/^Error invoking remote method '[^']+':\s*(?:Error:\s*)?/, "");
   toast.classList.add("visible");
   if (toastTimer) clearTimeout(toastTimer);
   toastTimer = setTimeout(() => toast.classList.remove("visible"), 4_500);

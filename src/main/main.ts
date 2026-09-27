@@ -39,7 +39,11 @@ app.on("before-quit", (event) => {
   if (quitting || !controller) return;
   event.preventDefault();
   quitting = true;
-  void controller.shutdown().finally(() => app.quit());
+  void controller.shutdown().then(() => app.quit()).catch(() => {
+    quitting = false;
+    showWindow();
+    dialog.showErrorBox("Не удалось снять защиту сети", "Повторите отключение VPN перед выходом, чтобы не оставить сеть заблокированной.");
+  });
 });
 
 function createWindow(): BrowserWindow {
@@ -102,8 +106,8 @@ function updateTray(snapshot?: AppSnapshot): void {
   tray.setContextMenu(Menu.buildFromTemplate([
     { label: mainWindow?.isVisible() ? "Скрыть Levik VPN" : "Открыть Levik VPN", click: () => toggleWindow() },
     { type: "separator" },
-    { label: "Подключить", enabled: !transitional && status !== "connected", click: () => void controller?.connect() },
-    { label: "Отключить", enabled: !transitional && status === "connected", click: () => void controller?.disconnect() },
+    { label: "Подключить", enabled: !transitional && status !== "connected", click: () => runTrayAction(() => controller?.connect()) },
+    { label: "Отключить", enabled: ["connecting", "connected", "reconnecting", "error"].includes(status), click: () => runTrayAction(() => controller?.disconnect()) },
     { type: "separator" },
     { label: "Выход", click: requestQuit },
   ]));
@@ -143,4 +147,8 @@ function refreshTrayMenu(): void {
 
 function requestQuit(): void {
   if (!quitting) app.quit();
+}
+
+function runTrayAction(action: () => Promise<void> | undefined): void {
+  void action()?.catch(() => showWindow());
 }

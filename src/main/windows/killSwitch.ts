@@ -18,6 +18,7 @@ interface WindowsKillSwitchOptions {
 
 export class WindowsKillSwitch {
   private active = false;
+  private operation: Promise<unknown> = Promise.resolve();
   private readonly platform: NodeJS.Platform;
   private readonly appExecutablePath: string;
   private readonly helperExecutablePath: string;
@@ -34,6 +35,10 @@ export class WindowsKillSwitch {
   }
 
   async recover(): Promise<boolean> {
+    return this.serialize(() => this.recoverBoundary());
+  }
+
+  private async recoverBoundary(): Promise<boolean> {
     if (this.platform !== "win32") return false;
     const status = await this.run(["status"]);
     if (status.exitCode === 2) return false;
@@ -44,6 +49,10 @@ export class WindowsKillSwitch {
   }
 
   async ensureActive(shouldRestore: () => boolean): Promise<boolean> {
+    return this.serialize(() => this.restoreBoundary(shouldRestore));
+  }
+
+  private async restoreBoundary(shouldRestore: () => boolean): Promise<boolean> {
     if (this.platform !== "win32" || !this.active) return false;
     const status = await this.run(["status"]);
     if (status.exitCode === 0) return false;
@@ -51,8 +60,8 @@ export class WindowsKillSwitch {
       this.assertSuccessful(status, "проверить состояние");
     }
     if (!shouldRestore()) return false;
-    this.active = false;
-    await this.enable();
+    // Keep monitoring after a failed repair; active also records our intent.
+    await this.execute("enable", this.appExecutablePath, this.xrayExecutablePath());
     return true;
   }
 
@@ -62,9 +71,11 @@ export class WindowsKillSwitch {
   }
 
   async enable(): Promise<void> {
-    if (this.platform !== "win32" || this.active) return;
-    await this.execute("enable", this.appExecutablePath, this.xrayExecutablePath());
-    this.active = true;
+    return this.serialize(async () => {
+      if (this.platform !== "win32" || this.active) return;
+      await this.execute("enable", this.appExecutablePath, this.xrayExecutablePath());
+      this.active = true;
+    });
   }
 
   async allowTunnel(): Promise<void> {
@@ -72,7 +83,9 @@ export class WindowsKillSwitch {
     // Wintun can still be registering after Xray has passed its startup grace period.
     // Retry only ERROR_NOT_FOUND; permission/filter errors must fail immediately.
     for (let attempt = 0; attempt <= 20 && this.active; attempt += 1) {
-      const result = await this.run(["allow-tunnel", "LevikVPN"]);
+      const result = await this.serialize(() => this.active
+        ? this.run(["allow-tunnel", "LevikVPN"])
+        : Promise.resolve({ exitCode: 0, errorText: "" }));
       if (result.exitCode !== 1168 || attempt === 20) {
         this.assertSuccessful(result, "allow-tunnel");
         return;
@@ -82,13 +95,21 @@ export class WindowsKillSwitch {
   }
 
   async disable(): Promise<void> {
-    if (this.platform !== "win32") return;
-    await this.execute("disable");
-    this.active = false;
+    return this.serialize(async () => {
+      if (this.platform !== "win32") return;
+      await this.execute("disable");
+      this.active = false;
+    });
   }
 
   isActive(): boolean {
     return this.active;
+  }
+
+  private serialize<T>(operation: () => Promise<T>): Promise<T> {
+    const pending = this.operation.then(operation);
+    this.operation = pending.catch(() => {});
+    return pending;
   }
 
   private async execute(...arguments_: string[]): Promise<void> {

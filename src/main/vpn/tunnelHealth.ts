@@ -7,9 +7,19 @@ export const TUNNEL_HEALTH_TAG = "levik-health";
 
 // A local stats reply or successful upstream TCP accept does not prove that the
 // VPN can carry traffic. Complete a verified TLS handshake through its outbound.
-export async function isTunnelHealthy(): Promise<boolean> {
-  for (const host of ["cloudflare-dns.com", "www.google.com"]) {
-    if (await probeTunnel(host)) return true;
+export async function isTunnelHealthy(options: {
+  startup?: boolean;
+  shouldContinue?: () => boolean;
+} = {}): Promise<boolean> {
+  const shouldContinue = options.shouldContinue ?? (() => true);
+  // Newly created Windows routes and upstream transports can settle later than
+  // the local listener. Retry readiness once without restarting a viable core.
+  for (let attempt = 0; attempt < (options.startup ? 2 : 1); attempt++) {
+    if (attempt > 0) await new Promise<void>((resolve) => setTimeout(resolve, 1_000));
+    for (const host of ["cloudflare-dns.com", "www.google.com"]) {
+      if (!shouldContinue()) return false;
+      if (await probeTunnel(host)) return shouldContinue();
+    }
   }
   return false;
 }

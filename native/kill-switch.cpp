@@ -34,6 +34,23 @@ constexpr GUID kLoopbackV6Key = {0xcf6710f9, 0xa4bd, 0x4db6, {0x8c, 0xa6, 0x75, 
 constexpr GUID kBlockV4Key = {0x6c95fc3e, 0xc5ea, 0x40d5, {0x9c, 0x6e, 0x6d, 0x73, 0xe8, 0x0a, 0xce, 0x13}};
 constexpr GUID kBlockV6Key = {0xe7528168, 0x7b6c, 0x43da, {0x99, 0xe2, 0x18, 0xd0, 0x35, 0x0e, 0x08, 0xe9}};
 
+// Stable keys shared by enable, status and cleanup. These are only network
+// configuration protocols, never a general LAN or svchost.exe exemption.
+constexpr size_t kNetworkPermitCount = 8;
+GUID NetworkPermitKey(size_t index) {
+  GUID key = {0x715e7090, 0x6dde, 0x42d7, {0x92, 0x11, 0xf8, 0xca, 0x48, 0x65, 0x20, 0x00}};
+  key.Data4[7] = static_cast<BYTE>(index);
+  return key;
+}
+
+std::vector<GUID> BoundaryKeys(bool includeTunnel) {
+  std::vector<GUID> keys = {kAppV4Key, kAppV6Key, kXrayV4Key, kXrayV6Key,
+                          kLoopbackV4Key, kLoopbackV6Key, kBlockV4Key, kBlockV6Key};
+  if (includeTunnel) { keys.push_back(kTunnelV4Key); keys.push_back(kTunnelV6Key); }
+  for (size_t i = 0; i < kNetworkPermitCount; ++i) keys.push_back(NetworkPermitKey(i));
+  return keys;
+}
+
 constexpr GUID kTestProviderKey = {0x60c17e46, 0xf4a7, 0x4da7, {0xaa, 0xf4, 0xe4, 0x1c, 0xdc, 0x21, 0x65, 0x12}};
 constexpr GUID kTestSubLayerKey = {0xba0c67f7, 0x4cb1, 0x48d9, {0xa9, 0x7d, 0x24, 0x11, 0x63, 0x2d, 0x2a, 0x7b}};
 constexpr GUID kTestFilterKey = {0x56fc4f68, 0x218f, 0x4753, {0x9c, 0xf8, 0xf8, 0x06, 0x24, 0x08, 0x51, 0xb2}};
@@ -185,6 +202,66 @@ DWORD AddLoopbackPermit(HANDLE engine, const GUID& providerKey, const GUID& subL
                    kPermitWeight, &condition, 1);
 }
 
+DWORD AddNetworkPermit(HANDLE engine, const GUID& provider, const GUID& subLayer, size_t index) {
+  // DHCP discover/rebind; DHCPv6 multicast and link-local renewal; NDP router
+  // discovery, neighbor resolution and advertisements. No inbound block exists.
+  struct Permit { const wchar_t* remote; UINT8 prefix; UINT8 protocol; UINT16 local; UINT16 port; };
+  const std::array<Permit, kNetworkPermitCount> permits = {{
+      {L"255.255.255.255", 32, IPPROTO_UDP, 68, 67},
+      {L"ff02::1:2", 128, IPPROTO_UDP, 546, 547},
+      {L"fe80::", 10, IPPROTO_UDP, 546, 547},
+      {L"ff02::2", 128, IPPROTO_ICMPV6, 133, 0},
+      {L"ff02::1:ff00:0", 104, IPPROTO_ICMPV6, 135, 0},
+      {L"fe80::", 10, IPPROTO_ICMPV6, 135, 0},
+      {L"fe80::", 10, IPPROTO_ICMPV6, 136, 0},
+      {L"ff02::1", 128, IPPROTO_ICMPV6, 136, 0},
+  }};
+  if (index >= permits.size()) return ERROR_INVALID_PARAMETER;
+  const Permit& permit = permits[index];
+  std::array<FWPM_FILTER_CONDITION0, 5> conditions{};
+  conditions[0].fieldKey = FWPM_CONDITION_IP_PROTOCOL;
+  conditions[0].conditionValue.type = FWP_UINT8;
+  conditions[0].conditionValue.uint8 = permit.protocol;
+  // ALE represents ICMP type/code in the local/remote port fields.
+  conditions[1].fieldKey = FWPM_CONDITION_IP_LOCAL_PORT;
+  conditions[1].conditionValue.type = FWP_UINT16;
+  conditions[1].conditionValue.uint16 = permit.local;
+  conditions[2].fieldKey = FWPM_CONDITION_IP_REMOTE_PORT;
+  conditions[2].conditionValue.type = FWP_UINT16;
+  conditions[2].conditionValue.uint16 = permit.port;
+  conditions[3].fieldKey = FWPM_CONDITION_IP_REMOTE_ADDRESS;
+  FWP_V4_ADDR_AND_MASK v4{};
+  FWP_V6_ADDR_AND_MASK v6{};
+  FWP_V6_ADDR_AND_MASK localV6{};
+  const bool ipv4 = index == 0;
+  UINT32 count = 4;
+  if (ipv4) {
+    IN_ADDR address{};
+    if (InetPtonW(AF_INET, permit.remote, &address) != 1) return ERROR_INVALID_DATA;
+    v4.addr = ntohl(address.S_un.S_addr);
+    v4.mask = 0xffffffff;
+    conditions[3].conditionValue.type = FWP_V4_ADDR_MASK;
+    conditions[3].conditionValue.v4AddrMask = &v4;
+  } else {
+    if (InetPtonW(AF_INET6, permit.remote, v6.addr) != 1) return ERROR_INVALID_DATA;
+    v6.prefixLength = permit.prefix;
+    conditions[3].conditionValue.type = FWP_V6_ADDR_MASK;
+    conditions[3].conditionValue.v6AddrMask = &v6;
+    if (permit.protocol == IPPROTO_UDP) {
+      if (InetPtonW(AF_INET6, L"fe80::", localV6.addr) != 1) return ERROR_INVALID_DATA;
+      localV6.prefixLength = 10;
+      conditions[4].fieldKey = FWPM_CONDITION_IP_LOCAL_ADDRESS;
+      conditions[4].conditionValue.type = FWP_V6_ADDR_MASK;
+      conditions[4].conditionValue.v6AddrMask = &localV6;
+      count = 5;
+    }
+  }
+  for (auto& condition : conditions) condition.matchType = FWP_MATCH_EQUAL;
+  return AddFilter(engine, provider, subLayer, NetworkPermitKey(index),
+      ipv4 ? FWPM_LAYER_ALE_AUTH_CONNECT_V4 : FWPM_LAYER_ALE_AUTH_CONNECT_V6,
+      FWP_ACTION_PERMIT, kPermitWeight, conditions.data(), count);
+}
+
 DWORD AddBlock(HANDLE engine, const GUID& providerKey, const GUID& subLayerKey,
                const GUID& layerKey, const GUID& filterKey) {
   return AddFilter(engine, providerKey, subLayerKey, filterKey, layerKey, FWP_ACTION_BLOCK,
@@ -211,12 +288,9 @@ DWORD Enable(const std::wstring& appPath, const std::wstring& xrayPath) {
 
   // Replace older persistent objects atomically. Runtime objects remain active
   // after an app crash, but Windows removes them when BFE stops during reboot.
-  const std::array<const GUID*, 10> replaced = {
-      &kAppV4Key, &kAppV6Key, &kXrayV4Key, &kXrayV6Key,
-      &kTunnelV4Key, &kTunnelV6Key, &kLoopbackV4Key, &kLoopbackV6Key, &kBlockV4Key, &kBlockV6Key};
-  for (const GUID* key : replaced) {
+  for (const GUID& key : BoundaryKeys(true)) {
     if (result != ERROR_SUCCESS) break;
-    result = IgnoreMissingFilter(FwpmFilterDeleteByKey0(engine.get(), key));
+    result = IgnoreMissingFilter(FwpmFilterDeleteByKey0(engine.get(), &key));
   }
   if (result == ERROR_SUCCESS) result = IgnoreMissingSubLayer(FwpmSubLayerDeleteByKey0(engine.get(), &kSubLayerKey));
   if (result == ERROR_SUCCESS) result = IgnoreMissingProvider(FwpmProviderDeleteByKey0(engine.get(), &kProviderKey));
@@ -229,6 +303,8 @@ DWORD Enable(const std::wstring& appPath, const std::wstring& xrayPath) {
   if (result == ERROR_SUCCESS) result = AddApplicationPermit(engine.get(), xrayPath, FWPM_LAYER_ALE_AUTH_CONNECT_V6, kXrayV6Key);
   if (result == ERROR_SUCCESS) result = AddLoopbackPermit(engine.get(), kProviderKey, kSubLayerKey, FWPM_LAYER_ALE_AUTH_CONNECT_V4, kLoopbackV4Key);
   if (result == ERROR_SUCCESS) result = AddLoopbackPermit(engine.get(), kProviderKey, kSubLayerKey, FWPM_LAYER_ALE_AUTH_CONNECT_V6, kLoopbackV6Key);
+  for (size_t i = 0; i < kNetworkPermitCount && result == ERROR_SUCCESS; ++i)
+    result = AddNetworkPermit(engine.get(), kProviderKey, kSubLayerKey, i);
   if (result == ERROR_SUCCESS) result = AddBlock(engine.get(), kProviderKey, kSubLayerKey, FWPM_LAYER_ALE_AUTH_CONNECT_V4, kBlockV4Key);
   if (result == ERROR_SUCCESS) result = AddBlock(engine.get(), kProviderKey, kSubLayerKey, FWPM_LAYER_ALE_AUTH_CONNECT_V6, kBlockV6Key);
   return CommitTransaction(engine.get(), result);
@@ -285,12 +361,9 @@ DWORD Disable() {
 
   if ((result = BeginTransaction(engine.get())) != ERROR_SUCCESS) return result;
 
-  const std::array<const GUID*, 10> filters = {
-      &kAppV4Key, &kAppV6Key, &kXrayV4Key, &kXrayV6Key,
-      &kTunnelV4Key, &kTunnelV6Key, &kLoopbackV4Key, &kLoopbackV6Key, &kBlockV4Key, &kBlockV6Key};
-  for (const GUID* key : filters) {
+  for (const GUID& key : BoundaryKeys(true)) {
     if (result != ERROR_SUCCESS) break;
-    result = IgnoreMissingFilter(FwpmFilterDeleteByKey0(engine.get(), key));
+    result = IgnoreMissingFilter(FwpmFilterDeleteByKey0(engine.get(), &key));
   }
   if (result == ERROR_SUCCESS) result = IgnoreMissingSubLayer(FwpmSubLayerDeleteByKey0(engine.get(), &kSubLayerKey));
   if (result == ERROR_SUCCESS) result = IgnoreMissingProvider(FwpmProviderDeleteByKey0(engine.get(), &kProviderKey));
@@ -316,13 +389,15 @@ DWORD Status() {
   EngineHandle engine;
   DWORD result = OpenEngine(engine);
   if (result != ERROR_SUCCESS) return result;
-  bool ipv4Block = false;
-  bool ipv6Block = false;
-  if ((result = FilterPresence(engine.get(), kBlockV4Key, ipv4Block)) != ERROR_SUCCESS) return result;
-  if ((result = FilterPresence(engine.get(), kBlockV6Key, ipv6Block)) != ERROR_SUCCESS) return result;
-  if (ipv4Block && ipv6Block) return ERROR_SUCCESS;
-  if (!ipv4Block && !ipv6Block) return 2;
-  return 3;
+  size_t presentCount = 0;
+  const auto keys = BoundaryKeys(false);
+  for (const GUID& key : keys) {
+    bool present = false;
+    if ((result = FilterPresence(engine.get(), key, present)) != ERROR_SUCCESS) return result;
+    if (present) ++presentCount;
+  }
+  if (presentCount == keys.size()) return ERROR_SUCCESS;
+  return presentCount == 0 ? 2 : 3;
 }
 
 bool EqualPath(const std::wstring& left, const std::wstring& right) {
@@ -582,7 +657,11 @@ DWORD LoopbackSelfTest(int family) {
   result = CommitTransaction(engine.get(), result);
   if (result != ERROR_SUCCESS) return result;
 
-  // Reproduce the original failure before installing the production permit.
+  // Network setup exceptions must not allow ordinary TCP/UDP, local or remote.
+  for (size_t i = 0; i < kNetworkPermitCount && result == ERROR_SUCCESS; ++i)
+    result = AddNetworkPermit(engine.get(), kTestProviderKey, kTestSubLayerKey, i);
+  if (result != ERROR_SUCCESS) return result;
+  // Reproduce the original failure before installing the loopback permit.
   for (int socketType : {SOCK_STREAM, SOCK_DGRAM}) {
     result = ExpectProbe(family, socketType, true, true);
     if (result != ERROR_SUCCESS) return result;
@@ -610,6 +689,9 @@ DWORD SelfTest() {
   if (result == ERROR_SUCCESS)
     result = AddBlock(engine.get(), kTestProviderKey, kTestSubLayerKey,
                       FWPM_LAYER_ALE_AUTH_CONNECT_V4, kTestFilterKey);
+
+  for (size_t i = 0; i < kNetworkPermitCount && result == ERROR_SUCCESS; ++i)
+    result = AddNetworkPermit(engine.get(), kTestProviderKey, kTestSubLayerKey, i);
 
   FWPM_PROVIDER0* provider = nullptr;
   if (result == ERROR_SUCCESS) result = FwpmProviderGetByKey0(engine.get(), &kTestProviderKey, &provider);
