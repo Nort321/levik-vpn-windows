@@ -30,7 +30,7 @@ export class XrayManager extends EventEmitter<XrayEvents> {
     });
     assertProcessRoutingSupport(config, version);
     await this.stop();
-    const interfaceName = await findWindowsOutboundInterface();
+    const interfaceName = await findWindowsOutboundInterface((message) => this.emit("log", message));
     const configInput = Buffer.from(JSON.stringify(bindXrayOutboundInterface(config, interfaceName)), "utf8");
     this.emit("log", `Xray: outbound interface [${interfaceName}] (TCP/UDP, direct)`);
     try {
