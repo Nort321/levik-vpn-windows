@@ -1,6 +1,5 @@
-import { app } from "electron";
 import { execFile } from "node:child_process";
-import { join } from "node:path";
+import { windowsHelperPath } from "./helperPath";
 
 interface HelperResult {
   exitCode: number;
@@ -30,7 +29,7 @@ export class WindowsKillSwitch {
   ) {
     this.platform = options.platform ?? process.platform;
     this.appExecutablePath = options.appExecutablePath ?? process.execPath;
-    this.helperExecutablePath = options.helperExecutablePath ?? defaultHelperPath();
+    this.helperExecutablePath = options.helperExecutablePath ?? windowsHelperPath();
     this.run = options.run ?? ((arguments_) => runHelper(this.helperExecutablePath, arguments_));
   }
 
@@ -120,12 +119,6 @@ export class WindowsKillSwitch {
     if (result.exitCode === 0) return;
     throw new Error(`Kill Switch не удалось ${operation}: ${result.errorText || `код ${result.exitCode}`}`);
   }
-}
-
-function defaultHelperPath(): string {
-  return app.isPackaged
-    ? join(process.resourcesPath, "kill-switch", "levik-kill-switch.exe")
-    : join(app.getAppPath(), "vendor", "kill-switch", "windows-x64", "levik-kill-switch.exe");
 }
 
 async function runHelper(executablePath: string, arguments_: string[]): Promise<HelperResult> {

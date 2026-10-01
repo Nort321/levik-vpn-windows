@@ -13,6 +13,8 @@
 #include <string>
 #include <vector>
 
+#include "outbound-interface.h"
+
 #pragma comment(lib, "fwpuclnt.lib")
 #pragma comment(lib, "iphlpapi.lib")
 #pragma comment(lib, "rpcrt4.lib")
@@ -680,6 +682,8 @@ DWORD LoopbackSelfTest(int family) {
 }
 
 DWORD SelfTest() {
+  const DWORD interfaceResult = levik::OutboundInterfaceSelfTest();
+  if (interfaceResult != ERROR_SUCCESS) return interfaceResult;
   EngineHandle engine;
   DWORD result = OpenEngine(engine);
   if (result != ERROR_SUCCESS) return result;
@@ -728,7 +732,7 @@ DWORD SelfTest() {
 
 int wmain(int argc, wchar_t* argv[]) {
   if (argc < 2) {
-    std::wcerr << L"Usage: levik-kill-switch <enable|allow-tunnel|disable|status|cleanup-legacy|self-test>\n";
+    std::wcerr << L"Usage: levik-kill-switch <enable|allow-tunnel|disable|status|cleanup-legacy|outbound-interfaces|self-test>\n";
     return ERROR_INVALID_PARAMETER;
   }
 
@@ -740,6 +744,11 @@ int wmain(int argc, wchar_t* argv[]) {
   else if (command == L"status" && argc == 2) result = Status();
   else if (command == L"cleanup-legacy" && argc == 3) result = CleanupLegacyConfig(argv[2]);
   else if (command == L"self-test" && argc == 2) result = SelfTest();
+  else if (command == L"outbound-interfaces" && argc == 2) {
+    std::string interfaces;
+    result = levik::ReadOutboundInterfaces(interfaces);
+    if (result == ERROR_SUCCESS) std::cout << interfaces << '\n';
+  }
 
   if (result != ERROR_SUCCESS && result != 2 && result != 3) {
     std::wcerr << ErrorMessage(result) << L" (" << result << L")\n";

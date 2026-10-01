@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import { FALLBACK_ROUTES_SCRIPT, findWindowsOutboundInterface, ROUTES_SCRIPT, selectWindowsOutboundInterface } from "../src/main/windows/outboundInterface";
 
 const ethernet = { name: "Ethernet", physical: true, up: true, index: 2, prefix: "0.0.0.0/0", routeMetric: 10, interfaceMetric: 5 };
+const unavailableNative = async (): Promise<string> => { throw new Error("Native helper unavailable"); };
 
 describe("Windows physical outbound interface", () => {
   it("uses the combined route and interface metric instead of preferring the Wi-Fi name", () => {
@@ -47,7 +48,7 @@ describe("Windows physical outbound interface", () => {
 describe("Windows outbound interface discovery", () => {
   it("keeps the primary route selection and handles BOM, whitespace and Unicode", async () => {
     const query = vi.fn(async () => `\uFEFF  ${JSON.stringify({ ...ethernet, name: "Сеть Ethernet" })}\r\n`);
-    await expect(findWindowsOutboundInterface(vi.fn(), query)).resolves.toBe("Сеть Ethernet");
+    await expect(findWindowsOutboundInterface(vi.fn(), query, unavailableNative)).resolves.toBe("Сеть Ethernet");
     expect(query).toHaveBeenCalledExactlyOnceWith(ROUTES_SCRIPT);
   });
 
@@ -59,7 +60,7 @@ describe("Windows outbound interface discovery", () => {
     const query = vi.fn<(script: string) => Promise<string>>()
       .mockRejectedValueOnce(error).mockResolvedValueOnce(JSON.stringify(ethernet));
     const report = vi.fn();
-    await expect(findWindowsOutboundInterface(report, query)).resolves.toBe("Ethernet");
+    await expect(findWindowsOutboundInterface(report, query, unavailableNative)).resolves.toBe("Ethernet");
     expect(query.mock.calls.map(([script]) => script)).toEqual([ROUTES_SCRIPT, FALLBACK_ROUTES_SCRIPT]);
     expect(report).toHaveBeenCalledWith(expect.stringContaining("резервным способом"));
     expect(report.mock.calls.flat().join(" ")).not.toContain("sensitive/full script");
@@ -69,7 +70,7 @@ describe("Windows outbound interface discovery", () => {
     "tries the fallback when the primary output is unusable: %j", async (stdout) => {
       const query = vi.fn<(script: string) => Promise<string>>()
         .mockResolvedValueOnce(stdout).mockResolvedValueOnce(JSON.stringify(ethernet));
-      await expect(findWindowsOutboundInterface(vi.fn(), query)).resolves.toBe("Ethernet");
+      await expect(findWindowsOutboundInterface(vi.fn(), query, unavailableNative)).resolves.toBe("Ethernet");
       expect(query).toHaveBeenCalledTimes(2);
     },
   );
@@ -80,11 +81,50 @@ describe("Windows outbound interface discovery", () => {
       { ...ethernet, name: "Wi-Fi", up: false },
     ]));
     const report = vi.fn();
-    await expect(findWindowsOutboundInterface(report, query)).rejects.toThrow("Подробности — в журнале");
+    await expect(findWindowsOutboundInterface(report, query, unavailableNative)).rejects.toThrow("Подробности — в журнале");
     expect(query).toHaveBeenCalledTimes(2);
     expect(report).toHaveBeenCalledWith(expect.stringContaining("Ethernet (physical=false"));
     expect(report).toHaveBeenCalledWith(expect.stringContaining("Wi-Fi (physical=true, up=false"));
   });
+});
+
+describe("Windows interface discovery with unavailable WMI classes", () => {
+  const invalidClass = Object.assign(new Error("CIM query failed"), {
+    code: 1, stderr: "Get-NetAdapter / Get-CimInstance: Invalid class (0x80041010)",
+  });
+
+  it("connects through the native API without invoking either broken WMI provider", async () => {
+    const wmi = vi.fn<(script: string) => Promise<string>>().mockRejectedValue(invalidClass);
+    const native = vi.fn(async () => JSON.stringify({ ...ethernet, name: "Сеть Ethernet" }));
+    const report = vi.fn();
+    await expect(findWindowsOutboundInterface(report, wmi, native)).resolves.toBe("Сеть Ethernet");
+    expect(native).toHaveBeenCalledOnce();
+    expect(wmi).not.toHaveBeenCalled();
+    expect(report).toHaveBeenCalledWith(expect.stringContaining("Windows API"));
+  });
+
+  it("keeps VPN adapters out of the native selection even when they have the lowest metric", async () => {
+    const wmi = vi.fn<(script: string) => Promise<string>>().mockRejectedValue(invalidClass);
+    const native = async () => JSON.stringify([
+      { ...ethernet, name: "Other VPN", physical: false, routeMetric: 0, interfaceMetric: 0 },
+      { ...ethernet, name: "Wi-Fi", index: 3, routeMetric: 1, interfaceMetric: 50 },
+      ethernet,
+    ]);
+    await expect(findWindowsOutboundInterface(vi.fn(), wmi, native)).resolves.toBe("Ethernet");
+    expect(wmi).not.toHaveBeenCalled();
+  });
+
+  it.each(["[]", "invalid JSON", JSON.stringify({ ...ethernet, physical: false })])(
+    "reports both native and WMI failures when no usable route is available: %j", async (stdout) => {
+      const wmi = vi.fn<(script: string) => Promise<string>>().mockRejectedValue(invalidClass);
+      const report = vi.fn();
+      await expect(findWindowsOutboundInterface(report, wmi, async () => stdout)).rejects.toThrow("Подробности — в журнале");
+      expect(wmi.mock.calls.map(([script]) => script)).toEqual([ROUTES_SCRIPT, FALLBACK_ROUTES_SCRIPT]);
+      const logs = report.mock.calls.flat().join(" ");
+      expect(logs).toContain("Windows API");
+      expect(logs).toContain("0x80041010");
+    },
+  );
 });
 
 // Exercise the actual PowerShell source in Windows CI, including CIM values and

@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { windowsHelperPath } from "./helperPath";
 
 const execFileAsync = promisify(execFile);
 
@@ -61,10 +62,16 @@ Get-CimInstance -ClassName Win32_NetworkAdapter -Filter 'PhysicalAdapter = True'
 export async function findWindowsOutboundInterface(
   report: (message: string) => void = () => {},
   query: (script: string) => Promise<string> = queryWindowsRoutes,
+  queryNative: () => Promise<string> = queryNativeWindowsRoutes,
 ): Promise<string> {
-  for (const [source, script] of [["NetTCPIP", ROUTES_SCRIPT], ["Win32", FALLBACK_ROUTES_SCRIPT]] as const) {
+  const sources: Array<[string, () => Promise<string>]> = [
+    ["Windows API", queryNative],
+    ["NetTCPIP", () => query(ROUTES_SCRIPT)],
+    ["Win32", () => query(FALLBACK_ROUTES_SCRIPT)],
+  ];
+  for (const [source, read] of sources) {
     try {
-      const stdout = await query(script);
+      const stdout = await read();
       const json = stdout.replace(/^\uFEFF/, "").trim();
       const routes: unknown = JSON.parse(json || "[]");
       report(`Сетевые интерфейсы (${source}): ${summarizeRoutes(routes)}`);
@@ -78,6 +85,13 @@ export async function findWindowsOutboundInterface(
   throw new Error("Не удалось определить сетевой интерфейс с выходом в интернет. Отключите другие VPN, проверьте подключение Wi-Fi или Ethernet и повторите подключение. Подробности — в журнале приложения.");
 }
 
+async function queryNativeWindowsRoutes(): Promise<string> {
+  const { stdout } = await execFileAsync(windowsHelperPath(), ["outbound-interfaces"], {
+    windowsHide: true, timeout: 5_000, maxBuffer: 256 * 1024, encoding: "utf8",
+  });
+  return stdout;
+}
+
 async function queryWindowsRoutes(script: string): Promise<string> {
   const { stdout } = await execFileAsync("powershell.exe", [
     "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script,
@@ -88,9 +102,9 @@ async function queryWindowsRoutes(script: string): Promise<string> {
 function diagnosticReason(error: unknown): string {
   if (!(error instanceof Error)) return "Неизвестная ошибка Windows";
   const details = error as Error & { killed?: boolean; code?: string | number; stderr?: string };
-  if (details.killed) return "Windows не ответила на запрос сетевых интерфейсов за 20 секунд";
+  if (details.killed) return "Превышено время ожидания ответа Windows при чтении сетевых интерфейсов";
   // execFile.message contains the full PowerShell command; stderr is more useful.
-  return (details.stderr?.trim() || (details.code !== undefined ? `Ошибка PowerShell: ${details.code}` : error.message))
+  return (details.stderr?.trim() || (details.code !== undefined ? `Ошибка запроса Windows: ${details.code}` : error.message))
     .replace(/[\u0000-\u001f]+/g, " ").slice(0, 1_000);
 }
 

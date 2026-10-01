@@ -27,3 +27,19 @@ if ($LASTEXITCODE -ne 0) {
 if ($LASTEXITCODE -ne 0) {
   throw "Kill Switch helper self-test failed with exit code $LASTEXITCODE"
 }
+
+# Verify the read-only native collector and its JSON contract on Windows.
+# Empty/virtual-only routes are valid on CI hosts; never require a physical NIC.
+$interfacesJson = & $executable outbound-interfaces
+if ($LASTEXITCODE -ne 0) {
+  throw "Native interface query failed with exit code $LASTEXITCODE"
+}
+if (-not $interfacesJson.Trim().StartsWith('[')) { throw "Native interfaces must be a JSON array" }
+$interfaces = $interfacesJson | ConvertFrom-Json
+foreach ($interface in $interfaces) {
+  if ($interface.name -isnot [string] -or $interface.physical -isnot [bool] -or $interface.up -isnot [bool] -or
+      $interface.index -le 0 -or $interface.routeMetric -lt 0 -or $interface.interfaceMetric -lt 0 -or
+      $interface.prefix -notin @('0.0.0.0/0', '::/0')) {
+    throw "Native interface query returned an invalid route"
+  }
+}
