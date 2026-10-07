@@ -71,7 +71,7 @@ export function registerIpc(controller: AppController, window: BrowserWindow): v
 
 async function openAllowedExternal(rawUrl: string): Promise<void> {
   const url = new URL(rawUrl);
-  const allowedHttpsHosts = new Set(["leviknet.com", "www.leviknet.com", "t.me"]);
+  const allowedHttpsHosts = new Set(["leviknet.org", "www.leviknet.org", "leviknet.com", "www.leviknet.com", "t.me"]);
   if (url.protocol === "https:" && allowedHttpsHosts.has(url.hostname)) {
     await shell.openExternal(url.toString());
     return;

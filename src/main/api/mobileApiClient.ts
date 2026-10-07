@@ -5,6 +5,7 @@ import type {
   TunnelProfileResponse,
 } from "./models";
 import { RequestSigner } from "../security/requestSigner";
+import { ApiEndpoints } from "./apiEndpoints";
 
 export class MobileApiError extends Error {
   constructor(
@@ -17,17 +18,14 @@ export class MobileApiError extends Error {
 }
 
 export class MobileApiClient {
-  private readonly origin: URL;
+  private readonly endpoints: ApiEndpoints;
 
   constructor(
     baseUrl: string,
     private readonly signer: RequestSigner,
     private readonly version: string,
   ) {
-    this.origin = new URL(baseUrl);
-    if (this.origin.protocol !== "https:" || this.origin.pathname !== "/") {
-      throw new Error("Mobile API origin must be an HTTPS origin without a path");
-    }
+    this.endpoints = new ApiEndpoints(baseUrl);
   }
 
   createChallenge(payload: Record<string, unknown>): Promise<AuthChallengeResponse> {
@@ -74,8 +72,11 @@ export class MobileApiClient {
     payload: Record<string, unknown> | null,
     accessToken: string | null,
   ): Promise<Response> {
-    const url = new URL(path, this.origin);
-    if (url.origin !== this.origin.origin) throw new Error("Cross-origin API request rejected");
+    let origin: URL;
+    try { origin = await this.endpoints.resolve(); }
+    catch { throw new MobileApiError("Не удалось связаться с Levik VPN"); }
+    const url = new URL(path, origin);
+    if (url.origin !== origin.origin) throw new Error("Cross-origin API request rejected");
     const body = method === "POST" ? Buffer.from(JSON.stringify(payload ?? {})) : Buffer.alloc(0);
     const signed = this.signer.sign(method, url.pathname, accessToken, body);
     const controller = new AbortController();
@@ -128,6 +129,7 @@ export class MobileApiClient {
       return decoded as Response;
     } catch (error) {
       if (error instanceof MobileApiError) throw error;
+      this.endpoints.invalidate();
       if ((error as Error).name === "AbortError") throw new MobileApiError("Превышено время ожидания сети");
       throw new MobileApiError("Не удалось связаться с Levik VPN");
     } finally {
