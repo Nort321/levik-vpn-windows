@@ -34,8 +34,10 @@ export function buildXrayConfig(
   server: TunnelServer,
   settings: AppSettings,
 ): Record<string, unknown> {
-  const antiDpiOutbound = withAntiDpi(server, settings);
-  const selectedOutbound = withBootstrapResolution(withAlternateXhttpMux(antiDpiOutbound));
+  const antiDpiOutbound = server.tuic ? server.outbound : withAntiDpi(server, settings);
+  const selectedOutbound = server.tuic
+    ? tuicLocalOutbound(server.tag)
+    : withBootstrapResolution(withAlternateXhttpMux(antiDpiOutbound));
   const bootstrapDomains = endpointDomains(server.outbound.settings);
   const directDomains = [...profile.directDomains];
   const proxyDomains = [...profile.proxyDomains];
@@ -118,6 +120,17 @@ export function buildXrayConfig(
     stats: {},
   };
 }
+
+/**
+ * Xray reaches a TUIC server through a loopback SOCKS5 hop to the bundled
+ * sing-box. XrayManager starts the sidecar with per-session credentials and
+ * rewrites this placeholder before Xray starts.
+ */
+export function tuicLocalOutbound(tag: string): Record<string, unknown> {
+  return { tag, protocol: "socks", settings: { address: "127.0.0.1", port: TUIC_PLACEHOLDER_PORT } };
+}
+
+export const TUIC_PLACEHOLDER_PORT = 1;
 
 function endpointDomains(value: unknown): string[] {
   if (Array.isArray(value)) return unique(value.flatMap(endpointDomains));

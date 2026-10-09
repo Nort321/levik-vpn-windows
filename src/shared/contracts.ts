@@ -32,12 +32,27 @@ export interface AccountSummary {
   subscriptions: SubscriptionSummary[];
 }
 
+/** TUIC v5 endpoint. Xray has no TUIC support; a bundled sing-box carries it. */
+export interface TuicEndpoint {
+  address: string;
+  port: number;
+  uuid: string;
+  password: string;
+  serverName: string;
+  alpn: string[];
+  congestionControl: "bbr" | "cubic" | "new_reno";
+  udpRelayMode: "native" | "quic";
+  /** PEM trust anchor pinned by the Levik profile; system roots are never used. */
+  caCertificatePem: string;
+}
+
 export interface TunnelServer {
   id: string;
   tag: string;
   name: string;
   countryCode: string;
   outbound: Record<string, unknown>;
+  tuic?: TuicEndpoint;
 }
 
 export interface AppSettings {

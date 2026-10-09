@@ -8,6 +8,7 @@ import type {
   AppSnapshot,
   LoginChallenge,
   TunnelServer,
+  TuicEndpoint,
 } from "../shared/contracts";
 import { isAuthenticationRejected, MobileApiClient } from "./api/mobileApiClient";
 import type { AuthChallengeResponse, MobileAccountResponse } from "./api/models";
@@ -62,7 +63,9 @@ export class AppController extends EventEmitter<AppControllerEvents> {
   private readonly secureStore = new SecureStore();
   private readonly xray = new XrayManager();
   private readonly dnsLeakProtection = new DnsLeakProtection(this.secureStore);
-  private readonly killSwitch = new WindowsKillSwitch(() => this.xray.executablePath());
+  private readonly killSwitch = new WindowsKillSwitch(() => this.xray.executablePath(), {
+    tuicExecutablePath: () => this.xray.tuicExecutablePath(),
+  });
   private readonly updater: AppUpdater | null;
   private identity!: DeviceIdentity;
   private api!: MobileApiClient;
@@ -71,6 +74,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
   private loginGeneration = 0;
   private reconnectAttempts = 0;
   private lastConfig: Record<string, unknown> | null = null;
+  private lastTuic: TuicEndpoint | undefined;
   private connectionGeneration = 0;
   private tunnelOperation: Promise<void> = Promise.resolve();
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
@@ -311,6 +315,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
       if (this.state.settings.preventDnsLeaks) await this.dnsLeakProtection.enable();
       const config = buildXrayConfig(this.profile, server, this.state.settings);
       this.lastConfig = config;
+      this.lastTuic = server.tuic;
       await this.startXray(config, generation);
       await this.verifyTunnelReadiness(generation);
       this.assertCurrentConnection(generation);
@@ -324,6 +329,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
       });
     } catch (error) {
       this.lastConfig = null;
+      this.lastTuic = undefined;
       let failure: unknown = error;
       try {
         await this.xray.stop();
@@ -343,6 +349,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
   disconnect(): Promise<void> {
     this.cancelTunnelRecovery();
     this.lastConfig = null;
+    this.lastTuic = undefined;
     this.patch({ status: "disconnecting", statusDetail: "Отключение…" });
     return this.runTunnelOperation(async () => {
       try {
@@ -575,6 +582,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     this.accessToken = null;
     this.profile = null;
     this.lastConfig = null;
+    this.lastTuic = undefined;
     await Promise.all([
       this.secureStore.remove("access_token"),
       this.secureStore.remove("tunnel_profile"),
@@ -635,6 +643,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
               this.patch({ selectedServerId: server.id });
               await this.secureStore.put("selected_server", Buffer.from(server.id));
               this.lastConfig = buildXrayConfig(this.profile, server, this.state.settings);
+              this.lastTuic = server.tuic;
             }
           }
           this.assertCurrentConnection(generation);
@@ -722,7 +731,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
 
   private async startXray(config: Record<string, unknown>, generation: number): Promise<void> {
     this.assertCurrentConnection(generation);
-    await this.xray.start(config);
+    await this.xray.start(config, this.lastTuic);
     try {
       this.assertCurrentConnection(generation);
       await this.killSwitch.allowTunnel();
@@ -773,6 +782,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     this.patch({ status: "reconnecting", statusDetail: "Применение изменений соединения…" });
     await this.runTunnelOperation(() => this.xray.stop());
     this.lastConfig = null;
+    this.lastTuic = undefined;
   }
 
   private connectionRequested(): boolean {
@@ -794,8 +804,11 @@ export class AppController extends EventEmitter<AppControllerEvents> {
   }
 
   private bestServer(servers: TunnelServer[]): TunnelServer | null {
-    const nonRussian = servers.filter((item) => item.countryCode.toUpperCase() !== "RU");
-    const candidates = nonRussian.length ? nonRussian : servers;
+    // TUIC is an explicit per-server choice; automatic selection keeps Xray protocols.
+    const xrayServers = servers.filter((item) => !item.tuic);
+    const pool = xrayServers.length ? xrayServers : servers;
+    const nonRussian = pool.filter((item) => item.countryCode.toUpperCase() !== "RU");
+    const candidates = nonRussian.length ? nonRussian : pool;
     return candidates.reduce<TunnelServer | null>((best, candidate) => {
       if (!best) return candidate;
       const bestLatency = this.state.serverLatencies[best.id];

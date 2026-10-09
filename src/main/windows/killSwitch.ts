@@ -12,6 +12,8 @@ interface WindowsKillSwitchOptions {
   platform?: NodeJS.Platform;
   appExecutablePath?: string;
   helperExecutablePath?: string;
+  /** sing-box for TUIC; permitted like Xray because it dials the VPN server itself. */
+  tuicExecutablePath?: () => string;
   run?: KillSwitchCommandRunner;
 }
 
@@ -22,6 +24,7 @@ export class WindowsKillSwitch {
   private readonly appExecutablePath: string;
   private readonly helperExecutablePath: string;
   private readonly run: KillSwitchCommandRunner;
+  private readonly tuicExecutablePath: (() => string) | undefined;
 
   constructor(
     private readonly xrayExecutablePath: () => string,
@@ -31,6 +34,7 @@ export class WindowsKillSwitch {
     this.appExecutablePath = options.appExecutablePath ?? process.execPath;
     this.helperExecutablePath = options.helperExecutablePath ?? windowsHelperPath();
     this.run = options.run ?? ((arguments_) => runHelper(this.helperExecutablePath, arguments_));
+    this.tuicExecutablePath = options.tuicExecutablePath;
   }
 
   async recover(): Promise<boolean> {
@@ -42,7 +46,7 @@ export class WindowsKillSwitch {
     const status = await this.run(["status"]);
     if (status.exitCode === 2) return false;
     if (status.exitCode !== 3) this.assertSuccessful(status, "проверить состояние");
-    await this.execute("enable", this.appExecutablePath, this.xrayExecutablePath());
+    await this.execute(...this.enableArguments());
     this.active = true;
     return true;
   }
@@ -60,7 +64,7 @@ export class WindowsKillSwitch {
     }
     if (!shouldRestore()) return false;
     // Keep monitoring after a failed repair; active also records our intent.
-    await this.execute("enable", this.appExecutablePath, this.xrayExecutablePath());
+    await this.execute(...this.enableArguments());
     return true;
   }
 
@@ -72,7 +76,7 @@ export class WindowsKillSwitch {
   async enable(): Promise<void> {
     return this.serialize(async () => {
       if (this.platform !== "win32" || this.active) return;
-      await this.execute("enable", this.appExecutablePath, this.xrayExecutablePath());
+      await this.execute(...this.enableArguments());
       this.active = true;
     });
   }
@@ -109,6 +113,11 @@ export class WindowsKillSwitch {
     const pending = this.operation.then(operation);
     this.operation = pending.catch(() => {});
     return pending;
+  }
+
+  private enableArguments(): string[] {
+    const tuic = this.tuicExecutablePath?.();
+    return ["enable", this.appExecutablePath, this.xrayExecutablePath(), ...(tuic ? [tuic] : [])];
   }
 
   private async execute(...arguments_: string[]): Promise<void> {

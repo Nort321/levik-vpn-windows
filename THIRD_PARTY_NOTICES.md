@@ -12,6 +12,15 @@ Levik VPN for Windows bundles the following runtime components:
 The upstream license is included in the installed `resources/xray` directory.
 Modified MPL-covered source files, the patch and its upstream source manifest are included in `resources/xray/levik-source`.
 
+## sing-box
+
+- Project: https://github.com/SagerNet/sing-box
+- Version: `v1.14.2` (official `windows-amd64` release, SHA-256 pinned in `scripts/download-singbox.mjs`)
+- License: GNU General Public License v3.0 or later
+- Use: separate process that carries TUIC v5 connections.
+
+The upstream license is included in the installed `resources/singbox` directory.
+
 ## Wintun
 
 - Project: https://www.wintun.net/

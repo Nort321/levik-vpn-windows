@@ -1,4 +1,4 @@
-import { createDecipheriv, createHash } from "node:crypto";
+import { createDecipheriv, createHash, X509Certificate } from "node:crypto";
 import type { TunnelProfileEnvelope } from "../api/models";
 import { decodeBase64Url } from "../../shared/base64";
 import type { TunnelServer } from "../../shared/contracts";
@@ -74,8 +74,67 @@ function parseSource(source: string): TunnelServer[] {
     if (line.startsWith("vless://")) return [parseVless(line, index)];
     if (line.startsWith("trojan://")) return [parseTrojan(line, index)];
     if (line.startsWith("hysteria2://") || line.startsWith("hy2://")) return [parseHysteria2(line, index)];
+    if (line.startsWith("tuic://")) return parseTuic(line, index);
     return [];
   });
+}
+
+const TUIC_UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+const TUIC_PASSWORD_PATTERN = /^[A-Za-z0-9_-]{16,128}$/;
+const IPV4_PATTERN = /^(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)$/;
+const DNS_NAME_PATTERN = /^(?=.{1,253}$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$/;
+
+/**
+ * TUIC links are issued only by the Levik profile service. They carry a pinned
+ * CA (levik_ca, base64url DER) and an IP-literal server, so the privileged
+ * helper never resolves names or trusts system roots for TUIC. Anything else
+ * is skipped rather than connected insecurely.
+ */
+export function parseTuic(value: string, index: number): TunnelServer[] {
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    return [];
+  }
+  const uuid = decodeURIComponent(url.username).toLowerCase();
+  const password = decodeURIComponent(url.password);
+  const address = url.hostname;
+  const port = Number(url.port || "443");
+  const serverName = (url.searchParams.get("sni") || "").toLowerCase();
+  const congestionControl = url.searchParams.get("congestion_control") || "bbr";
+  const udpRelayMode = url.searchParams.get("udp_relay_mode") || "native";
+  const alpn = (url.searchParams.get("alpn") || "h3").split(",").filter(Boolean);
+  const caCertificatePem = pinnedCertificatePem(url.searchParams.get("levik_ca"));
+  if (!TUIC_UUID_PATTERN.test(uuid) || !TUIC_PASSWORD_PATTERN.test(password) || !IPV4_PATTERN.test(address)
+    || !Number.isInteger(port) || port < 1 || port > 65535 || !DNS_NAME_PATTERN.test(serverName)
+    || (congestionControl !== "bbr" && congestionControl !== "cubic" && congestionControl !== "new_reno")
+    || (udpRelayMode !== "native" && udpRelayMode !== "quic")
+    || alpn.length === 0 || alpn.length > 4 || alpn.some((item) => !/^[a-z0-9./-]{1,32}$/i.test(item))
+    || !caCertificatePem) {
+    return [];
+  }
+  // A descriptive, non-Xray outbound: buildXrayConfig replaces it with a local
+  // SOCKS hop to sing-box, and the helper rejects it if that ever fails.
+  const outbound: Record<string, unknown> = { protocol: "tuic", settings: { address, port } };
+  const server = createServer(outbound, url.hash, address, index);
+  return [{
+    ...server,
+    tuic: { address, port, uuid, password, serverName, alpn, congestionControl, udpRelayMode, caCertificatePem },
+  }];
+}
+
+function pinnedCertificatePem(encoded: string | null): string | null {
+  if (!encoded || encoded.length > 8_192 || !/^[A-Za-z0-9_-]+$/.test(encoded)) return null;
+  try {
+    const der = Buffer.from(encoded, "base64url");
+    const certificate = new X509Certificate(der);
+    if (!certificate.ca) return null;
+    const lines = der.toString("base64").match(/.{1,64}/g) ?? [];
+    return `-----BEGIN CERTIFICATE-----\n${lines.join("\n")}\n-----END CERTIFICATE-----\n`;
+  } catch {
+    return null;
+  }
 }
 
 function parseHysteria2(value: string, index: number): TunnelServer {

@@ -7,6 +7,8 @@ import { promisify } from "node:util";
 import { parseXrayStats, XRAY_STATS_ENDPOINT } from "./xrayStats";
 import { bindXrayOutboundInterface } from "./xrayConfig";
 import { findWindowsOutboundInterface } from "../windows/outboundInterface";
+import { TuicSidecar, withTuicProxy } from "./tuicSidecar";
+import type { TuicEndpoint } from "../../shared/contracts";
 
 const execFileAsync = promisify(execFile);
 
@@ -22,8 +24,22 @@ export class XrayManager extends EventEmitter<XrayEvents> {
   private statsTimer: ReturnType<typeof setInterval> | null = null;
   private statsQueryRunning: ChildProcess | null = null;
   private statsErrorReported = false;
+  private readonly tuic = new TuicSidecar(stopChild);
 
-  async start(config: Record<string, unknown>): Promise<void> {
+  constructor() {
+    super();
+    this.tuic.on("log", (line) => this.emit("log", line));
+    // Without its sidecar a TUIC session blackholes traffic. Ending the core
+    // surfaces an unexpected exit, so the controller reconnects.
+    this.tuic.on("exit", (code) => {
+      const child = this.process;
+      if (!child) return;
+      this.emit("log", `TUIC: ядро завершилось (код ${code ?? "?"})`);
+      child.kill();
+    });
+  }
+
+  async start(config: Record<string, unknown>, tuic?: TuicEndpoint): Promise<void> {
     if (process.platform !== "win32") throw new Error("VPN-туннель запускается только в Windows-сборке");
     const { stdout: version } = await execFileAsync(this.executablePath(), ["version"], {
       windowsHide: true, timeout: 5_000, maxBuffer: 64 * 1024,
@@ -31,7 +47,18 @@ export class XrayManager extends EventEmitter<XrayEvents> {
     assertProcessRoutingSupport(config, version);
     await this.stop();
     const interfaceName = await findWindowsOutboundInterface((message) => this.emit("log", message));
-    const configInput = Buffer.from(JSON.stringify(bindXrayOutboundInterface(config, interfaceName)), "utf8");
+    let launchConfig = config;
+    if (tuic) {
+      const proxy = await this.tuic.start(tuic, interfaceName);
+      try {
+        launchConfig = withTuicProxy(config, proxy);
+      } catch (error) {
+        await this.tuic.stop();
+        throw error;
+      }
+      this.emit("log", `TUIC: sing-box bound to [${interfaceName}]`);
+    }
+    const configInput = Buffer.from(JSON.stringify(bindXrayOutboundInterface(launchConfig, interfaceName)), "utf8");
     this.emit("log", `Xray: outbound interface [${interfaceName}] (TCP/UDP, direct)`);
     try {
       await this.validate(configInput);
@@ -67,10 +94,16 @@ export class XrayManager extends EventEmitter<XrayEvents> {
   async stop(): Promise<void> {
     this.stopStatsPolling();
     const child = this.process;
-    if (!child) return;
-    this.stopping.add(child);
-    await stopChild(child);
-    if (this.process === child) this.process = null;
+    if (child) {
+      this.stopping.add(child);
+      await stopChild(child);
+      if (this.process === child) this.process = null;
+    }
+    await this.tuic.stop();
+  }
+
+  tuicExecutablePath(): string {
+    return this.tuic.executablePath();
   }
 
   isRunning(): boolean {

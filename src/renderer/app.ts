@@ -1,4 +1,5 @@
 import type { AppSettings, AppSnapshot, AppTab, TunnelServer, WindowsProcess } from "../shared/contracts";
+import { activeVariant, groupServers, serverProtocolShortLabel, type ServerGroup } from "../shared/serverGroups";
 import { shouldShowLogin } from "../shared/sessionState";
 import { mergeProcessList, normalizeProcessSelection, processStatusLabel, resolveProcessCompanions, sortProcessList } from "../shared/processes";
 import QRCode from "qrcode";
@@ -159,7 +160,11 @@ function renderHome(): string {
         <label class="home-server-picker">
           <span class="home-server-flag" aria-hidden="true">${countryFlagSvg(server?.countryCode ?? null)}</span>
           <select id="home-server-select" aria-label="Сервер быстрого подключения" ${state.servers.length && !state.busy ? "" : "disabled"}>
-            ${state.servers.length ? state.servers.map((item) => `<option value="${escapeAttribute(item.id)}" ${item.id === state?.selectedServerId ? "selected" : ""}>${escapeHtml(item.name)}</option>`).join("") : `<option>Сервер не выбран</option>`}
+            ${state.servers.length ? groupServers(state.servers).map((group) => {
+              const variant = activeVariant(group, state?.selectedServerId ?? null);
+              const label = group.variants.length > 1 ? `${groupTitle(group)} · ${serverProtocolShortLabel(variant)}` : variant.name;
+              return `<option value="${escapeAttribute(variant.id)}" ${variant.id === state?.selectedServerId ? "selected" : ""}>${escapeHtml(label)}</option>`;
+            }).join("") : `<option>Сервер не выбран</option>`}
           </select>
         </label>
         <div class="connection-detail">${escapeHtml(state.statusDetail ?? "Нажмите кнопку, чтобы включить защиту")}</div>
@@ -176,15 +181,34 @@ function renderServers(): string {
   return `
     <header class="page-header"><div><h1>VPN-серверы</h1><div class="subtitle">Выберите точку подключения Levik VPN</div></div><div class="toolbar"><button class="button icon-button ${favoritesOnly ? "active" : ""}" id="favorites-filter-button" aria-label="Показать избранные" aria-pressed="${favoritesOnly}">${icon("star")}</button><button class="button icon-button" id="ping-button" aria-label="Измерить задержку">${icon("pulse")}</button><button class="button icon-button" id="refresh-button" aria-label="Обновить профиль">${icon("refresh")}</button></div></header>
     <label class="server-search"><span>${icon("search")}</span><input id="server-search-input" type="search" placeholder="Поиск по серверу или стране" autocomplete="off" value="${escapeAttribute(serverSearchQuery)}" /></label>
-    ${state.servers.length ? `<div class="server-list">${state.servers.map(serverCard).join("")}</div><div class="empty card-flat server-empty" hidden>Серверы не найдены</div>` : `<div class="empty card-flat">Для выбранной подписки нет совместимых серверов</div>`}`;
+    ${state.servers.length ? `<div class="server-list">${groupServers(state.servers).map(serverCard).join("")}</div><div class="empty card-flat server-empty" hidden>Серверы не найдены</div>` : `<div class="empty card-flat">Для выбранной подписки нет совместимых серверов</div>`}`;
 }
 
-function serverCard(server: TunnelServer): string {
-  const selected = state?.selectedServerId === server.id;
-  const favorite = state?.settings.favoriteServerIds.includes(server.id) ?? false;
+function serverCard(group: ServerGroup): string {
+  const server = activeVariant(group, state?.selectedServerId ?? null);
+  const selected = group.variants.some((variant) => variant.id === state?.selectedServerId);
+  const favorite = group.variants.some((variant) => state?.settings.favoriteServerIds.includes(variant.id));
   const latency = state?.serverLatencies[server.id];
-  const filter = `${server.name} ${countryLabel(server.countryCode)} ${server.countryCode}`.toLocaleLowerCase("ru");
-  return `<div class="server-card ${selected ? "selected" : ""}" data-server-filter="${escapeAttribute(filter)}" data-server-favorite="${favorite}"><button class="server-select" data-server-id="${escapeAttribute(server.id)}" aria-label="Выбрать ${escapeAttribute(server.name)}"><span class="server-flag" aria-hidden="true">${countryFlagSvg(server.countryCode)}</span><span class="server-copy"><span class="server-name">${escapeHtml(server.name)}</span><span class="server-meta">${escapeHtml(countryLabel(server.countryCode))} · ${escapeHtml(serverProtocol(server))} · ${latency === undefined ? "не измерен" : latency === null ? "нет ответа" : `${latency} мс`}</span></span><span class="radio"></span></button><button class="favorite-button ${favorite ? "active" : ""}" data-favorite-server-id="${escapeAttribute(server.id)}" aria-label="${favorite ? "Удалить из избранного" : "Добавить в избранное"}" aria-pressed="${favorite}">${icon("star")}</button></div>`;
+  const title = groupTitle(group);
+  const filter = `${title} ${group.variants.map((variant) => `${variant.name} ${serverProtocolShortLabel(variant)}`).join(" ")} ${countryLabel(server.countryCode)} ${server.countryCode}`.toLocaleLowerCase("ru");
+  const protocolSwitch = group.variants.length > 1
+    ? `<div class="protocol-switch" role="radiogroup" aria-label="Протокол: ${escapeAttribute(title)}">${group.variants.map((variant) => {
+      const active = variant.id === server.id;
+      return `<button class="protocol-option ${active ? "active" : ""}" role="radio" aria-checked="${active}" data-server-id="${escapeAttribute(variant.id)}">${escapeHtml(serverProtocolShortLabel(variant))}</button>`;
+    }).join("")}</div>`
+    : "";
+  return `<div class="server-card ${selected ? "selected" : ""}" data-server-filter="${escapeAttribute(filter)}" data-server-favorite="${favorite}"><button class="server-select" data-server-id="${escapeAttribute(server.id)}" aria-label="Выбрать ${escapeAttribute(title)}"><span class="server-flag" aria-hidden="true">${countryFlagSvg(server.countryCode)}</span><span class="server-copy"><span class="server-name">${escapeHtml(title)}</span><span class="server-meta">${escapeHtml(countryLabel(server.countryCode))} · ${escapeHtml(serverProtocol(server))} · ${latency === undefined ? "не измерен" : latency === null ? "нет ответа" : `${latency} мс`}</span></span><span class="radio"></span></button><button class="favorite-button ${favorite ? "active" : ""}" data-favorite-server-id="${escapeAttribute(server.id)}" data-favorite-group-ids="${escapeAttribute(group.variants.map((variant) => variant.id).join(","))}" aria-label="${favorite ? "Удалить из избранного" : "Добавить в избранное"}" aria-pressed="${favorite}">${icon("star")}</button>${protocolSwitch}</div>`;
+}
+
+/** A multi-protocol server is named by its country; a single entry keeps its own name. */
+function groupTitle(group: ServerGroup): string {
+  const first = group.variants[0]!;
+  if (group.variants.length === 1) return first.name;
+  try {
+    return new Intl.DisplayNames(["ru"], { type: "region" }).of(group.countryCode) ?? first.name;
+  } catch {
+    return first.name;
+  }
 }
 
 function renderStats(): string {
@@ -321,7 +345,9 @@ function bindPageEvents(): void {
     const serverId = button.dataset.favoriteServerId;
     if (!currentState || !serverId) return;
     const favorites = new Set(currentState.settings.favoriteServerIds);
-    if (favorites.has(serverId)) favorites.delete(serverId);
+    // A server card covers every protocol variant of the same server.
+    const groupIds = (button.dataset.favoriteGroupIds ?? serverId).split(",").filter(Boolean);
+    if (groupIds.some((id) => favorites.has(id))) groupIds.forEach((id) => favorites.delete(id));
     else favorites.add(serverId);
     void run(() => window.levik.updateSettings({ favoriteServerIds: [...favorites] }));
   }));
@@ -600,6 +626,7 @@ function serverProtocol(server: TunnelServer): string {
     return security?.toLowerCase() === "reality" ? "VLESS · Reality" : "VLESS";
   }
   if (protocol === "trojan") return "Trojan";
+  if (server.tuic) return "TUIC v5";
   return protocol.toUpperCase();
 }
 

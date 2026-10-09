@@ -29,6 +29,10 @@ constexpr GUID kAppV4Key = {0x05b55772, 0x67e2, 0x4643, {0x94, 0x43, 0x84, 0xce,
 constexpr GUID kAppV6Key = {0xac1528df, 0xd4cb, 0x4701, {0x99, 0x75, 0xbc, 0x56, 0xc4, 0x08, 0x0d, 0xd1}};
 constexpr GUID kXrayV4Key = {0xa66b42da, 0xaa63, 0x41a1, {0xb9, 0x8d, 0x84, 0x45, 0xd8, 0x34, 0x43, 0x6f}};
 constexpr GUID kXrayV6Key = {0x99665898, 0x65cb, 0x4a1c, {0xa7, 0x82, 0xe6, 0x7b, 0x6c, 0xdf, 0x2a, 0xf0}};
+// Optional TUIC sidecar (sing-box). Removed with the boundary, but not required
+// by Status so that a boundary without a TUIC permit still reports complete.
+constexpr GUID kTuicV4Key = {0x29a0c33b, 0xbb57, 0x457b, {0xb7, 0xf0, 0xcf, 0xb5, 0xa4, 0xe9, 0x08, 0xf4}};
+constexpr GUID kTuicV6Key = {0xa5844220, 0xf6a7, 0x4ce0, {0x9b, 0x39, 0x1a, 0x34, 0x9c, 0xc3, 0x88, 0x98}};
 constexpr GUID kTunnelV4Key = {0x3936c136, 0xe200, 0x4ce6, {0xb3, 0xe1, 0xe8, 0x3a, 0x8b, 0x45, 0x15, 0xf7}};
 constexpr GUID kTunnelV6Key = {0xb13e795b, 0xcb1b, 0x4ed8, {0x9e, 0x32, 0xc2, 0x24, 0xe1, 0x4a, 0x48, 0xf5}};
 constexpr GUID kLoopbackV4Key = {0x4f785bc2, 0x630c, 0x43fa, {0xb2, 0x15, 0xd1, 0x38, 0x41, 0x70, 0xac, 0x92}};
@@ -50,6 +54,13 @@ std::vector<GUID> BoundaryKeys(bool includeTunnel) {
                           kLoopbackV4Key, kLoopbackV6Key, kBlockV4Key, kBlockV6Key};
   if (includeTunnel) { keys.push_back(kTunnelV4Key); keys.push_back(kTunnelV6Key); }
   for (size_t i = 0; i < kNetworkPermitCount; ++i) keys.push_back(NetworkPermitKey(i));
+  return keys;
+}
+
+std::vector<GUID> RemovableKeys() {
+  std::vector<GUID> keys = BoundaryKeys(true);
+  keys.push_back(kTuicV4Key);
+  keys.push_back(kTuicV6Key);
   return keys;
 }
 
@@ -282,7 +293,7 @@ DWORD CommitTransaction(HANDLE engine, DWORD result) {
   return FwpmTransactionCommit0(engine);
 }
 
-DWORD Enable(const std::wstring& appPath, const std::wstring& xrayPath) {
+DWORD Enable(const std::wstring& appPath, const std::wstring& xrayPath, const std::wstring* tuicPath) {
   EngineHandle engine;
   DWORD result = OpenEngine(engine);
   if (result != ERROR_SUCCESS) return result;
@@ -290,7 +301,7 @@ DWORD Enable(const std::wstring& appPath, const std::wstring& xrayPath) {
 
   // Replace older persistent objects atomically. Runtime objects remain active
   // after an app crash, but Windows removes them when BFE stops during reboot.
-  for (const GUID& key : BoundaryKeys(true)) {
+  for (const GUID& key : RemovableKeys()) {
     if (result != ERROR_SUCCESS) break;
     result = IgnoreMissingFilter(FwpmFilterDeleteByKey0(engine.get(), &key));
   }
@@ -303,6 +314,10 @@ DWORD Enable(const std::wstring& appPath, const std::wstring& xrayPath) {
   if (result == ERROR_SUCCESS) result = AddApplicationPermit(engine.get(), appPath, FWPM_LAYER_ALE_AUTH_CONNECT_V6, kAppV6Key);
   if (result == ERROR_SUCCESS) result = AddApplicationPermit(engine.get(), xrayPath, FWPM_LAYER_ALE_AUTH_CONNECT_V4, kXrayV4Key);
   if (result == ERROR_SUCCESS) result = AddApplicationPermit(engine.get(), xrayPath, FWPM_LAYER_ALE_AUTH_CONNECT_V6, kXrayV6Key);
+  if (tuicPath != nullptr) {
+    if (result == ERROR_SUCCESS) result = AddApplicationPermit(engine.get(), *tuicPath, FWPM_LAYER_ALE_AUTH_CONNECT_V4, kTuicV4Key);
+    if (result == ERROR_SUCCESS) result = AddApplicationPermit(engine.get(), *tuicPath, FWPM_LAYER_ALE_AUTH_CONNECT_V6, kTuicV6Key);
+  }
   if (result == ERROR_SUCCESS) result = AddLoopbackPermit(engine.get(), kProviderKey, kSubLayerKey, FWPM_LAYER_ALE_AUTH_CONNECT_V4, kLoopbackV4Key);
   if (result == ERROR_SUCCESS) result = AddLoopbackPermit(engine.get(), kProviderKey, kSubLayerKey, FWPM_LAYER_ALE_AUTH_CONNECT_V6, kLoopbackV6Key);
   for (size_t i = 0; i < kNetworkPermitCount && result == ERROR_SUCCESS; ++i)
@@ -363,7 +378,7 @@ DWORD Disable() {
 
   if ((result = BeginTransaction(engine.get())) != ERROR_SUCCESS) return result;
 
-  for (const GUID& key : BoundaryKeys(true)) {
+  for (const GUID& key : RemovableKeys()) {
     if (result != ERROR_SUCCESS) break;
     result = IgnoreMissingFilter(FwpmFilterDeleteByKey0(engine.get(), &key));
   }
@@ -732,13 +747,17 @@ DWORD SelfTest() {
 
 int wmain(int argc, wchar_t* argv[]) {
   if (argc < 2) {
-    std::wcerr << L"Usage: levik-kill-switch <enable|allow-tunnel|disable|status|cleanup-legacy|outbound-interfaces|self-test>\n";
+    std::wcerr << L"Usage: levik-kill-switch <enable APP XRAY [TUIC]|allow-tunnel|disable|status|cleanup-legacy|outbound-interfaces|self-test>\n";
     return ERROR_INVALID_PARAMETER;
   }
 
   const std::wstring command = argv[1];
   DWORD result = ERROR_INVALID_PARAMETER;
-  if (command == L"enable" && argc == 4) result = Enable(argv[2], argv[3]);
+  if (command == L"enable" && argc == 4) result = Enable(argv[2], argv[3], nullptr);
+  else if (command == L"enable" && argc == 5) {
+    const std::wstring tuicPath = argv[4];
+    result = Enable(argv[2], argv[3], &tuicPath);
+  }
   else if (command == L"allow-tunnel" && argc == 3) result = AllowTunnel(argv[2]);
   else if (command == L"disable" && argc == 2) result = Disable();
   else if (command == L"status" && argc == 2) result = Status();

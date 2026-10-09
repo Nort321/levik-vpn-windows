@@ -53,6 +53,7 @@ jobs:
           "version=$version" >> $env:GITHUB_OUTPUT
 
       - run: npm run download:xray
+      - run: npm run download:singbox
       - run: npm run lint
       - run: npm run build
       - run: npm test

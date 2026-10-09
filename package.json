@@ -1,6 +1,6 @@
 {
   "name": "levik-vpn-windows",
-  "version": "1.2.4",
+  "version": "1.3.0",
   "private": true,
   "description": "Official Levik VPN client for Windows",
   "main": "dist/main/main.js",
@@ -12,6 +12,7 @@
     "build:win-helper": "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File scripts/build-kill-switch.ps1",
     "test": "vitest run",
     "download:xray": "node scripts/download-xray.mjs",
+    "download:singbox": "node scripts/download-singbox.mjs",
     "package:win": "npm run build && npm run build:win-helper && electron-builder --win nsis --x64",
     "check": "npm run lint && npm run build && npm test"
   },
@@ -40,6 +41,15 @@
         "to": "xray",
         "filter": [
           "**/*"
+        ]
+      },
+      {
+        "from": "vendor/singbox/windows-x64",
+        "to": "singbox",
+        "filter": [
+          "sing-box.exe",
+          "LICENSE",
+          "VERSION"
         ]
       },
       {

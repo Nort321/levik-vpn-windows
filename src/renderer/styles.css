@@ -268,6 +268,11 @@ select option { color: var(--text); background-color: var(--select-bg); }
 .server-card:hover { transform: translateY(-1px); background: var(--surface-hover, rgba(255,255,255,.05)); }
 .server-card.selected { border-color: rgba(54,135,255,.58); background: rgba(54,135,255,.105); }
 .server-card[hidden] { display: none; }
+.server-card:has(.protocol-switch) { flex-wrap: wrap; }
+.protocol-switch { flex-basis: 100%; display: flex; flex-wrap: wrap; gap: 6px; padding: 0 11px 9px 60px; }
+.protocol-option { min-height: 28px; padding: 4px 12px; border: 1px solid var(--border); border-radius: 999px; color: var(--muted); background: transparent; font: inherit; font-size: 12px; font-weight: 600; cursor: pointer; transition: 150ms ease; }
+.protocol-option:hover { color: var(--text); background: rgba(255,255,255,.05); }
+.protocol-option.active { color: #fff; border-color: var(--blue); background: var(--blue); }
 .server-select { min-width: 0; flex: 1; display: flex; align-items: center; gap: 13px; padding: 11px; border: 0; background: transparent; text-align: left; cursor: pointer; }
 .favorite-button { width: 40px; height: 40px; flex: none; display: grid; place-items: center; border: 0; border-radius: 11px; color: var(--muted); background: transparent; cursor: pointer; }
 .favorite-button:hover { color: var(--warning); background: rgba(255,189,89,.08); }
