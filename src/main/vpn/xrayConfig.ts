@@ -122,15 +122,22 @@ export function buildXrayConfig(
 }
 
 /**
- * Xray reaches a TUIC server through a loopback SOCKS5 hop to the bundled
- * sing-box. XrayManager starts the sidecar with per-session credentials and
- * rewrites this placeholder before Xray starts.
+ * Xray reaches a TUIC server through a loopback VLESS hop to the bundled
+ * sing-box. VLESS carries UDP inside the TCP stream: the TUN binds Xray's UDP
+ * sockets to the physical interface, so a SOCKS5 UDP relay on loopback would
+ * drop DNS and QUIC. XrayManager starts the sidecar with a per-session user id
+ * and rewrites this placeholder before Xray starts.
  */
 export function tuicLocalOutbound(tag: string): Record<string, unknown> {
-  return { tag, protocol: "socks", settings: { address: "127.0.0.1", port: TUIC_PLACEHOLDER_PORT } };
+  return {
+    tag,
+    protocol: "vless",
+    settings: { vnext: [{ address: "127.0.0.1", port: TUIC_PLACEHOLDER_PORT, users: [{ id: TUIC_PLACEHOLDER_ID, encryption: "none" }] }] },
+  };
 }
 
 export const TUIC_PLACEHOLDER_PORT = 1;
+export const TUIC_PLACEHOLDER_ID = "00000000-0000-4000-8000-000000000000";
 
 function endpointDomains(value: unknown): string[] {
   if (Array.isArray(value)) return unique(value.flatMap(endpointDomains));

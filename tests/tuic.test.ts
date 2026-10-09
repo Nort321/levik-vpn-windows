@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { prepareTunnelProfile } from "../src/main/vpn/tunnelProfile";
-import { buildXrayConfig, TUIC_PLACEHOLDER_PORT } from "../src/main/vpn/xrayConfig";
+import { buildXrayConfig, TUIC_PLACEHOLDER_ID, TUIC_PLACEHOLDER_PORT } from "../src/main/vpn/xrayConfig";
 import { buildTuicSidecarConfig, withTuicProxy } from "../src/main/vpn/tuicSidecar";
 import { WindowsKillSwitch } from "../src/main/windows/killSwitch";
 import { activeVariant, groupServers, serverProtocolShortLabel } from "../src/shared/serverGroups";
@@ -46,26 +46,34 @@ describe("Windows TUIC support", () => {
     expect(tuic[0]?.tuic).toMatchObject({ address: "94.156.114.70", port: 8443, uuid: UUID, password: PASSWORD, serverName: "www.samsung.com" });
   });
 
-  it("routes Xray to a loopback SOCKS sidecar and patches per-session credentials", () => {
+  it("routes Xray to a loopback VLESS sidecar and patches the per-session user id", () => {
     const profile = profileFrom(SUBSCRIPTION);
     const server = profile.servers.find((item) => item.tuic)!;
     const config = buildXrayConfig(profile, server, settings);
     const outbounds = config.outbounds as Array<Record<string, unknown>>;
-    expect(outbounds[0]).toEqual({ tag: server.tag, protocol: "socks", settings: { address: "127.0.0.1", port: TUIC_PLACEHOLDER_PORT } });
+    expect(outbounds[0]).toEqual({
+      tag: server.tag,
+      protocol: "vless",
+      settings: { vnext: [{ address: "127.0.0.1", port: TUIC_PLACEHOLDER_PORT, users: [{ id: TUIC_PLACEHOLDER_ID, encryption: "none" }] }] },
+    });
     expect(outbounds.some((outbound) => outbound.tag === "levik-fragment")).toBe(false);
 
-    const proxy = { port: 41000, username: "user", password: "secret" };
+    const proxy = { port: 41000, id: "123e4567-e89b-42d3-a456-426614174000" };
     const patched = withTuicProxy(config, proxy);
     expect((patched.outbounds as Array<Record<string, unknown>>)[0]).toEqual({
-      tag: server.tag, protocol: "socks", settings: { address: "127.0.0.1", port: 41000, user: "user", pass: "secret" },
+      tag: server.tag,
+      protocol: "vless",
+      settings: { vnext: [{ address: "127.0.0.1", port: 41000, users: [{ id: proxy.id, encryption: "none" }] }] },
     });
     expect(() => withTuicProxy({ outbounds: [{ protocol: "vless", settings: {} }] }, proxy)).toThrow();
+    expect(() => withTuicProxy({ outbounds: [{ protocol: "socks", settings: { address: "127.0.0.1", port: TUIC_PLACEHOLDER_PORT } }] }, proxy)).toThrow();
   });
 
   it("builds a sing-box config bound to the physical interface with only the pinned CA", () => {
     const server = profileFrom(SUBSCRIPTION).servers.find((item) => item.tuic)!;
-    const config = buildTuicSidecarConfig(server.tuic!, { port: 41000, username: "user", password: "secret" }, "Ethernet");
-    expect(config.inbounds).toEqual([{ type: "socks", tag: "levik-tuic-in", listen: "127.0.0.1", listen_port: 41000, users: [{ username: "user", password: "secret" }] }]);
+    const id = "123e4567-e89b-42d3-a456-426614174000";
+    const config = buildTuicSidecarConfig(server.tuic!, { port: 41000, id }, "Ethernet");
+    expect(config.inbounds).toEqual([{ type: "vless", tag: "levik-tuic-in", listen: "127.0.0.1", listen_port: 41000, users: [{ uuid: id }] }]);
     const [outbound] = config.outbounds as Array<Record<string, unknown>>;
     expect(outbound).toMatchObject({ type: "tuic", server: "94.156.114.70", server_port: 8443, bind_interface: "Ethernet" });
     expect(outbound?.tls).toEqual({ enabled: true, server_name: "www.samsung.com", alpn: ["h3"], certificate: [server.tuic!.caCertificatePem] });

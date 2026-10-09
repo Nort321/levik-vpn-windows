@@ -1,15 +1,16 @@
 import { app } from "electron";
 import { spawn, type ChildProcess, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { randomBytes } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { connect, createServer } from "node:net";
 import { join } from "node:path";
 import type { TuicEndpoint } from "../../shared/contracts";
+import { TUIC_PLACEHOLDER_ID, TUIC_PLACEHOLDER_PORT } from "./xrayConfig";
 
 export interface TuicLocalProxy {
   port: number;
-  username: string;
-  password: string;
+  /** Per-session VLESS user id of the loopback hop. */
+  id: string;
 }
 
 interface TuicSidecarEvents {
@@ -20,17 +21,17 @@ interface TuicSidecarEvents {
 const STARTUP_TIMEOUT_MS = 8_000;
 
 /**
- * sing-box configuration for one session. The SOCKS5 inbound is loopback-only
- * with per-session credentials, and the TUIC outbound is bound to the physical
- * interface so it never loops through the Wintun adapter. Only the CA pinned
- * by the Levik profile is trusted.
+ * sing-box configuration for one session. The VLESS inbound is loopback-only
+ * with a per-session user id and carries UDP inside its TCP stream, and the
+ * TUIC outbound is bound to the physical interface so it never loops through
+ * the Wintun adapter. Only the CA pinned by the Levik profile is trusted.
  */
 export function buildTuicSidecarConfig(tuic: TuicEndpoint, proxy: TuicLocalProxy, interfaceName: string): Record<string, unknown> {
   return {
     log: { level: "warn", timestamp: false },
     inbounds: [{
-      type: "socks", tag: "levik-tuic-in", listen: "127.0.0.1", listen_port: proxy.port,
-      users: [{ username: proxy.username, password: proxy.password }],
+      type: "vless", tag: "levik-tuic-in", listen: "127.0.0.1", listen_port: proxy.port,
+      users: [{ uuid: proxy.id }],
     }],
     outbounds: [{
       type: "tuic", tag: "levik-tuic", server: tuic.address, server_port: tuic.port,
@@ -46,10 +47,17 @@ export function buildTuicSidecarConfig(tuic: TuicEndpoint, proxy: TuicLocalProxy
 export function withTuicProxy(config: Record<string, unknown>, proxy: TuicLocalProxy): Record<string, unknown> {
   const outbounds = Array.isArray(config.outbounds) ? [...config.outbounds] : [];
   const first: unknown = outbounds[0];
-  if (!isRecord(first) || first.protocol !== "socks" || !isRecord(first.settings) || first.settings.address !== "127.0.0.1") {
+  const vnext = isRecord(first) && isRecord(first.settings) && Array.isArray(first.settings.vnext) ? first.settings.vnext : [];
+  const [placeholder]: unknown[] = vnext;
+  if (!isRecord(first) || first.protocol !== "vless" || vnext.length !== 1 || !isRecord(placeholder)
+    || placeholder.address !== "127.0.0.1" || placeholder.port !== TUIC_PLACEHOLDER_PORT
+    || !Array.isArray(placeholder.users) || !isRecord(placeholder.users[0]) || placeholder.users[0].id !== TUIC_PLACEHOLDER_ID) {
     throw new Error("Некорректный VPN-профиль TUIC");
   }
-  outbounds[0] = { ...first, settings: { address: "127.0.0.1", port: proxy.port, user: proxy.username, pass: proxy.password } };
+  outbounds[0] = {
+    ...first,
+    settings: { vnext: [{ address: "127.0.0.1", port: proxy.port, users: [{ id: proxy.id, encryption: "none" }] }] },
+  };
   return { ...config, outbounds };
 }
 
@@ -73,11 +81,7 @@ export class TuicSidecar extends EventEmitter<TuicSidecarEvents> {
 
   async start(tuic: TuicEndpoint, interfaceName: string): Promise<TuicLocalProxy> {
     await this.stop();
-    const proxy: TuicLocalProxy = {
-      port: await freeLoopbackPort(),
-      username: randomBytes(18).toString("base64url"),
-      password: randomBytes(30).toString("base64url"),
-    };
+    const proxy: TuicLocalProxy = { port: await freeLoopbackPort(), id: randomUUID() };
     const config = Buffer.from(JSON.stringify(buildTuicSidecarConfig(tuic, proxy, interfaceName)), "utf8");
     // The configuration carries credentials; pass it on stdin, never through a file.
     const child = spawn(this.executablePath(), ["run", "-c", "stdin", "--disable-color"], {
