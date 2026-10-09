@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -38,8 +38,8 @@ try {
   const unpacked = join(work, `sing-box-${version}-windows-amd64`);
   await rm(vendorDir, { recursive: true, force: true });
   await mkdir(vendorDir, { recursive: true });
-  await rename(join(unpacked, "sing-box.exe"), join(vendorDir, "sing-box.exe"));
-  await rename(join(unpacked, "LICENSE"), join(vendorDir, "LICENSE"));
+  await copyFile(join(unpacked, "sing-box.exe"), join(vendorDir, "sing-box.exe"));
+  await copyFile(join(unpacked, "LICENSE"), join(vendorDir, "LICENSE"));
   await writeFile(join(vendorDir, "VERSION"), `v${version}\nSHA256 ${sha256}\n`);
   const binary = await readFile(join(vendorDir, "sing-box.exe"));
   if (binary.subarray(0, 2).toString("latin1") !== "MZ") throw new Error("sing-box.exe is not a Windows executable");
