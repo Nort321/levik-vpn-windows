@@ -218,7 +218,7 @@ describe("Windows tunnel profile", () => {
     })), "subscription-1");
     const config = buildXrayConfig(profile, profile.servers[0]!, settings);
     const original = structuredClone(config);
-    const bound = bindXrayOutboundInterface(config, name);
+    const bound = bindXrayOutboundInterface(config, name, true);
     const outbounds = bound.outbounds as Array<Record<string, unknown>>;
     const inbounds = bound.inbounds as Array<{ settings: Record<string, unknown> }>;
     expect(inbounds[0]?.settings.autoOutboundsInterface).toBe(name);
@@ -227,6 +227,21 @@ describe("Windows tunnel profile", () => {
       streamSettings: { sockopt: { interface: name } },
     });
     expect(outbounds.find((outbound) => outbound.tag === "levik-block")).toEqual({ tag: "levik-block", protocol: "blackhole", settings: {} });
+    expect(inbounds[0]?.settings.gateway).toEqual(["10.89.0.1/30", "fdfe:89::1/126"]);
+    expect(config).toEqual(original);
+  });
+
+  it("keeps IPv6 out of the TUN when the physical adapter has no IPv6 route", () => {
+    const profile = prepareTunnelProfile(Buffer.from(JSON.stringify({
+      version: 1, profileId: "ipv4-only", subscriptionId: "subscription-1", issuedAt: new Date().toISOString(),
+      source: { mediaType: "text/plain", content: "vless://11111111-1111-4111-8111-111111111111@example.com:443#Server" },
+    })), "subscription-1");
+    const config = buildXrayConfig(profile, profile.servers[0]!, settings);
+    const original = structuredClone(config);
+    const inbounds = bindXrayOutboundInterface(config, "Ethernet", false).inbounds as Array<{ settings: Record<string, unknown> }>;
+    expect(inbounds[0]?.settings.gateway).toEqual(["10.89.0.1/30"]);
+    expect(inbounds[0]?.settings.autoSystemRoutingTable).toEqual(["0.0.0.0/1", "128.0.0.0/1"]);
+    expect(inbounds[0]?.settings.autoOutboundsInterface).toBe("Ethernet");
     expect(config).toEqual(original);
   });
 

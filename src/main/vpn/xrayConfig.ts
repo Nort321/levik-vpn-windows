@@ -187,13 +187,24 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-export function bindXrayOutboundInterface(config: Record<string, unknown>, interfaceName: string): Record<string, unknown> {
+export function bindXrayOutboundInterface(
+  config: Record<string, unknown>,
+  interfaceName: string,
+  ipv6: boolean,
+): Record<string, unknown> {
   const bound = structuredClone(config);
   if (Array.isArray(bound.inbounds)) {
     for (const inbound of bound.inbounds) {
       if (isRecord(inbound) && inbound.protocol === "tun" && isRecord(inbound.settings)) {
         // Applies to TCP, UDP and Xray's local DNS sockets; never bind to TUN.
         inbound.settings.autoOutboundsInterface = interfaceName;
+        // Without IPv6 on the physical adapter a direct IPv6 socket cannot be
+        // bound to it and is routed back into the TUN, looping forever. No
+        // tunnel node has IPv6 either, so the TUN must not offer it.
+        if (!ipv6) {
+          inbound.settings.gateway = ipv4Only(inbound.settings.gateway);
+          inbound.settings.autoSystemRoutingTable = ipv4Only(inbound.settings.autoSystemRoutingTable);
+        }
       }
     }
   }
@@ -207,6 +218,10 @@ export function bindXrayOutboundInterface(config: Record<string, unknown>, inter
     }
   }
   return bound;
+}
+
+function ipv4Only(value: unknown): unknown {
+  return Array.isArray(value) ? value.filter((cidr) => typeof cidr !== "string" || !cidr.includes(":")) : value;
 }
 
 function tunInbound(dnsServer: string): Record<string, unknown> {

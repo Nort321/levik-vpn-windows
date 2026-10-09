@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { describe, expect, it, vi } from "vitest";
-import { FALLBACK_ROUTES_SCRIPT, findWindowsOutboundInterface, ROUTES_SCRIPT, selectWindowsOutboundInterface } from "../src/main/windows/outboundInterface";
+import { FALLBACK_ROUTES_SCRIPT, findWindowsOutboundInterface, ROUTES_SCRIPT, selectWindowsOutboundInterface, selectWindowsOutboundRoute } from "../src/main/windows/outboundInterface";
 
 const ethernet = { name: "Ethernet", physical: true, up: true, index: 2, prefix: "0.0.0.0/0", routeMetric: 10, interfaceMetric: 5 };
 const unavailableNative = async (): Promise<string> => { throw new Error("Native helper unavailable"); };
@@ -39,6 +39,15 @@ describe("Windows physical outbound interface", () => {
     ])).toBe("Ethernet");
   });
 
+  it("reports IPv6 only when the selected adapter has its own IPv6 default route", () => {
+    expect(selectWindowsOutboundRoute([ethernet])).toEqual({ name: "Ethernet", ipv6: false });
+    expect(selectWindowsOutboundRoute([ethernet, { ...ethernet, prefix: "::/0" }])).toEqual({ name: "Ethernet", ipv6: true });
+    expect(selectWindowsOutboundRoute({ ...ethernet, prefix: "::/0" })).toEqual({ name: "Ethernet", ipv6: true });
+    // IPv6 on another adapter cannot carry sockets bound to the selected one.
+    expect(selectWindowsOutboundRoute([ethernet, { ...ethernet, name: "Wi-Fi", index: 3, prefix: "::/0" }]))
+      .toEqual({ name: "Ethernet", ipv6: false });
+  });
+
   it.each([null, [], {}, [{ ...ethernet, routeMetric: "10" }], [{ ...ethernet, interfaceMetric: -1 }], [{ ...ethernet, name: "bad\nname" }]])(
     "fails closed for unavailable or malformed route data: %j",
     (value) => expect(() => selectWindowsOutboundInterface(value)).toThrow(/физического интерфейса/),
@@ -48,7 +57,7 @@ describe("Windows physical outbound interface", () => {
 describe("Windows outbound interface discovery", () => {
   it("keeps the primary route selection and handles BOM, whitespace and Unicode", async () => {
     const query = vi.fn(async () => `\uFEFF  ${JSON.stringify({ ...ethernet, name: "Сеть Ethernet" })}\r\n`);
-    await expect(findWindowsOutboundInterface(vi.fn(), query, unavailableNative)).resolves.toBe("Сеть Ethernet");
+    await expect(findWindowsOutboundInterface(vi.fn(), query, unavailableNative)).resolves.toEqual({ name: "Сеть Ethernet", ipv6: false });
     expect(query).toHaveBeenCalledExactlyOnceWith(ROUTES_SCRIPT);
   });
 
@@ -60,7 +69,7 @@ describe("Windows outbound interface discovery", () => {
     const query = vi.fn<(script: string) => Promise<string>>()
       .mockRejectedValueOnce(error).mockResolvedValueOnce(JSON.stringify(ethernet));
     const report = vi.fn();
-    await expect(findWindowsOutboundInterface(report, query, unavailableNative)).resolves.toBe("Ethernet");
+    await expect(findWindowsOutboundInterface(report, query, unavailableNative)).resolves.toEqual({ name: "Ethernet", ipv6: false });
     expect(query.mock.calls.map(([script]) => script)).toEqual([ROUTES_SCRIPT, FALLBACK_ROUTES_SCRIPT]);
     expect(report).toHaveBeenCalledWith(expect.stringContaining("резервным способом"));
     expect(report.mock.calls.flat().join(" ")).not.toContain("sensitive/full script");
@@ -70,7 +79,7 @@ describe("Windows outbound interface discovery", () => {
     "tries the fallback when the primary output is unusable: %j", async (stdout) => {
       const query = vi.fn<(script: string) => Promise<string>>()
         .mockResolvedValueOnce(stdout).mockResolvedValueOnce(JSON.stringify(ethernet));
-      await expect(findWindowsOutboundInterface(vi.fn(), query, unavailableNative)).resolves.toBe("Ethernet");
+      await expect(findWindowsOutboundInterface(vi.fn(), query, unavailableNative)).resolves.toEqual({ name: "Ethernet", ipv6: false });
       expect(query).toHaveBeenCalledTimes(2);
     },
   );
@@ -97,7 +106,7 @@ describe("Windows interface discovery with unavailable WMI classes", () => {
     const wmi = vi.fn<(script: string) => Promise<string>>().mockRejectedValue(invalidClass);
     const native = vi.fn(async () => JSON.stringify({ ...ethernet, name: "Сеть Ethernet" }));
     const report = vi.fn();
-    await expect(findWindowsOutboundInterface(report, wmi, native)).resolves.toBe("Сеть Ethernet");
+    await expect(findWindowsOutboundInterface(report, wmi, native)).resolves.toEqual({ name: "Сеть Ethernet", ipv6: false });
     expect(native).toHaveBeenCalledOnce();
     expect(wmi).not.toHaveBeenCalled();
     expect(report).toHaveBeenCalledWith(expect.stringContaining("Windows API"));
@@ -110,7 +119,7 @@ describe("Windows interface discovery with unavailable WMI classes", () => {
       { ...ethernet, name: "Wi-Fi", index: 3, routeMetric: 1, interfaceMetric: 50 },
       ethernet,
     ]);
-    await expect(findWindowsOutboundInterface(vi.fn(), wmi, native)).resolves.toBe("Ethernet");
+    await expect(findWindowsOutboundInterface(vi.fn(), wmi, native)).resolves.toEqual({ name: "Ethernet", ipv6: false });
     expect(wmi).not.toHaveBeenCalled();
   });
 

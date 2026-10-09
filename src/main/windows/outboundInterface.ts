@@ -59,11 +59,18 @@ Get-CimInstance -ClassName Win32_NetworkAdapter -Filter 'PhysicalAdapter = True'
 }) | ConvertTo-Json -Compress
 `;
 
+export type WindowsOutboundInterface = {
+  name: string;
+  // Whether the adapter has its own IPv6 default route. Without one, Windows
+  // rejects IPV6_UNICAST_IF on it and bound IPv6 sockets fall back into the TUN.
+  ipv6: boolean;
+};
+
 export async function findWindowsOutboundInterface(
   report: (message: string) => void = () => {},
   query: (script: string) => Promise<string> = queryWindowsRoutes,
   queryNative: () => Promise<string> = queryNativeWindowsRoutes,
-): Promise<string> {
+): Promise<WindowsOutboundInterface> {
   const sources: Array<[string, () => Promise<string>]> = [
     ["Windows API", queryNative],
     ["NetTCPIP", () => query(ROUTES_SCRIPT)],
@@ -75,7 +82,7 @@ export async function findWindowsOutboundInterface(
       const json = stdout.replace(/^\uFEFF/, "").trim();
       const routes: unknown = JSON.parse(json || "[]");
       report(`Сетевые интерфейсы (${source}): ${summarizeRoutes(routes)}`);
-      const selected = selectWindowsOutboundInterface(routes);
+      const selected = selectWindowsOutboundRoute(routes);
       if (source === "Win32") report("Сетевой интерфейс определён резервным способом Win32");
       return selected;
     } catch (error) {
@@ -116,6 +123,10 @@ function summarizeRoutes(value: unknown): string {
 }
 
 export function selectWindowsOutboundInterface(value: unknown): string {
+  return selectWindowsOutboundRoute(value).name;
+}
+
+export function selectWindowsOutboundRoute(value: unknown): WindowsOutboundInterface {
   const rows: unknown[] = Array.isArray(value) ? value : [value];
   const candidates = rows.flatMap((row) => {
     if (typeof row !== "object" || row === null) return [];
@@ -132,7 +143,7 @@ export function selectWindowsOutboundInterface(value: unknown): string {
   candidates.sort((a, b) => Number(b.ipv4) - Number(a.ipv4) || a.metric - b.metric || a.index - b.index);
   const selected = candidates[0];
   if (!selected) throw new Error("Нет активного физического интерфейса с маршрутом по умолчанию");
-  return selected.name;
+  return { name: selected.name, ipv6: candidates.some((route) => route.index === selected.index && !route.ipv4) };
 }
 
 function isMetric(value: unknown): value is number {

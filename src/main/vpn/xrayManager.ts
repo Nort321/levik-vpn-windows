@@ -46,7 +46,8 @@ export class XrayManager extends EventEmitter<XrayEvents> {
     });
     assertProcessRoutingSupport(config, version);
     await this.stop();
-    const interfaceName = await findWindowsOutboundInterface((message) => this.emit("log", message));
+    const outbound = await findWindowsOutboundInterface((message) => this.emit("log", message));
+    const interfaceName = outbound.name;
     let launchConfig = config;
     if (tuic) {
       const proxy = await this.tuic.start(tuic, interfaceName);
@@ -58,8 +59,8 @@ export class XrayManager extends EventEmitter<XrayEvents> {
       }
       this.emit("log", `TUIC: sing-box bound to [${interfaceName}]`);
     }
-    const configInput = Buffer.from(JSON.stringify(bindXrayOutboundInterface(launchConfig, interfaceName)), "utf8");
-    this.emit("log", `Xray: outbound interface [${interfaceName}] (TCP/UDP, direct)`);
+    const configInput = Buffer.from(JSON.stringify(bindXrayOutboundInterface(launchConfig, interfaceName, outbound.ipv6)), "utf8");
+    this.emit("log", `Xray: outbound interface [${interfaceName}] (TCP/UDP, direct, IPv6 ${outbound.ipv6 ? "on" : "off"})`);
     try {
       await this.validate(configInput);
       const child = spawn(this.executablePath(), xrayConfigArguments(false), {
