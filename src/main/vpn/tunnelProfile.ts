@@ -146,6 +146,12 @@ function parseHysteria2(value: string, index: number): TunnelServer {
   if (!auth || auth.length > 512) throw new Error("Некорректная авторизация Hysteria2");
   const serverName = url.searchParams.get("sni") || url.hostname;
   const allowInsecure = ["1", "true"].includes((url.searchParams.get("insecure") || "").toLowerCase());
+  const obfs = url.searchParams.get("obfs") || "";
+  if (obfs && obfs !== "salamander") throw new Error("Тип обфускации Hysteria2 не поддерживается");
+  const obfsPassword = url.searchParams.get("obfs-password") || "";
+  if (obfs && (Buffer.byteLength(obfsPassword, "utf8") < 4 || Buffer.byteLength(obfsPassword, "utf8") > 1024)) {
+    throw new Error("Некорректный пароль обфускации Hysteria2");
+  }
   const outbound: Record<string, unknown> = {
     protocol: "hysteria",
     settings: { version: 2, address: url.hostname, port },
@@ -154,6 +160,7 @@ function parseHysteria2(value: string, index: number): TunnelServer {
       security: "tls",
       tlsSettings: { serverName, allowInsecure, alpn: ["h3"] },
       hysteriaSettings: { version: 2, auth, udpIdleTimeout: 60 },
+      ...(obfs ? { finalmask: { udp: [{ type: "salamander", settings: { password: obfsPassword } }] } } : {}),
     },
   };
   return createServer(outbound, url.hash, url.hostname, index);
