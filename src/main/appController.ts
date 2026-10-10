@@ -2,6 +2,7 @@ import { app } from "electron";
 import { EventEmitter } from "node:events";
 import { platform, release } from "node:os";
 import { isIPv4 } from "node:net";
+import { join } from "node:path";
 import type {
   AccountSummary,
   AppSettings,
@@ -26,6 +27,10 @@ import { DnsLeakProtection } from "./windows/dnsLeakProtection";
 import { WindowsKillSwitch } from "./windows/killSwitch";
 import { AppUpdater } from "./update/appUpdater";
 import { normalizeProcessSelection } from "../shared/processes";
+import { classifyCoreLogLine, networkTypeOfInterface, protocolOf } from "./telemetry/codes";
+import { ConnectionTelemetry } from "./telemetry/connectionTelemetry";
+import { DiskLog } from "./diagnostics/diskLog";
+import type { AttemptCause, AttemptStage, EndBy, PowerState, SessionSettings, SessionTrigger } from "./telemetry/sessionRecorder";
 
 interface AppControllerEvents {
   changed: [snapshot: AppSnapshot];
@@ -51,6 +56,8 @@ const DEFAULT_SETTINGS: AppSettings = {
   antiDpiInterval: "10-20",
   splitTunnelMode: "off",
   splitTunnelProcesses: [],
+  connectionTelemetry: true,
+  telemetryNoticeShown: false,
 };
 
 const SETTINGS_SCHEMA_VERSION = 2;
@@ -90,6 +97,15 @@ export class AppController extends EventEmitter<AppControllerEvents> {
   private resumePromise: Promise<void> | null = null;
   private killSwitchHealthTimer: ReturnType<typeof setInterval> | null = null;
   private killSwitchHealthCheckRunning = false;
+  private readonly telemetry = new ConnectionTelemetry(join(app.getPath("userData"), "telemetry"), {
+    platform: "windows",
+    app: app.getVersion(),
+    os: windowsMajorVersion(release()),
+  });
+  private diskLog: DiskLog | null = null;
+  private nextAttemptCause: AttemptCause = "initial";
+  private recoveryCause: AttemptCause | null = null;
+  private recoveryReason: "core_exited" | "probe" = "probe";
   private state: AppSnapshot = {
     appVersion: app.getVersion(),
     tab: "home",
@@ -122,6 +138,8 @@ export class AppController extends EventEmitter<AppControllerEvents> {
   }
 
   async initialize(): Promise<void> {
+    this.diskLog = new DiskLog(join(app.getPath("userData"), "logs"));
+    this.diskLog.write(`Levik VPN ${app.getVersion()} started on Windows ${release()}`);
     await this.killSwitch.cleanupLegacyConfig(app.getPath("userData"));
     await this.dnsLeakProtection.disable();
     this.identity = await this.loadIdentity();
@@ -130,12 +148,15 @@ export class AppController extends EventEmitter<AppControllerEvents> {
       new RequestSigner(this.identity),
       app.getVersion(),
     );
-    this.xray.on("log", (line) => this.addLog(line));
+    this.xray.on("log", (line) => this.handleCoreLog(line));
     this.xray.on("exit", (code, expected) => this.handleXrayExit(code, expected));
     this.xray.on("stats", (downloadBytes, uploadBytes) => this.handleTrafficStats(downloadBytes, uploadBytes));
     this.accessToken = await this.loadString("access_token");
     this.state.sessionAvailable = this.accessToken !== null;
     this.state.settings = await this.loadSettings();
+    await this.telemetry.setEnabled(telemetryAllowed(this.state.settings)).catch((error: unknown) => {
+      this.addLog(`Статистика подключений: ${messageOf(error)}`);
+    });
     const recoveredKillSwitch = await this.killSwitch.recover();
     if (recoveredKillSwitch && !this.state.settings.killSwitch) {
       await this.killSwitch.disable();
@@ -167,7 +188,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
       if (this.state.settings.autoConnectOnLaunch) {
         try {
           await this.pingServers();
-          await this.connect();
+          await this.connect("auto_connect");
         } catch (error) {
           this.addLog(`Автоподключение: ${messageOf(error)}`);
         }
@@ -219,7 +240,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
 
   async logout(): Promise<void> {
     this.loginGeneration += 1;
-    await this.disconnect();
+    await this.stopConnection("user", "user");
     const token = this.accessToken;
     if (token) {
       try {
@@ -285,7 +306,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     }
   }
 
-  async connect(): Promise<void> {
+  async connect(trigger: SessionTrigger = "user"): Promise<void> {
     if (this.xray.isRunning() || this.state.status === "connecting") return;
     const generation = this.connectionGeneration;
     // Profile refresh can expire the session and call disconnect(), so perform
@@ -297,6 +318,12 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     }
     if (this.state.settings.automaticServer && !hasMeasuredLatency(this.state.serverLatencies)) {
       await this.pingServers();
+    }
+    if (!this.telemetry.active) {
+      // Before Kill Switch: the operator is only visible outside the tunnel.
+      await this.telemetry.prepareNetwork();
+      this.telemetry.begin(trigger, sessionSettings(this.state.settings));
+      this.nextAttemptCause = "initial";
     }
     return this.runTunnelOperation(() => this.connectTunnel(generation));
   }
@@ -310,14 +337,20 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     const retainProtectionOnFailure = this.state.settings.killSwitch && this.killSwitch.isActive();
     this.resetTrafficStats();
     this.patch({ status: "connecting", statusDetail: `Подключение через ${server.name}…`, busy: true, downloadBytes: 0, uploadBytes: 0 });
+    const progress = this.recordAttempt(server, this.nextAttemptCause);
+    this.nextAttemptCause = "reconnect";
     try {
       if (this.state.settings.killSwitch) await this.killSwitch.enable();
       if (this.state.settings.preventDnsLeaks) await this.dnsLeakProtection.enable();
+      progress.reach("profile", "config_invalid");
       const config = buildXrayConfig(this.profile, server, this.state.settings);
       this.lastConfig = config;
       this.lastTuic = server.tuic;
+      progress.reach("core", "core_start_failed");
       await this.startXray(config, generation);
-      await this.verifyTunnelReadiness(generation);
+      this.recordNetwork();
+      progress.reach("verify", "timeout");
+      await this.verifyTunnelReadiness(generation, (codes) => progress.reach("verify", codes[0] ?? "other"));
       this.assertCurrentConnection(generation);
       this.tunnelHealthFailures = 0;
       this.failedServerIds.clear();
@@ -327,6 +360,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
         statusDetail: `Защищено через ${server.name}`,
         sessionStartedAt: Date.now(),
       });
+      this.recordConnected();
     } catch (error) {
       this.lastConfig = null;
       this.lastTuic = undefined;
@@ -339,6 +373,8 @@ export class AppController extends EventEmitter<AppControllerEvents> {
       }
       if (generation === this.connectionGeneration) {
         this.patch({ status: "error", statusDetail: messageOf(failure), sessionStartedAt: null });
+        progress.fail();
+        void this.telemetry.finish("error", progress.code);
       }
       throw failure;
     } finally {
@@ -347,6 +383,11 @@ export class AppController extends EventEmitter<AppControllerEvents> {
   }
 
   disconnect(): Promise<void> {
+    return this.stopConnection("user", "user");
+  }
+
+  private stopConnection(by: EndBy, code: string | null): Promise<void> {
+    void this.telemetry.finish(by, code);
     this.cancelTunnelRecovery();
     this.lastConfig = null;
     this.lastTuic = undefined;
@@ -383,6 +424,8 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     await this.secureStore.put("settings", Buffer.from(JSON.stringify(serializeSettings(next))));
     this.applyLoginItemSettings();
     this.emitChanged();
+    if (telemetryAllowed(previous) !== telemetryAllowed(next)) await this.telemetry.setEnabled(telemetryAllowed(next));
+    this.telemetry.record((session) => session.updateSettings(sessionSettings(next)));
     if (!previous.automaticServer && next.automaticServer) void this.pingServers();
     if (previous.killSwitch && !next.killSwitch) await this.killSwitch.disable();
     if (previous.preventDnsLeaks && !next.preventDnsLeaks) await this.dnsLeakProtection.disable();
@@ -392,12 +435,16 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     }
   }
 
-  async shutdown(): Promise<void> {
+  async shutdown(reason: "quit" | "app_update" = "quit"): Promise<void> {
     this.loginGeneration += 1;
-    await this.disconnect();
+    const saved = this.telemetry.finish("system", reason === "app_update" ? "app_update" : null);
+    await this.stopConnection("system", null);
     this.stopKillSwitchHealthMonitor();
     if (this.tunnelHealthTimer) clearInterval(this.tunnelHealthTimer);
     this.tunnelHealthTimer = null;
+    await saved;
+    this.telemetry.dispose();
+    await this.diskLog?.flush();
   }
 
   async pingServers(): Promise<void> {
@@ -453,7 +500,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
   async installUpdate(): Promise<void> {
     if (!this.updater) throw new Error("Модуль обновлений недоступен");
     await this.updater.install(
-      () => this.shutdown(),
+      () => this.shutdown("app_update"),
       () => this.emit("updateInstalling"),
     );
   }
@@ -463,9 +510,15 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     const generation = this.connectionGeneration;
     this.resumePromise = (async () => {
       await delay(1_500);
-      if (generation === this.connectionGeneration) await this.verifyTunnelHealth(true);
+      if (generation === this.connectionGeneration) await this.verifyTunnelHealth(true, "resume");
     })().finally(() => { this.resumePromise = null; });
     return this.resumePromise;
+  }
+
+  /** Sleep explains drops that are not the server's fault. */
+  recordPowerEvent(state: Extract<PowerState, "suspend" | "resume">): void {
+    this.telemetry.record((session) => session.power(state));
+    if (state === "suspend") void this.telemetry.persist();
   }
 
   private async pollLogin(challenge: AuthChallengeResponse, generation: number): Promise<void> {
@@ -599,13 +652,22 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     });
   }
 
+  private handleCoreLog(line: string): void {
+    this.addLog(line);
+    const code = classifyCoreLogLine(line);
+    if (code) this.telemetry.record((session) => session.coreLog(code));
+  }
+
   private handleXrayExit(code: number | null, expected: boolean): void {
+    if (!expected) this.telemetry.record((session) => session.coreExit(code, false));
     // Startup/recovery failures are handled by the operation awaiting start().
     if (expected || this.state.status !== "connected" || !this.lastConfig) return;
+    this.recoveryReason = "core_exited";
     this.beginTunnelRecovery(`Туннель остановлен (код ${code ?? "?"}). Восстановление…`);
   }
 
-  private beginTunnelRecovery(detail: string): void {
+  private beginTunnelRecovery(detail: string, cause: AttemptCause | null = null): void {
+    this.recoveryCause = cause;
     // In-flight probes belong to the failed tunnel, not its replacement.
     this.connectionGeneration += 1;
     if (this.state.selectedServerId) this.failedServerIds.add(this.state.selectedServerId);
@@ -620,6 +682,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
       this.reconnectTimer = null;
       void this.runTunnelOperation(async () => {
         if (generation !== this.connectionGeneration || this.state.status !== "reconnecting" || !this.lastConfig) return;
+        let progress: AttemptProgress | null = null;
         try {
           // WFP retains the fail-closed boundary while the TUN is absent.
           // Starting a blackhole core here races Wintun teardown and resets TCP.
@@ -627,8 +690,11 @@ export class AppController extends EventEmitter<AppControllerEvents> {
           this.assertCurrentConnection(generation);
           if (!this.state.settings.autoReconnect) {
             this.patch({ status: "error", statusDetail: "VPN-соединение потеряно. Подключитесь снова или нажмите Отключить, чтобы снять блокировку.", sessionStartedAt: null });
+            this.telemetry.record((session) => session.recovery(this.state.settings.killSwitch ? "lockdown" : "gave_up"));
+            void this.telemetry.finish("error", this.recoveryReason === "core_exited" ? "core_exited" : "gave_up");
             return;
           }
+          const previousServerId = this.state.selectedServerId;
           if (this.state.settings.automaticServer && this.profile) {
             await this.pingServers();
             this.assertCurrentConnection(generation);
@@ -647,15 +713,24 @@ export class AppController extends EventEmitter<AppControllerEvents> {
             }
           }
           this.assertCurrentConnection(generation);
+          const failover = this.state.selectedServerId !== previousServerId;
+          this.telemetry.record((session) => session.recovery(failover ? "failover" : "reconnect_same"));
+          const server = this.selectedServer();
+          progress = server ? this.recordAttempt(server, failover ? "failover" : this.recoveryCause ?? "reconnect") : null;
           if (this.state.settings.killSwitch) await this.killSwitch.enable();
           if (this.state.settings.preventDnsLeaks) await this.dnsLeakProtection.enable();
+          progress?.reach("core", "core_start_failed");
           await this.startXray(this.lastConfig, generation);
-          await this.verifyTunnelReadiness(generation);
+          this.recordNetwork();
+          progress?.reach("verify", "timeout");
+          await this.verifyTunnelReadiness(generation, (codes) => progress?.reach("verify", codes[0] ?? "other"));
           this.assertCurrentConnection(generation);
           this.reconnectAttempts = 0;
           this.tunnelHealthFailures = 0;
           this.failedServerIds.clear();
+          this.recoveryCause = null;
           this.patch({ status: "connected", statusDetail: `Защищено через ${this.selectedServer()?.name ?? "VPN"}` });
+          this.recordConnected();
         } catch (error) {
           try {
             await this.xray.stop();
@@ -663,6 +738,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
             this.addLog(`Остановка туннеля: ${messageOf(stopError)}`);
           }
           if (generation !== this.connectionGeneration) return;
+          progress?.fail();
           if (this.state.selectedServerId) this.failedServerIds.add(this.state.selectedServerId);
           this.addLog(`Переподключение: ${messageOf(error)}`);
           this.scheduleTunnelRestore(Math.min(30_000, 1_000 * 2 ** Math.min(++this.reconnectAttempts, 5)));
@@ -671,16 +747,22 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     }, delayMs);
   }
 
-  private async verifyTunnelHealth(immediate = false): Promise<void> {
+  private async verifyTunnelHealth(immediate = false, cause: AttemptCause | null = null): Promise<void> {
     if (this.tunnelHealthCheckRunning || this.state.status !== "connected") return;
     const generation = this.connectionGeneration;
     this.tunnelHealthCheckRunning = true;
     try {
-      const healthy = await this.xray.isHealthy() && await isTunnelHealthy();
+      let codes = ["no_vpn_network"];
+      const healthy = await this.xray.isHealthy() && await isTunnelHealthy({ onFailure: (failures) => { codes = failures; } });
       if (generation !== this.connectionGeneration || this.state.status !== "connected") return;
       this.tunnelHealthFailures = healthy ? 0 : this.tunnelHealthFailures + 1;
+      this.telemetry.record((session) => {
+        if (healthy) session.probeSucceeded();
+        else session.probeFailed(codes);
+      });
       if (!healthy && (immediate || this.tunnelHealthFailures >= 3)) {
-        this.beginTunnelRecovery("VPN-сервер перестал передавать трафик. Восстановление…");
+        this.recoveryReason = "probe";
+        this.beginTunnelRecovery("VPN-сервер перестал передавать трафик. Восстановление…", cause);
       }
     } catch (error) {
       this.addLog(`Проверка туннеля: ${messageOf(error)}`);
@@ -689,10 +771,11 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     }
   }
 
-  private async verifyTunnelReadiness(generation: number): Promise<void> {
+  private async verifyTunnelReadiness(generation: number, onFailure?: (codes: string[]) => void): Promise<void> {
     const healthy = await isTunnelHealthy({
       startup: true,
       shouldContinue: () => generation === this.connectionGeneration && this.xray.isRunning(),
+      onFailure,
     });
     this.assertCurrentConnection(generation);
     if (!healthy) throw new Error("Не удалось подтвердить доступ в интернет через VPN. Повторите подключение или выберите другой сервер.");
@@ -705,6 +788,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
   }
 
   private cancelTunnelRecovery(): void {
+    this.recoveryCause = null;
     this.connectionGeneration += 1;
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
     this.reconnectTimer = null;
@@ -779,6 +863,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
 
   private async stopTunnelForReplacement(): Promise<void> {
     this.cancelTunnelRecovery();
+    this.nextAttemptCause = "server_switch";
     this.patch({ status: "reconnecting", statusDetail: "Применение изменений соединения…" });
     await this.runTunnelOperation(() => this.xray.stop());
     this.lastConfig = null;
@@ -831,7 +916,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     } catch (error) {
       if (isAuthenticationRejected(error)) {
         try {
-          await this.disconnect();
+          await this.stopConnection("error", "auth_deadline");
         } catch (cleanupError) {
           this.addLog(`Завершение истёкшей сессии: ${messageOf(cleanupError)}`);
         }
@@ -841,13 +926,41 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     }
   }
 
+  /** Records an attempt; the returned progress names the step that failed. */
+  private recordAttempt(server: TunnelServer, cause: AttemptCause): AttemptProgress {
+    this.telemetry.record((session) => session.attempt(server.name, protocolOf(server), cause));
+    let stage: AttemptStage = "tun";
+    let code = "helper_failed";
+    return {
+      get code() { return code; },
+      reach: (nextStage, nextCode) => { stage = nextStage; code = nextCode; },
+      fail: () => this.telemetry.record((session) => session.attemptFailed(stage, code)),
+    };
+  }
+
+  private recordNetwork(): void {
+    const type = networkTypeOfInterface(this.xray.outboundInterfaceName ?? null);
+    this.telemetry.record((session) => session.setNetwork(type));
+  }
+
+  private recordConnected(): void {
+    this.telemetry.record((session) => session.connected());
+    // Reports leave through the working tunnel, after it has settled.
+    this.telemetry.flushSoon();
+  }
+
   private addLog(line: string): void {
     const cleaned = line.replace(/[\r\n]/g, " ").slice(0, 1_000);
+    this.diskLog?.write(cleaned);
     this.state.logs = [`${new Date().toLocaleTimeString("ru-RU")}  ${cleaned}`, ...this.state.logs].slice(0, 200);
     this.emitChanged();
   }
 
   private patch(patch: Partial<AppSnapshot>): void {
+    if (patch.status && patch.status !== this.state.status) {
+      const detail = patch.statusDetail ?? null;
+      this.diskLog?.write(`Состояние: ${patch.status}${detail ? ` — ${detail}` : ""}`);
+    }
     this.state = { ...this.state, ...patch };
     this.emitChanged();
   }
@@ -861,6 +974,31 @@ export class AppController extends EventEmitter<AppControllerEvents> {
       app.setLoginItemSettings?.({ openAtLogin: this.state.settings.launchAtLogin });
     }
   }
+}
+
+interface AttemptProgress {
+  readonly code: string;
+  reach(stage: AttemptStage, code: string): void;
+  fail(): void;
+}
+
+function telemetryAllowed(settings: AppSettings): boolean {
+  return settings.connectionTelemetry && settings.telemetryNoticeShown;
+}
+
+function sessionSettings(settings: AppSettings): SessionSettings {
+  return {
+    killSwitch: settings.killSwitch,
+    autoRecovery: settings.autoReconnect,
+    splitTunnel: settings.splitTunnelMode !== "off" || settings.routingMode !== "global",
+  };
+}
+
+/** Windows 11 still reports 10.0; its builds start at 22000. */
+function windowsMajorVersion(version: string): string {
+  const [major, , build] = version.split(".").map(Number);
+  if (major === 10 && (build ?? 0) >= 22_000) return "11";
+  return Number.isInteger(major) ? String(major) : "unknown";
 }
 
 function normalizeActivationCode(value: string): string {
@@ -914,6 +1052,8 @@ function validateSettings(value: AppSettings): AppSettings {
     antiDpiInterval: validateAntiDpi(value.antiDpiInterval, "10-20"),
     splitTunnelMode: (["off", "bypass", "only"] as const).includes(value.splitTunnelMode) ? value.splitTunnelMode : "off",
     splitTunnelProcesses: normalizeProcessSelection(value.splitTunnelProcesses),
+    connectionTelemetry: Boolean(value.connectionTelemetry),
+    telemetryNoticeShown: Boolean(value.telemetryNoticeShown),
   };
 }
 

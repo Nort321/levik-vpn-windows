@@ -14,6 +14,7 @@ const settings: AppSettings = {
   preventDnsLeaks: true, favoriteServerIds: [], antiDpiEnabled: false,
   antiDpiPackets: "tlshello", antiDpiLength: "100-200", antiDpiInterval: "10-20",
   splitTunnelMode: "off", splitTunnelProcesses: [],
+  connectionTelemetry: false, telemetryNoticeShown: false,
 };
 
 function profile(host = "192.0.2.1") {

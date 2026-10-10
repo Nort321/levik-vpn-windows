@@ -22,6 +22,8 @@ const settings: AppSettings = {
   antiDpiInterval: "10-20",
   splitTunnelMode: "off",
   splitTunnelProcesses: [],
+  connectionTelemetry: false,
+  telemetryNoticeShown: false,
 };
 
 describe("Windows tunnel profile", () => {

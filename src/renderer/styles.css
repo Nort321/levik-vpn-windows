@@ -397,3 +397,11 @@ select option { color: var(--text); background-color: var(--select-bg); }
   .home-grid { grid-template-columns: 1fr; }
   .server-list { grid-template-columns: 1fr; }
 }
+
+.telemetry-notice { display: flex; align-items: center; justify-content: space-between; gap: 20px; padding: 18px 22px; margin-bottom: 22px; }
+.telemetry-notice .card-caption { max-width: 640px; }
+.telemetry-notice-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; flex-shrink: 0; }
+@media (max-width: 1040px) {
+  .telemetry-notice { flex-direction: column; align-items: stretch; }
+  .telemetry-notice-actions { justify-content: flex-start; }
+}

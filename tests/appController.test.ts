@@ -69,6 +69,12 @@ vi.mock("../src/main/vpn/serverPinger", () => ({ measureServerLatencies: vi.fn()
 import { isTunnelHealthy } from "../src/main/vpn/tunnelHealth";
 import { measureServerLatencies } from "../src/main/vpn/serverPinger";
 import { prepareTunnelProfile } from "../src/main/vpn/tunnelProfile";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { ConnectionTelemetry } from "../src/main/telemetry/connectionTelemetry";
+import type { SessionRecorder } from "../src/main/telemetry/sessionRecorder";
+import type { TelemetryClient } from "../src/main/telemetry/telemetryClient";
 
 function tunnelController() {
   const controller = new AppController();
@@ -429,5 +435,93 @@ describe("AppController tunnel recovery", () => {
     await vi.advanceTimersByTimeAsync(1_500);
     await resumed;
     expect(controller.snapshot().status).toBe("reconnecting");
+  });
+});
+
+describe("AppController connection telemetry", () => {
+  let directory: string;
+  let telemetry: ConnectionTelemetry | null = null;
+  beforeEach(async () => {
+    directory = await mkdtemp(join(tmpdir(), "levik-controller-telemetry-"));
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"] });
+    vi.mocked(isTunnelHealthy).mockReset().mockResolvedValue(true);
+  });
+  afterEach(async () => {
+    vi.clearAllTimers();
+    vi.useRealTimers();
+    // Switching off waits for queued writes and removes the queue.
+    await telemetry?.setEnabled(false);
+    telemetry = null;
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  async function withTelemetry(controller: AppController) {
+    const http = {
+      send: vi.fn(async () => "sent" as const),
+      networkToken: vi.fn(async () => ({ token: "net.token", expiresAt: Date.now() + 60_000 })),
+    };
+    const instance = new ConnectionTelemetry(directory, { platform: "windows", app: "1.2.3", os: "11" }, http as unknown as TelemetryClient);
+    telemetry = instance;
+    await instance.setEnabled(true);
+    Reflect.set(controller, "telemetry", instance);
+    const current = () => Reflect.get(instance, "session") as SessionRecorder | null;
+    return Object.assign(current, { http });
+  }
+
+  it("records a drop detected by health checks, the failover and a user disconnect", async () => {
+    const { controller, first, second } = tunnelController();
+    const current = await withTelemetry(controller);
+    await controller.connect();
+    const session = current();
+    expect(session).not.toBeNull();
+    vi.mocked(isTunnelHealthy).mockImplementation(async (options) => {
+      options?.onFailure?.(["timeout", "tls"]);
+      return false;
+    });
+    await checkTunnel(controller);
+    await checkTunnel(controller);
+    await checkTunnel(controller);
+    vi.mocked(isTunnelHealthy).mockReset().mockResolvedValue(true);
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(controller.snapshot().status).toBe("connected");
+    await controller.disconnect();
+
+    const body = session!.snapshot();
+    expect(body).toMatchObject({ final: true, trigger: "user", net: { token: "net.token" }, end: { by: "user", code: "user" } });
+    expect(body.timeline.map((event) => event.e)).toEqual([
+      "attempt", "connected", "probe_fail", "probe_fail", "probe_fail", "recovery", "attempt", "connected",
+    ]);
+    expect(body.timeline[0]).toMatchObject({ node: first.name, proto: "vless-tcp", cause: "initial" });
+    expect(body.timeline[2]).toMatchObject({ codes: ["timeout", "tls"], n: 1 });
+    expect(body.timeline[5]).toMatchObject({ action: "failover" });
+    expect(body.timeline[6]).toMatchObject({ node: second.name, cause: "failover" });
+  });
+
+  it("ends a failed first attempt with the stage that failed", async () => {
+    const { controller, xray } = tunnelController();
+    const current = await withTelemetry(controller);
+    xray.start.mockRejectedValueOnce(new Error("startup failed"));
+    const pending = controller.connect();
+    await Promise.resolve();
+    await expect(pending).rejects.toThrow("startup failed");
+    expect((Reflect.get(controller, "telemetry") as ConnectionTelemetry).active).toBe(false);
+    // The finished session is saved and then sent.
+    await vi.waitFor(() => expect(current.http.send).toHaveBeenCalled());
+    const [request] = current.http.send.mock.calls.at(-1) as unknown as [string];
+    const body = (JSON.parse(request) as { sessions: ReturnType<SessionRecorder["snapshot"]>[] }).sessions[0]!;
+    expect(body).toMatchObject({ final: true, end: { by: "error", code: "core_start_failed" } });
+    expect(body.timeline.at(-1)).toMatchObject({ e: "attempt_failed", stage: "core", code: "core_start_failed" });
+  });
+
+  it("marks a server change as a switch within the same session", async () => {
+    const { controller, second } = tunnelController();
+    const current = await withTelemetry(controller);
+    await controller.updateSettings({ automaticServer: false });
+    await controller.connect();
+    const session = current();
+    await controller.selectServer(second.id);
+    expect(current()).toBe(session);
+    const attempts = session!.snapshot().timeline.filter((event) => event.e === "attempt");
+    expect(attempts.map((event) => event.cause)).toEqual(["initial", "server_switch"]);
   });
 });

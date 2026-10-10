@@ -132,6 +132,27 @@ describe("VPN end-to-end health probe", () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
+  it("reports a contract code for every failed probe", async () => {
+    const onFailure = vi.fn();
+    const pending = isTunnelHealthy({ onFailure });
+    establishProxy(0, 502);
+    await Promise.resolve();
+    establishProxy(1);
+    tlsSockets[0]!.emit("error", Object.assign(new Error("bad certificate"), { code: "ERR_TLS_CERT_ALTNAME_INVALID" }));
+    await expect(pending).resolves.toBe(false);
+    expect(onFailure).toHaveBeenCalledWith(["http_502", "tls"]);
+  });
+
+  it("reports a refused local listener as no VPN network", async () => {
+    const onFailure = vi.fn();
+    const pending = isTunnelHealthy({ onFailure });
+    requests[0]!.emit("error", Object.assign(new Error("refused"), { code: "ECONNREFUSED" }));
+    await Promise.resolve();
+    await vi.advanceTimersByTimeAsync(6_000);
+    await expect(pending).resolves.toBe(false);
+    expect(onFailure).toHaveBeenCalledWith(["no_vpn_network", "timeout"]);
+  });
+
   it("fails safely when the local listener is unavailable", async () => {
     const pending = isTunnelHealthy();
     requests[0]!.emit("error", new Error("ECONNREFUSED"));

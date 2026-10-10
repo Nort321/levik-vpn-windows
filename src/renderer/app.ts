@@ -84,7 +84,7 @@ function render(preserveScroll = true): void {
           <div class="status-subtitle">${escapeHtml(state.statusDetail ?? "VPN готов к подключению")}</div>
         </div>
       </aside>
-      <main class="content"><div class="content-inner">${renderPage()}</div></main>
+      <main class="content"><div class="content-inner">${renderTelemetryNotice()}${renderPage()}</div></main>
     </div>
     ${showProcessDialog ? renderProcessDialog() : ""}
     ${devicesSubscriptionId ? renderDevicesDialog(devicesSubscriptionId) : ""}`;
@@ -251,10 +251,22 @@ function renderProfile(): string {
         ${state.settings.splitTunnelMode !== "off" ? `<div class="setting-row"><div><div class="setting-name">Приложения</div><div class="setting-help">${state.settings.splitTunnelProcesses.length ? `Выбрано: ${resolveProcessCompanions(state.settings.splitTunnelProcesses).length}` : "Выберите процессы из запущенных приложений"}</div></div><button class="button compact" id="process-picker-button">${icon("process")} Выбрать</button></div>` : ""}
         ${switchSetting("Запуск с Windows", "Открывать Levik VPN после входа", "launchAtLogin", state.settings.launchAtLogin)}
         ${switchSetting("Закрытие в трей", "Кнопка закрытия скрывает приложение", "closeToTray", state.settings.closeToTray)}
+        ${switchSetting("Статистика качества подключения", "Анонимно сообщать об обрывах и ошибках подключения. Без IP-адресов, сайтов и данных аккаунта", "connectionTelemetry", state.settings.connectionTelemetry)}
         ${selectSetting("Оформление", "Единый стиль Levik VPN", "theme", state.settings.theme, [["system","Системная"],["dark","Тёмная"],["light","Светлая"],["amoled","AMOLED"]])}
         ${updateSetting()}
       </div></section>
     </div>`;
+}
+
+const TELEMETRY_DETAILS_URL = "https://leviknet.org/legal/privacy#connection-telemetry";
+
+function renderTelemetryNotice(): string {
+  if (!state || state.settings.telemetryNoticeShown) return "";
+  return `<section class="telemetry-notice card" aria-labelledby="telemetry-notice-title">
+    <div><h2 class="card-title" id="telemetry-notice-title">Помогите сделать подключение стабильнее</h2>
+    <p class="card-caption">Levik VPN может анонимно сообщать, когда подключение не удалось или оборвалось: сервер, протокол, код ошибки и оператор сети. IP-адреса, посещённые сайты и данные аккаунта не отправляются. Изменить решение можно в настройках профиля.</p></div>
+    <div class="telemetry-notice-actions"><button class="button compact" id="telemetry-details-button">${icon("external")} Подробнее</button><button class="button compact" id="telemetry-decline-button">Не отправлять</button><button class="button compact primary" id="telemetry-accept-button">Хорошо</button></div>
+  </section>`;
 }
 
 function subscriptionCard(subscription: NonNullable<AppSnapshot["account"]>["subscriptions"][number]): string {
@@ -355,9 +367,16 @@ function bindPageEvents(): void {
   document.querySelectorAll<HTMLElement>("[data-setting]").forEach((button) => button.addEventListener("click", () => {
     const currentState = state;
     if (!currentState) return;
-    const key = button.dataset.setting as "automaticServer" | "autoReconnect" | "autoConnectOnLaunch" | "killSwitch" | "useDoh" | "preventDnsLeaks" | "antiDpiEnabled" | "launchAtLogin" | "closeToTray";
-    void run(() => window.levik.updateSettings({ [key]: !currentState.settings[key] }));
+    const key = button.dataset.setting as "automaticServer" | "autoReconnect" | "autoConnectOnLaunch" | "killSwitch" | "useDoh" | "preventDnsLeaks" | "antiDpiEnabled" | "launchAtLogin" | "closeToTray" | "connectionTelemetry";
+    // Choosing in Settings also answers the first-run notice.
+    const patch: Partial<AppSettings> = key === "connectionTelemetry"
+      ? { connectionTelemetry: !currentState.settings.connectionTelemetry, telemetryNoticeShown: true }
+      : { [key]: !currentState.settings[key] };
+    void run(() => window.levik.updateSettings(patch));
   }));
+  document.getElementById("telemetry-accept-button")?.addEventListener("click", () => void run(() => window.levik.updateSettings({ connectionTelemetry: true, telemetryNoticeShown: true })));
+  document.getElementById("telemetry-decline-button")?.addEventListener("click", () => void run(() => window.levik.updateSettings({ connectionTelemetry: false, telemetryNoticeShown: true })));
+  document.getElementById("telemetry-details-button")?.addEventListener("click", () => void run(() => window.levik.openExternal(TELEMETRY_DETAILS_URL)));
   document.getElementById("routing-mode")?.addEventListener("change", (event) => {
     const routingMode = (event.target as HTMLSelectElement).value as AppSettings["routingMode"];
     void run(() => window.levik.updateSettings({ routingMode }));

@@ -25,6 +25,7 @@ export class XrayManager extends EventEmitter<XrayEvents> {
   private statsQueryRunning: ChildProcess | null = null;
   private statsErrorReported = false;
   private readonly tuic = new TuicSidecar(stopChild);
+  private outboundName: string | null = null;
 
   constructor() {
     super();
@@ -39,6 +40,11 @@ export class XrayManager extends EventEmitter<XrayEvents> {
     });
   }
 
+  /** The physical adapter the last tunnel was bound to. */
+  get outboundInterfaceName(): string | null {
+    return this.outboundName;
+  }
+
   async start(config: Record<string, unknown>, tuic?: TuicEndpoint): Promise<void> {
     if (process.platform !== "win32") throw new Error("VPN-туннель запускается только в Windows-сборке");
     const { stdout: version } = await execFileAsync(this.executablePath(), ["version"], {
@@ -48,6 +54,7 @@ export class XrayManager extends EventEmitter<XrayEvents> {
     await this.stop();
     const outbound = await findWindowsOutboundInterface((message) => this.emit("log", message));
     const interfaceName = outbound.name;
+    this.outboundName = interfaceName;
     let launchConfig = config;
     if (tuic) {
       const proxy = await this.tuic.start(tuic, interfaceName);

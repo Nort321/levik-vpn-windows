@@ -74,6 +74,9 @@ export interface AppSettings {
   antiDpiInterval: string;
   splitTunnelMode: SplitTunnelMode;
   splitTunnelProcesses: string[];
+  /** Anonymous connection quality reports, docs/connection-telemetry.md. */
+  connectionTelemetry: boolean;
+  telemetryNoticeShown: boolean;
 }
 
 export interface AppSnapshot {

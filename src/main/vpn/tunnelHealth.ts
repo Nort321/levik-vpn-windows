@@ -1,6 +1,7 @@
 import { request } from "node:http";
 import { connect, type TLSSocket } from "node:tls";
 import type { Socket } from "node:net";
+import { probeErrorCode } from "../telemetry/codes";
 
 export const TUNNEL_HEALTH_PORT = 47186;
 export const TUNNEL_HEALTH_TAG = "levik-health";
@@ -10,21 +11,28 @@ export const TUNNEL_HEALTH_TAG = "levik-health";
 export async function isTunnelHealthy(options: {
   startup?: boolean;
   shouldContinue?: () => boolean;
+  /** Receives the failure code of every probe when the tunnel is unhealthy. */
+  onFailure?: ((codes: string[]) => void) | undefined;
 } = {}): Promise<boolean> {
   const shouldContinue = options.shouldContinue ?? (() => true);
+  const codes: string[] = [];
   // Newly created Windows routes and upstream transports can settle later than
   // the local listener. Retry readiness once without restarting a viable core.
   for (let attempt = 0; attempt < (options.startup ? 2 : 1); attempt++) {
     if (attempt > 0) await new Promise<void>((resolve) => setTimeout(resolve, 1_000));
     for (const host of ["cloudflare-dns.com", "www.google.com"]) {
       if (!shouldContinue()) return false;
-      if (await probeTunnel(host)) return shouldContinue();
+      const failure = await probeTunnel(host);
+      if (failure === null) return shouldContinue();
+      codes.push(failure);
     }
   }
+  if (codes.length && shouldContinue()) options.onFailure?.(codes);
   return false;
 }
 
-function probeTunnel(host: string): Promise<boolean> {
+/** Resolves null when the tunnel works, otherwise a telemetry failure code. */
+function probeTunnel(host: string): Promise<string | null> {
   return new Promise((resolve) => {
     let settled = false;
     let tunnel: Socket | null = null;
@@ -33,32 +41,33 @@ function probeTunnel(host: string): Promise<boolean> {
       hostname: "127.0.0.1", port: TUNNEL_HEALTH_PORT,
       method: "CONNECT", path: `${host}:443`, agent: false,
     });
-    const finish = (healthy: boolean): void => {
+    const finish = (failure: string | null): void => {
       if (settled) return;
       settled = true;
       clearTimeout(timeout);
       tls?.destroy();
       tunnel?.destroy();
       proxy.destroy();
-      resolve(healthy);
+      resolve(failure);
     };
     // One deadline covers proxy establishment and TLS, including silent peers.
-    const timeout = setTimeout(() => finish(false), 6_000);
-    proxy.once("error", () => finish(false));
-    proxy.once("response", () => finish(false));
+    const timeout = setTimeout(() => finish("timeout"), 6_000);
+    // The local listener refusing means the core is not serving at all.
+    proxy.once("error", (error) => finish(probeErrorCode(error) === "refused" ? "no_vpn_network" : probeErrorCode(error)));
+    proxy.once("response", (response) => finish(`http_${response.statusCode ?? 0}`));
     proxy.once("connect", (response, socket, head) => {
       tunnel = socket;
-      socket.once("error", () => finish(false));
-      socket.once("close", () => finish(false));
+      socket.once("error", (error) => finish(probeErrorCode(error)));
+      socket.once("close", () => finish("reset"));
       if (settled || response.statusCode !== 200 || head.length !== 0) {
         socket.destroy();
-        finish(false);
+        finish(response.statusCode === 200 ? "other" : `http_${response.statusCode ?? 0}`);
         return;
       }
       tls = connect({ socket, servername: host, rejectUnauthorized: true });
-      tls.once("secureConnect", () => finish(true));
-      tls.once("error", () => finish(false));
-      tls.once("close", () => finish(false));
+      tls.once("secureConnect", () => finish(null));
+      tls.once("error", (error) => finish(probeErrorCode(error) === "other" ? "tls" : probeErrorCode(error)));
+      tls.once("close", () => finish("reset"));
     });
     proxy.end();
   });

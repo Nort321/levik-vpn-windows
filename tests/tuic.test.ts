@@ -17,6 +17,7 @@ const settings: AppSettings = {
   showTrayIcon: true, preventDnsLeaks: true, favoriteServerIds: [], antiDpiEnabled: true,
   antiDpiPackets: "tlshello", antiDpiLength: "100-200", antiDpiInterval: "10-20",
   splitTunnelMode: "off", splitTunnelProcesses: [],
+  connectionTelemetry: false, telemetryNoticeShown: false,
 } as AppSettings;
 
 function tuicLink(overrides: Record<string, string> = {}, host = "94.156.114.70"): string {
