@@ -11,6 +11,7 @@ let tray: Tray | null = null;
 let controller: AppController | null = null;
 let quitting = false;
 let lastTrayKey = "";
+let started = false;
 /** A levik:// link that arrived before the window was ready. */
 let pendingLink: AppTab | null = deepLinkFromArgv(process.argv);
 
@@ -42,6 +43,7 @@ app.whenReady().then(async () => {
   powerMonitor.on("unlock-screen", () => void controller?.restoreAfterSystemResume());
   await controller.initialize();
   mainWindow.show();
+  started = true;
   if (pendingLink) {
     const tab = pendingLink;
     pendingLink = null;
@@ -152,7 +154,7 @@ function applicationIconPath(): string {
 }
 
 function openLink(tab: AppTab): void {
-  if (!controller || !mainWindow) {
+  if (!controller || !mainWindow || !started) {
     pendingLink = tab;
     return;
   }
