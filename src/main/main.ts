@@ -1,27 +1,39 @@
-import { app, BrowserWindow, dialog, Menu, nativeImage, powerMonitor, Tray } from "electron";
+import { app, BrowserWindow, dialog, Menu, nativeImage, Notification, powerMonitor, Tray } from "electron";
 import { join } from "node:path";
-import type { AppSnapshot, ConnectionStatus } from "../shared/contracts";
+import type { AppSnapshot, AppTab, ConnectionStatus } from "../shared/contracts";
 import { AppController } from "./appController";
 import { registerIpc } from "./ipc";
+import { DEEP_LINK_SCHEME, deepLinkFromArgv } from "./platform/links";
+import type { AppNotice } from "./platform/notices";
 
 let mainWindow: BrowserWindow | null = null;
 let tray: Tray | null = null;
 let controller: AppController | null = null;
 let quitting = false;
 let lastTrayKey = "";
+/** A levik:// link that arrived before the window was ready. */
+let pendingLink: AppTab | null = deepLinkFromArgv(process.argv);
 
 const singleInstance = app.requestSingleInstanceLock();
 if (!singleInstance) app.quit();
 
-app.on("second-instance", () => showWindow());
+app.on("second-instance", (_event, argv) => {
+  showWindow();
+  const tab = deepLinkFromArgv(argv);
+  if (tab) openLink(tab);
+});
 
 app.whenReady().then(async () => {
+  app.setAppUserModelId("com.leviknet.vpn.windows");
+  // Installed builds only: a development run would register electron.exe instead.
+  if (app.isPackaged) app.setAsDefaultProtocolClient(DEEP_LINK_SCHEME);
   controller = new AppController();
   mainWindow = createWindow();
   registerIpc(controller, mainWindow);
   createTray();
   controller.on("changed", updateTray);
   controller.on("updateInstalling", () => { quitting = true; });
+  controller.on("notify", showNotice);
   powerMonitor.on("suspend", () => controller?.recordPowerEvent("suspend"));
   powerMonitor.on("resume", () => {
     controller?.recordPowerEvent("resume");
@@ -30,6 +42,13 @@ app.whenReady().then(async () => {
   powerMonitor.on("unlock-screen", () => void controller?.restoreAfterSystemResume());
   await controller.initialize();
   mainWindow.show();
+  if (pendingLink) {
+    const tab = pendingLink;
+    pendingLink = null;
+    // The renderer listens for navigation once its page has loaded.
+    if (mainWindow.webContents.isLoading()) mainWindow.webContents.once("did-finish-load", () => openLink(tab));
+    else openLink(tab);
+  }
 }).catch((error: unknown) => {
   const message = error instanceof Error ? error.message : String(error);
   console.error("Levik VPN startup failed", message);
@@ -130,6 +149,22 @@ function trayStatus(status: ConnectionStatus): string {
 
 function applicationIconPath(): string {
   return join(__dirname, "..", "assets", "icon.ico");
+}
+
+function openLink(tab: AppTab): void {
+  if (!controller || !mainWindow) {
+    pendingLink = tab;
+    return;
+  }
+  showWindow();
+  controller.handleDeepLink(tab);
+}
+
+function showNotice(notice: AppNotice): void {
+  if (!Notification.isSupported()) return;
+  const notification = new Notification({ title: notice.title, body: notice.body, icon: applicationIconPath() });
+  notification.on("click", () => openLink(notice.tab));
+  notification.show();
 }
 
 function showWindow(): void {

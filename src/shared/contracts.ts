@@ -5,6 +5,29 @@ export type ThemeMode = "system" | "dark" | "light" | "amoled";
 export type SplitTunnelMode = "off" | "bypass" | "only";
 export type UpdateStatus = "idle" | "checking" | "available" | "downloading" | "downloaded" | "installing" | "upToDate" | "error";
 
+/** A message from Levik VPN shown in every app, docs/app-platform.md. */
+export interface AppAnnouncement {
+  id: string;
+  level: "info" | "warning" | "critical";
+  title: string;
+  body: string;
+  /** Only Levik website or Telegram links; others are dropped. */
+  linkUrl: string | null;
+  notify: boolean;
+  startsAt: number;
+  endsAt: number;
+}
+
+/** Pages of the website's personal cabinet the app can open signed in. */
+export type CabinetTarget =
+  | "/dashboard"
+  | "/dashboard/subscriptions"
+  | "/dashboard/plans"
+  | "/dashboard/orders"
+  | "/dashboard/devices"
+  | "/dashboard/support"
+  | "/dashboard/account-security";
+
 export interface WindowsProcess {
   name: string;
   path: string | null;
@@ -77,6 +100,8 @@ export interface AppSettings {
   /** Anonymous connection quality reports, docs/connection-telemetry.md. */
   connectionTelemetry: boolean;
   telemetryNoticeShown: boolean;
+  /** Share routing, protection and Anti-DPI settings with the user's other apps. */
+  syncSettings: boolean;
 }
 
 export interface AppSnapshot {
@@ -96,6 +121,9 @@ export interface AppSnapshot {
   uploadBytes: number;
   logs: string[];
   busy: boolean;
+  announcements: AppAnnouncement[];
+  /** When the shared settings last matched the account. */
+  settingsSyncedAt: number | null;
   update: {
     status: UpdateStatus;
     version: string | null;
@@ -133,7 +161,12 @@ export interface LevikDesktopApi {
   installUpdate(): Promise<void>;
   /** Creates the note, copies its link and returns it. */
   createSupportReport(): Promise<string>;
+  dismissAnnouncement(id: string): Promise<void>;
+  /** Opens the page in the browser, signed in to the same account when possible. */
+  openCabinet(target: CabinetTarget): Promise<void>;
   onSnapshot(listener: (snapshot: AppSnapshot) => void): () => void;
+  /** A levik:// link or a notification asks for a tab. */
+  onNavigate(listener: (tab: AppTab) => void): () => void;
 }
 
 export const IPC = {
@@ -158,5 +191,8 @@ export const IPC = {
   downloadUpdate: "levik:download-update",
   installUpdate: "levik:install-update",
   createSupportReport: "levik:create-support-report",
+  dismissAnnouncement: "levik:dismiss-announcement",
+  openCabinet: "levik:open-cabinet",
   snapshotChanged: "levik:snapshot-changed",
+  navigate: "levik:navigate",
 } as const;

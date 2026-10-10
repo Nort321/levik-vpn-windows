@@ -1,6 +1,6 @@
 import { contextBridge, ipcRenderer } from "electron";
 import { IPC } from "../shared/contracts";
-import type { AppSettings, AppSnapshot, LevikDesktopApi } from "../shared/contracts";
+import type { AppSettings, AppSnapshot, AppTab, LevikDesktopApi } from "../shared/contracts";
 
 const api: LevikDesktopApi = {
   snapshot: () => ipcRenderer.invoke(IPC.snapshot) as Promise<AppSnapshot>,
@@ -24,10 +24,17 @@ const api: LevikDesktopApi = {
   downloadUpdate: () => ipcRenderer.invoke(IPC.downloadUpdate),
   installUpdate: () => ipcRenderer.invoke(IPC.installUpdate),
   createSupportReport: () => ipcRenderer.invoke(IPC.createSupportReport) as Promise<string>,
+  dismissAnnouncement: (id) => ipcRenderer.invoke(IPC.dismissAnnouncement, id),
+  openCabinet: (target) => ipcRenderer.invoke(IPC.openCabinet, target),
   onSnapshot(listener) {
     const wrapped = (_event: Electron.IpcRendererEvent, snapshot: AppSnapshot) => listener(snapshot);
     ipcRenderer.on(IPC.snapshotChanged, wrapped);
     return () => ipcRenderer.removeListener(IPC.snapshotChanged, wrapped);
+  },
+  onNavigate(listener) {
+    const wrapped = (_event: Electron.IpcRendererEvent, tab: AppTab) => listener(tab);
+    ipcRenderer.on(IPC.navigate, wrapped);
+    return () => ipcRenderer.removeListener(IPC.navigate, wrapped);
   },
 };
 

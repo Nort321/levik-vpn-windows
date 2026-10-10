@@ -5,8 +5,11 @@ import { isIPv4 } from "node:net";
 import { join } from "node:path";
 import type {
   AccountSummary,
+  AppAnnouncement,
   AppSettings,
   AppSnapshot,
+  AppTab,
+  CabinetTarget,
   LoginChallenge,
   TunnelServer,
   TuicEndpoint,
@@ -33,11 +36,40 @@ import { DiskLog } from "./diagnostics/diskLog";
 import { createSupportNote, MAX_SUPPORT_NOTE_BYTES, supportNoteText } from "./diagnostics/supportNote";
 import { supportReportText } from "./diagnostics/supportReport";
 import type { AttemptCause, AttemptStage, EndBy, PowerState, SessionSettings, SessionTrigger } from "./telemetry/sessionRecorder";
+import { cabinetFallbackUrl, isAllowedExternalUrl, isHandoffUrl } from "./platform/links";
+import { expiryNotices, NoticeState } from "./platform/notices";
+import type { AppNotice } from "./platform/notices";
+import {
+  adviceCandidates,
+  currentAdvice,
+  mergeFetched,
+  RemoteConfigClient,
+  RemoteConfigStore,
+  visibleAnnouncements,
+} from "./platform/remoteConfig";
+import type { StoredRemoteConfig } from "./platform/remoteConfig";
+import {
+  parsePending,
+  parseSettingsDocument,
+  portableSettings,
+  remotePatch,
+  syncedChanges,
+  withoutConfirmed,
+} from "./platform/settingsSync";
+import type { SyncedSettings } from "./platform/settingsSync";
 
 interface AppControllerEvents {
   changed: [snapshot: AppSnapshot];
   updateInstalling: [];
+  notify: [notice: AppNotice];
+  navigate: [tab: AppTab];
 }
+
+const BACKGROUND_TICK_MS = 5 * 60_000;
+const ACCOUNT_CHECK_INTERVAL_MS = 6 * 60 * 60_000;
+const SETTINGS_SYNC_INTERVAL_MS = 30 * 60_000;
+const SETTINGS_PUSH_DELAY_MS = 1_500;
+const LINK_REFRESH_INTERVAL_MS = 30_000;
 
 const DEFAULT_SETTINGS: AppSettings = {
   routingMode: "global",
@@ -60,6 +92,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   splitTunnelProcesses: [],
   connectionTelemetry: true,
   telemetryNoticeShown: false,
+  syncSettings: true,
 };
 
 const SETTINGS_SCHEMA_VERSION = 2;
@@ -105,6 +138,19 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     os: windowsMajorVersion(release()),
   });
   private diskLog: DiskLog | null = null;
+  private readonly remoteConfig = new RemoteConfigClient("windows", app.getVersion());
+  private readonly remoteConfigStore = new RemoteConfigStore(join(app.getPath("userData"), "remote-config.json"));
+  private remoteStored: StoredRemoteConfig | null = null;
+  private remoteRefresh: Promise<void> | null = null;
+  private readonly notices = new NoticeState(join(app.getPath("userData"), "notices.json"));
+  private settingsRevision = 0;
+  private pendingSync: SyncedSettings = {};
+  private settingsSyncChain: Promise<void> = Promise.resolve();
+  private settingsPushTimer: ReturnType<typeof setTimeout> | null = null;
+  private backgroundTimer: ReturnType<typeof setInterval> | null = null;
+  private lastAccountCheckAt = 0;
+  private lastSettingsSyncAt = 0;
+  private lastLinkRefreshAt = 0;
   private nextAttemptCause: AttemptCause = "initial";
   private recoveryCause: AttemptCause | null = null;
   private recoveryReason: "core_exited" | "probe" = "probe";
@@ -126,6 +172,8 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     logs: [],
     busy: true,
     update: { status: "idle", version: null, progress: null, message: null },
+    announcements: [],
+    settingsSyncedAt: null,
   };
 
   constructor() {
@@ -156,6 +204,10 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     this.accessToken = await this.loadString("access_token");
     this.state.sessionAvailable = this.accessToken !== null;
     this.state.settings = await this.loadSettings();
+    await this.loadSyncState();
+    await this.notices.load();
+    this.remoteStored = await this.remoteConfigStore.load();
+    this.state.announcements = this.announcements();
     await this.telemetry.setEnabled(telemetryAllowed(this.state.settings)).catch((error: unknown) => {
       this.addLog(`Статистика подключений: ${messageOf(error)}`);
     });
@@ -179,6 +231,9 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     this.applyLoginItemSettings();
     this.state.busy = false;
     this.emitChanged();
+    // Before any tunnel: protocol advice describes the user's own operator.
+    void this.refreshRemoteConfig();
+    this.backgroundTimer = setInterval(() => void this.backgroundTick(), BACKGROUND_TICK_MS);
     if (this.accessToken) {
       try {
         await this.refreshAccount();
@@ -266,6 +321,9 @@ export class AppController extends EventEmitter<AppControllerEvents> {
           ?? account.subscriptions[0]?.uuid
           ?? null;
       this.patch({ account, selectedSubscriptionId: subscriptionId });
+      this.lastAccountCheckAt = Date.now();
+      void this.syncSettingsNow();
+      void this.checkExpiry();
       if (subscriptionId) await this.loadTunnelProfile(subscriptionId);
     } finally {
       this.patch({ busy: false });
@@ -417,7 +475,8 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     if (failure?.status === "rejected") throw failure.reason;
   }
 
-  async updateSettings(patch: Partial<AppSettings>): Promise<void> {
+  /** Settings changed here ("user") or by another device of the account ("sync"). */
+  async updateSettings(patch: Partial<AppSettings>, origin: "user" | "sync" = "user"): Promise<void> {
     const previous = this.state.settings;
     const next = validateSettings({ ...previous, ...patch });
     const reconnect = this.connectionRequested() && affectsTunnel(previous, next);
@@ -426,6 +485,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     await this.secureStore.put("settings", Buffer.from(JSON.stringify(serializeSettings(next))));
     this.applyLoginItemSettings();
     this.emitChanged();
+    if (origin === "user") await this.recordSyncedChanges(previous, next);
     if (telemetryAllowed(previous) !== telemetryAllowed(next)) await this.telemetry.setEnabled(telemetryAllowed(next));
     this.telemetry.record((session) => session.updateSettings(sessionSettings(next)));
     if (!previous.automaticServer && next.automaticServer) void this.pingServers();
@@ -444,6 +504,11 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     this.stopKillSwitchHealthMonitor();
     if (this.tunnelHealthTimer) clearInterval(this.tunnelHealthTimer);
     this.tunnelHealthTimer = null;
+    if (this.backgroundTimer) clearInterval(this.backgroundTimer);
+    this.backgroundTimer = null;
+    // Unsent setting changes are kept on disk and sent after the next start.
+    if (this.settingsPushTimer) clearTimeout(this.settingsPushTimer);
+    this.settingsPushTimer = null;
     await saved;
     this.telemetry.dispose();
     await this.diskLog?.flush();
@@ -494,6 +559,34 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     const log = (await this.diskLog?.read(MAX_SUPPORT_NOTE_BYTES)) ?? "";
     const report = supportReportText(this.state, { system: `Windows ${release()} (${process.arch})`, now: new Date() });
     return createSupportNote(supportNoteText(report, log));
+  }
+
+  async dismissAnnouncement(id: string): Promise<void> {
+    if (!/^[0-9a-f-]{36}$/.test(id)) throw new Error("Сообщение не найдено");
+    await this.notices.dismiss(id);
+    this.patch({ announcements: this.announcements() });
+  }
+
+  /** A signed-in link to the website; the plain page when the app cannot sign in. */
+  async cabinetUrl(target: CabinetTarget): Promise<string> {
+    if (!this.accessToken) return cabinetFallbackUrl(target);
+    try {
+      const response = await this.withSession((token) => this.api.webHandoff(token, target));
+      if (isHandoffUrl(response.url)) return response.url;
+      this.addLog("Личный кабинет: сервер вернул некорректную ссылку");
+    } catch (error) {
+      this.addLog(`Личный кабинет: ${messageOf(error)}`);
+    }
+    return cabinetFallbackUrl(target);
+  }
+
+  /** levik://open from the website, usually after a payment. */
+  handleDeepLink(tab: AppTab): void {
+    this.emit("navigate", tab);
+    const now = Date.now();
+    if (!this.accessToken || this.state.busy || now - this.lastLinkRefreshAt < LINK_REFRESH_INTERVAL_MS) return;
+    this.lastLinkRefreshAt = now;
+    void this.refreshAccount().catch((error: unknown) => this.addLog(`Обновление аккаунта: ${messageOf(error)}`));
   }
 
   checkForUpdates(): Promise<void> {
@@ -582,6 +675,143 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     }
   }
 
+  private async backgroundTick(): Promise<void> {
+    const now = Date.now();
+    const stored = this.remoteStored;
+    if (!stored || now - stored.fetchedAt >= stored.config.refreshAfterSeconds * 1_000) await this.refreshRemoteConfig();
+    else await this.updateAnnouncements();
+    if (!this.accessToken) return;
+    if (now - this.lastAccountCheckAt >= ACCOUNT_CHECK_INTERVAL_MS) {
+      try {
+        const response = await this.withSession((token) => this.api.account(token));
+        this.lastAccountCheckAt = Date.now();
+        this.patch({ account: mapAccount(response) });
+        await this.checkExpiry();
+      } catch (error) {
+        this.addLog(`Проверка подписки: ${messageOf(error)}`);
+      }
+    }
+    if (Object.keys(this.pendingSync).length || now - this.lastSettingsSyncAt >= SETTINGS_SYNC_INTERVAL_MS) {
+      await this.syncSettingsNow();
+    }
+  }
+
+  private refreshRemoteConfig(): Promise<void> {
+    this.remoteRefresh ??= (async () => {
+      const outside = !this.tunnelActive();
+      const fetched = await this.remoteConfig.fetch();
+      if (!fetched) return;
+      this.remoteStored = mergeFetched(this.remoteStored, fetched, Date.now(), !outside || this.tunnelActive());
+      await this.remoteConfigStore.save(this.remoteStored);
+      await this.updateAnnouncements();
+    })().catch((error: unknown) => {
+      this.addLog(`Конфигурация приложения: ${messageOf(error)}`);
+    }).finally(() => {
+      this.remoteRefresh = null;
+    });
+    return this.remoteRefresh;
+  }
+
+  private tunnelActive(): boolean {
+    return this.xray.isRunning() || this.killSwitch.isActive() ||
+      ["connecting", "connected", "reconnecting", "disconnecting"].includes(this.state.status);
+  }
+
+  private announcements(): AppAnnouncement[] {
+    return visibleAnnouncements(this.remoteStored?.config ?? null, this.notices.dismissed(), Date.now())
+      .map((item) => item.linkUrl && !isAllowedExternalUrl(item.linkUrl) ? { ...item, linkUrl: null } : item);
+  }
+
+  private async updateAnnouncements(): Promise<void> {
+    const visible = this.announcements();
+    if (JSON.stringify(visible) !== JSON.stringify(this.state.announcements)) this.patch({ announcements: visible });
+    const notified = this.notices.notified();
+    const fresh = visible.filter((item) => item.notify && !notified.has(`announcement:${item.id}`));
+    if (!fresh.length) return;
+    await this.notices.remember(fresh.map((item) => `announcement:${item.id}`));
+    for (const item of fresh) this.emit("notify", { title: item.title, body: item.body, tab: "home" });
+  }
+
+  private async checkExpiry(): Promise<void> {
+    const due = expiryNotices(this.state.account?.subscriptions ?? [], this.notices.notified(), Date.now());
+    if (!due.length) return;
+    await this.notices.remember(due.map((item) => item.key));
+    for (const item of due) this.emit("notify", item.notice);
+  }
+
+  private async loadSyncState(): Promise<void> {
+    const raw = await this.loadString("settings_sync");
+    if (!raw) return;
+    try {
+      const value: unknown = JSON.parse(raw);
+      const record = typeof value === "object" && value !== null ? value as Record<string, unknown> : {};
+      const revision = record.revision;
+      this.settingsRevision = typeof revision === "number" && Number.isSafeInteger(revision) && revision >= 0 ? revision : 0;
+      this.pendingSync = parsePending(record.pending);
+    } catch {
+      await this.secureStore.remove("settings_sync");
+    }
+  }
+
+  private async saveSyncState(): Promise<void> {
+    await this.secureStore.put("settings_sync", Buffer.from(JSON.stringify({ revision: this.settingsRevision, pending: this.pendingSync })));
+  }
+
+  private async recordSyncedChanges(previous: AppSettings, next: AppSettings): Promise<void> {
+    if (previous.syncSettings !== next.syncSettings) {
+      // Turning sync on joins the account's settings; turning it off forgets unsent edits.
+      this.settingsRevision = 0;
+      this.pendingSync = {};
+      await this.saveSyncState();
+      this.patch({ settingsSyncedAt: null });
+      if (next.syncSettings) void this.syncSettingsNow();
+      return;
+    }
+    if (!next.syncSettings) return;
+    const changes = syncedChanges(previous, next);
+    if (!Object.keys(changes).length) return;
+    this.pendingSync = { ...this.pendingSync, ...changes };
+    await this.saveSyncState();
+    if (this.settingsPushTimer) clearTimeout(this.settingsPushTimer);
+    this.settingsPushTimer = setTimeout(() => {
+      this.settingsPushTimer = null;
+      void this.syncSettingsNow();
+    }, SETTINGS_PUSH_DELAY_MS);
+  }
+
+  /** One exchange with the account at a time; failures wait for the next attempt. */
+  private syncSettingsNow(): Promise<void> {
+    this.settingsSyncChain = this.settingsSyncChain
+      .then(() => this.exchangeSettings())
+      .catch((error: unknown) => this.addLog(`Синхронизация настроек: ${messageOf(error)}`));
+    return this.settingsSyncChain;
+  }
+
+  private async exchangeSettings(): Promise<void> {
+    if (!this.state.settings.syncSettings || !this.accessToken) return;
+    const sent = { ...this.pendingSync };
+    let document = parseSettingsDocument(Object.keys(sent).length
+      ? await this.withSession((token) => this.api.updateSettings(token, sent))
+      : await this.withSession((token) => this.api.settings(token)));
+    if (document?.revision === 0) {
+      // Nothing saved for this account yet: this computer's settings become the shared ones.
+      const seed = portableSettings(this.state.settings);
+      document = parseSettingsDocument(await this.withSession((token) => this.api.updateSettings(token, seed)));
+    }
+    if (!document) throw new Error("Сервер вернул некорректные настройки");
+    this.pendingSync = withoutConfirmed(this.pendingSync, sent);
+    this.settingsRevision = document.revision;
+    await this.saveSyncState();
+    this.lastSettingsSyncAt = Date.now();
+    if (!this.state.settings.syncSettings) return;
+    const patch = remotePatch(this.state.settings, document.settings, this.pendingSync);
+    if (Object.keys(patch).length) {
+      this.addLog(`Настройки синхронизированы с аккаунтом: ${Object.keys(patch).join(", ")}`);
+      await this.updateSettings(patch, "sync");
+    }
+    this.patch({ settingsSyncedAt: Date.now() });
+  }
+
   private async loadIdentity(): Promise<DeviceIdentity> {
     const raw = await this.secureStore.get("device_identity");
     if (raw) {
@@ -645,12 +875,18 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     this.profile = null;
     this.lastConfig = null;
     this.lastTuic = undefined;
+    this.settingsRevision = 0;
+    this.pendingSync = {};
+    if (this.settingsPushTimer) clearTimeout(this.settingsPushTimer);
+    this.settingsPushTimer = null;
     await Promise.all([
       this.secureStore.remove("access_token"),
       this.secureStore.remove("tunnel_profile"),
       this.secureStore.remove("selected_server"),
+      this.secureStore.remove("settings_sync"),
     ]);
     this.patch({
+      settingsSyncedAt: null,
       sessionAvailable: false,
       account: null,
       servers: [],
@@ -902,7 +1138,11 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     const xrayServers = servers.filter((item) => !item.tuic);
     const pool = xrayServers.length ? xrayServers : servers;
     const nonRussian = pool.filter((item) => item.countryCode.toUpperCase() !== "RU");
-    const candidates = nonRussian.length ? nonRussian : pool;
+    const eligible = nonRussian.length ? nonRussian : pool;
+    // Protocols that work on the user's operator first, unless none of them answers.
+    const advised = adviceCandidates(eligible, currentAdvice(this.remoteStored, Date.now()), protocolOf);
+    const measured = (items: TunnelServer[]) => items.some((item) => this.state.serverLatencies[item.id] != null);
+    const candidates = measured(advised) || !measured(eligible) ? advised : eligible;
     return candidates.reduce<TunnelServer | null>((best, candidate) => {
       if (!best) return candidate;
       const bestLatency = this.state.serverLatencies[best.id];
@@ -1063,6 +1303,7 @@ function validateSettings(value: AppSettings): AppSettings {
     splitTunnelProcesses: normalizeProcessSelection(value.splitTunnelProcesses),
     connectionTelemetry: Boolean(value.connectionTelemetry),
     telemetryNoticeShown: Boolean(value.telemetryNoticeShown),
+    syncSettings: Boolean(value.syncSettings),
   };
 }
 

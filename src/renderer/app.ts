@@ -36,6 +36,12 @@ void window.levik.snapshot().then((snapshot) => {
   render();
 });
 
+window.levik.onNavigate((tab) => {
+  activeTab = tab;
+  devicesSubscriptionId = null;
+  render(false);
+});
+
 window.levik.onSnapshot((snapshot) => {
   state = snapshot;
   if (snapshot.sessionAvailable) clearLoginWaiting();
@@ -87,7 +93,7 @@ function render(preserveScroll = true): void {
           <div class="status-subtitle">${escapeHtml(state.statusDetail ?? "VPN готов к подключению")}</div>
         </div>
       </aside>
-      <main class="content"><div class="content-inner">${renderTelemetryNotice()}${renderPage()}</div></main>
+      <main class="content"><div class="content-inner">${renderAnnouncements()}${renderTelemetryNotice()}${renderPage()}</div></main>
     </div>
     ${showProcessDialog ? renderProcessDialog() : ""}
     ${devicesSubscriptionId ? renderDevicesDialog(devicesSubscriptionId) : ""}
@@ -238,7 +244,7 @@ function renderProfile(): string {
         <div class="account-row"><div class="avatar">${icon("profile")}</div><div><div class="account-name">Levik Account</div><div class="card-caption">Локальная сессия доступна. Данные аккаунта синхронизируются после восстановления сети.</div></div></div>
       </section>`;
   return `
-    <header class="page-header"><div><h1>Профиль и настройки</h1><div class="subtitle">Levik Account и параметры Windows-клиента</div></div><div class="toolbar"><button class="button" id="manage-subscription-button">${icon("renew")} Управление подпиской</button><button class="button" id="support-button">${icon("support")} Поддержка</button><button class="button danger" id="logout-button">${icon("logout")} Выйти</button></div></header>
+    <header class="page-header"><div><h1>Профиль и настройки</h1><div class="subtitle">Levik Account и параметры Windows-клиента</div></div><div class="toolbar"><button class="button" id="cabinet-button">${icon("external")} Личный кабинет</button><button class="button" id="support-button">${icon("support")} Поддержка</button><button class="button danger" id="logout-button">${icon("logout")} Выйти</button></div></header>
     <div class="profile-grid">
       ${accountSection}
       <section class="section card"><h2 class="card-title">Авторизовать устройство</h2><div class="card-caption">Введите код, показанный на экране другого устройства.</div><form class="activation-form" id="activation-form"><label for="activation-code">Код активации</label><div class="activation-controls"><input id="activation-code" type="text" inputmode="text" autocomplete="one-time-code" maxlength="19" placeholder="XXXX-XXXX-XXXX-XXXX" value="${escapeAttribute(activationCodeInput)}" ${activationSubmitting ? "disabled" : ""} /><button class="button primary" type="submit" ${activationSubmitting ? "disabled" : ""}>${activationSubmitting ? `<span class="spinner"></span>` : icon("link")} Авторизовать</button></div></form></section>
@@ -255,6 +261,7 @@ function renderProfile(): string {
         ${state.settings.splitTunnelMode !== "off" ? `<div class="setting-row"><div><div class="setting-name">Приложения</div><div class="setting-help">${state.settings.splitTunnelProcesses.length ? `Выбрано: ${resolveProcessCompanions(state.settings.splitTunnelProcesses).length}` : "Выберите процессы из запущенных приложений"}</div></div><button class="button compact" id="process-picker-button">${icon("process")} Выбрать</button></div>` : ""}
         ${switchSetting("Запуск с Windows", "Открывать Levik VPN после входа", "launchAtLogin", state.settings.launchAtLogin)}
         ${switchSetting("Закрытие в трей", "Кнопка закрытия скрывает приложение", "closeToTray", state.settings.closeToTray)}
+        ${switchSetting("Синхронизация настроек", syncHelp(), "syncSettings", state.settings.syncSettings)}
         ${switchSetting("Статистика качества подключения", "Анонимно сообщать об обрывах и ошибках подключения. Без IP-адресов, сайтов и данных аккаунта", "connectionTelemetry", state.settings.connectionTelemetry)}
         ${selectSetting("Оформление", "Единый стиль Levik VPN", "theme", state.settings.theme, [["system","Системная"],["dark","Тёмная"],["light","Светлая"],["amoled","AMOLED"]])}
         ${updateSetting()}
@@ -263,6 +270,20 @@ function renderProfile(): string {
 }
 
 const TELEMETRY_DETAILS_URL = "https://leviknet.org/legal/privacy#connection-telemetry";
+
+function syncHelp(): string {
+  const base = "Маршрутизация, Kill Switch, DoH и Anti-DPI общие для ваших приложений Levik VPN";
+  const syncedAt = state?.settings.syncSettings ? state.settingsSyncedAt : null;
+  return syncedAt ? `${base}. Синхронизировано в ${new Date(syncedAt).toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" })}` : base;
+}
+
+function renderAnnouncements(): string {
+  if (!state?.announcements.length) return "";
+  return state.announcements.map((item) => `<section class="announcement card ${item.level}" role="${item.level === "critical" ? "alert" : "status"}" aria-labelledby="announcement-${escapeAttribute(item.id)}">
+    <div class="announcement-copy"><h2 class="card-title" id="announcement-${escapeAttribute(item.id)}">${escapeHtml(item.title)}</h2><p class="card-caption">${escapeHtml(item.body)}</p></div>
+    <div class="announcement-actions">${item.linkUrl ? `<button class="button compact" data-announcement-link="${escapeAttribute(item.linkUrl)}">${icon("external")} Подробнее</button>` : ""}<button class="button icon-button" data-dismiss-announcement="${escapeAttribute(item.id)}" aria-label="Скрыть сообщение">${icon("close")}</button></div>
+  </section>`).join("");
+}
 
 function renderTelemetryNotice(): string {
   if (!state || state.settings.telemetryNoticeShown) return "";
@@ -384,7 +405,7 @@ function bindPageEvents(): void {
   document.querySelectorAll<HTMLElement>("[data-setting]").forEach((button) => button.addEventListener("click", () => {
     const currentState = state;
     if (!currentState) return;
-    const key = button.dataset.setting as "automaticServer" | "autoReconnect" | "autoConnectOnLaunch" | "killSwitch" | "useDoh" | "preventDnsLeaks" | "antiDpiEnabled" | "launchAtLogin" | "closeToTray" | "connectionTelemetry";
+    const key = button.dataset.setting as "automaticServer" | "autoReconnect" | "autoConnectOnLaunch" | "killSwitch" | "useDoh" | "preventDnsLeaks" | "antiDpiEnabled" | "launchAtLogin" | "closeToTray" | "connectionTelemetry" | "syncSettings";
     // Choosing in Settings also answers the first-run notice.
     const patch: Partial<AppSettings> = key === "connectionTelemetry"
       ? { connectionTelemetry: !currentState.settings.connectionTelemetry, telemetryNoticeShown: true }
@@ -461,8 +482,16 @@ function bindPageEvents(): void {
     if (!subscriptionId) return;
     void run(() => window.levik.setSubscriptionShield(subscriptionId, button.dataset.shieldEnabled !== "true"));
   }));
-  document.querySelectorAll<HTMLElement>("[data-renew-subscription-id]").forEach((button) => button.addEventListener("click", () => run(() => window.levik.openExternal("https://t.me/levikvpnbot"))));
-  document.getElementById("manage-subscription-button")?.addEventListener("click", () => run(() => window.levik.openExternal("https://t.me/levikvpnbot")));
+  document.querySelectorAll<HTMLElement>("[data-renew-subscription-id]").forEach((button) => button.addEventListener("click", () => run(() => window.levik.openCabinet("/dashboard/subscriptions"))));
+  document.getElementById("cabinet-button")?.addEventListener("click", () => run(() => window.levik.openCabinet("/dashboard")));
+  document.querySelectorAll<HTMLElement>("[data-announcement-link]").forEach((button) => button.addEventListener("click", () => {
+    const url = button.dataset.announcementLink;
+    if (url) void run(() => window.levik.openExternal(url));
+  }));
+  document.querySelectorAll<HTMLElement>("[data-dismiss-announcement]").forEach((button) => button.addEventListener("click", () => {
+    const id = button.dataset.dismissAnnouncement;
+    if (id) void run(() => window.levik.dismissAnnouncement(id));
+  }));
   document.getElementById("update-button")?.addEventListener("click", () => run(() => {
     if (state?.update.status === "downloaded") return window.levik.installUpdate();
     if (state?.update.status === "available") return window.levik.downloadUpdate();

@@ -4,6 +4,7 @@ import { IPC } from "../shared/contracts";
 import type { AppSettings } from "../shared/contracts";
 import { AppController } from "./appController";
 import { listWindowsProcesses, windowsProcessFromPath } from "./windows/processes";
+import { isAllowedExternalUrl, isCabinetTarget } from "./platform/links";
 
 export function registerIpc(controller: AppController, window: BrowserWindow): void {
   ipcMain.handle(IPC.snapshot, () => controller.snapshot());
@@ -69,23 +70,25 @@ export function registerIpc(controller: AppController, window: BrowserWindow): v
     clipboard.writeText(url);
     return url;
   });
+  ipcMain.handle(IPC.dismissAnnouncement, (_event, id: unknown) => {
+    if (typeof id !== "string") throw new Error("Некорректное сообщение");
+    return controller.dismissAnnouncement(id);
+  });
+  ipcMain.handle(IPC.openCabinet, async (_event, target: unknown) => {
+    if (!isCabinetTarget(target)) throw new Error("Некорректная страница кабинета");
+    await openAllowedExternal(await controller.cabinetUrl(target));
+  });
+  controller.on("navigate", (tab) => {
+    if (!window.isDestroyed()) window.webContents.send(IPC.navigate, tab);
+  });
   controller.on("changed", (snapshot) => {
     if (!window.isDestroyed()) window.webContents.send(IPC.snapshotChanged, snapshot);
   });
 }
 
 async function openAllowedExternal(rawUrl: string): Promise<void> {
-  const url = new URL(rawUrl);
-  const allowedHttpsHosts = new Set(["leviknet.org", "www.leviknet.org", "leviknet.com", "www.leviknet.com", "t.me"]);
-  if (url.protocol === "https:" && allowedHttpsHosts.has(url.hostname)) {
-    await shell.openExternal(url.toString());
-    return;
-  }
-  if (url.protocol === "tg:") {
-    await shell.openExternal(url.toString());
-    return;
-  }
-  throw new Error("Открытие внешней ссылки запрещено");
+  if (!isAllowedExternalUrl(rawUrl)) throw new Error("Открытие внешней ссылки запрещено");
+  await shell.openExternal(new URL(rawUrl).toString());
 }
 
 function isSettingsPatch(value: unknown): value is Partial<AppSettings> {

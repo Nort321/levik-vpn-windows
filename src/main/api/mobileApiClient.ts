@@ -2,7 +2,9 @@ import type {
   AuthChallengeResponse,
   AuthStatusResponse,
   MobileAccountResponse,
+  SettingsDocumentResponse,
   TunnelProfileResponse,
+  WebHandoffResponse,
 } from "./models";
 import { RequestSigner } from "../security/requestSigner";
 import { ApiEndpoints } from "./apiEndpoints";
@@ -66,8 +68,22 @@ export class MobileApiClient {
     if (response.state !== "authorized") throw new MobileApiError("API отклонил авторизацию устройства");
   }
 
+  /** Settings shared by the user's apps, docs/app-platform.md. */
+  settings(accessToken: string): Promise<SettingsDocumentResponse> {
+    return this.request("GET", "/api/mobile/v1/settings", null, accessToken);
+  }
+
+  updateSettings(accessToken: string, changes: Record<string, unknown>): Promise<SettingsDocumentResponse> {
+    return this.request("PUT", "/api/mobile/v1/settings", { changes }, accessToken);
+  }
+
+  /** A one-time link that opens the website signed in to the same account. */
+  webHandoff(accessToken: string, target: string): Promise<WebHandoffResponse> {
+    return this.request("POST", "/api/mobile/v1/web-handoff", { target }, accessToken);
+  }
+
   private async request<Response>(
-    method: "GET" | "POST",
+    method: "GET" | "POST" | "PUT",
     path: string,
     payload: Record<string, unknown> | null,
     accessToken: string | null,
@@ -77,7 +93,8 @@ export class MobileApiClient {
     catch { throw new MobileApiError("Не удалось связаться с Levik VPN"); }
     const url = new URL(path, origin);
     if (url.origin !== origin.origin) throw new Error("Cross-origin API request rejected");
-    const body = method === "POST" ? Buffer.from(JSON.stringify(payload ?? {})) : Buffer.alloc(0);
+    const hasBody = method !== "GET";
+    const body = hasBody ? Buffer.from(JSON.stringify(payload ?? {})) : Buffer.alloc(0);
     const signed = this.signer.sign(method, url.pathname, accessToken, body);
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 30_000);
@@ -91,15 +108,16 @@ export class MobileApiClient {
           "Accept-Language": "ru-RU,ru;q=0.9,en;q=0.8",
           "User-Agent": `LevikVPN-Windows/${this.version}`,
           "X-Levik-App-Version": this.version,
+          "X-Levik-Client": `windows/${this.version}`,
           "X-Levik-Device-Id": signed.deviceId,
           "X-Levik-Timestamp": String(signed.timestamp),
           "X-Levik-Nonce": signed.nonce,
           "X-Levik-Signature": signed.signature,
-          ...(method === "POST" ? { "Content-Type": "application/json" } : {}),
+          ...(hasBody ? { "Content-Type": "application/json" } : {}),
           ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
         },
       };
-      if (method === "POST") requestInit.body = body;
+      if (hasBody) requestInit.body = body;
       const response = await fetch(url, requestInit);
       const contentLength = Number(response.headers.get("content-length") ?? "0");
       if (contentLength > 4 * 1024 * 1024) throw new MobileApiError("Ответ API слишком большой", response.status);

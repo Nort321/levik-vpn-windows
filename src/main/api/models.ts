@@ -44,3 +44,17 @@ export interface TunnelProfileResponse {
   ok: boolean;
   profile: TunnelProfileEnvelope;
 }
+
+export interface SettingsDocumentResponse {
+  ok: boolean;
+  settings: Record<string, unknown>;
+  revision: number;
+  updatedAt: string | null;
+  updatedBy: string | null;
+}
+
+export interface WebHandoffResponse {
+  ok: boolean;
+  url: string;
+  expiresAt: string;
+}

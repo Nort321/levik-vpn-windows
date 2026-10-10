@@ -83,7 +83,15 @@
       "shortcutName": "Levik VPN",
       "deleteAppDataOnUninstall": false,
       "runAfterFinish": true
-    }
+    },
+    "protocols": [
+      {
+        "name": "Levik VPN",
+        "schemes": [
+          "levik"
+        ]
+      }
+    ]
   },
   "dependencies": {
     "electron-updater": "^6.8.9",
