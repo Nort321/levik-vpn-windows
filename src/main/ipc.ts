@@ -1,4 +1,4 @@
-import { dialog, ipcMain, shell } from "electron";
+import { clipboard, dialog, ipcMain, shell } from "electron";
 import type { BrowserWindow } from "electron";
 import { IPC } from "../shared/contracts";
 import type { AppSettings } from "../shared/contracts";
@@ -64,6 +64,11 @@ export function registerIpc(controller: AppController, window: BrowserWindow): v
   ipcMain.handle(IPC.checkForUpdates, () => controller.checkForUpdates());
   ipcMain.handle(IPC.downloadUpdate, () => controller.downloadUpdate());
   ipcMain.handle(IPC.installUpdate, () => controller.installUpdate());
+  ipcMain.handle(IPC.createSupportReport, async () => {
+    const url = await controller.createSupportReport();
+    clipboard.writeText(url);
+    return url;
+  });
   controller.on("changed", (snapshot) => {
     if (!window.isDestroyed()) window.webContents.send(IPC.snapshotChanged, snapshot);
   });

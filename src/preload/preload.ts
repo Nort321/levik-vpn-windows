@@ -23,6 +23,7 @@ const api: LevikDesktopApi = {
   checkForUpdates: () => ipcRenderer.invoke(IPC.checkForUpdates),
   downloadUpdate: () => ipcRenderer.invoke(IPC.downloadUpdate),
   installUpdate: () => ipcRenderer.invoke(IPC.installUpdate),
+  createSupportReport: () => ipcRenderer.invoke(IPC.createSupportReport) as Promise<string>,
   onSnapshot(listener) {
     const wrapped = (_event: Electron.IpcRendererEvent, snapshot: AppSnapshot) => listener(snapshot);
     ipcRenderer.on(IPC.snapshotChanged, wrapped);

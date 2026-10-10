@@ -378,6 +378,14 @@ select option { color: var(--text); background-color: var(--select-bg); }
 .process-check svg { width: 15px; height: 15px; }
 .dialog-actions { display: flex; justify-content: flex-end; gap: 10px; padding-top: 16px; border-top: 1px solid var(--border); }
 .dialog-spacer { flex: 1; }
+.support-dialog { width: min(560px, 100%); }
+.support-dialog .dialog-actions { flex-wrap: wrap; }
+.support-dialog-body { display: grid; gap: 12px; padding: 16px 2px; }
+.support-dialog-text { margin: 0; color: var(--muted); font-size: 13px; line-height: 1.55; }
+.support-link-label { margin-top: 4px; font-size: 12px; font-weight: 600; }
+.support-link-row { display: flex; gap: 8px; }
+.support-link { min-width: 0; flex: 1; height: 42px; padding: 0 12px; border: 1px solid var(--border); border-radius: 10px; color: var(--text); background: var(--select-bg); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+.support-link:focus-visible { outline: 2px solid rgba(54,135,255,.58); outline-offset: 1px; }
 .device-list { min-height: 120px; max-height: 430px; overflow: auto; display: grid; align-content: start; gap: 8px; padding: 14px 2px; }
 .device-row { min-width: 0; display: flex; align-items: center; gap: 12px; padding: 11px; border: 1px solid var(--border); border-radius: 12px; background: var(--surface-subtle, rgba(255,255,255,.025)); }
 

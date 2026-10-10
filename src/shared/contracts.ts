@@ -131,6 +131,8 @@ export interface LevikDesktopApi {
   checkForUpdates(): Promise<void>;
   downloadUpdate(): Promise<void>;
   installUpdate(): Promise<void>;
+  /** Creates the note, copies its link and returns it. */
+  createSupportReport(): Promise<string>;
   onSnapshot(listener: (snapshot: AppSnapshot) => void): () => void;
 }
 
@@ -155,5 +157,6 @@ export const IPC = {
   checkForUpdates: "levik:check-for-updates",
   downloadUpdate: "levik:download-update",
   installUpdate: "levik:install-update",
+  createSupportReport: "levik:create-support-report",
   snapshotChanged: "levik:snapshot-changed",
 } as const;

@@ -30,6 +30,8 @@ import { normalizeProcessSelection } from "../shared/processes";
 import { classifyCoreLogLine, networkTypeOfInterface, protocolOf } from "./telemetry/codes";
 import { ConnectionTelemetry } from "./telemetry/connectionTelemetry";
 import { DiskLog } from "./diagnostics/diskLog";
+import { createSupportNote, MAX_SUPPORT_NOTE_BYTES, supportNoteText } from "./diagnostics/supportNote";
+import { supportReportText } from "./diagnostics/supportReport";
 import type { AttemptCause, AttemptStage, EndBy, PowerState, SessionSettings, SessionTrigger } from "./telemetry/sessionRecorder";
 
 interface AppControllerEvents {
@@ -485,6 +487,13 @@ export class AppController extends EventEmitter<AppControllerEvents> {
   async authorizeActivation(code: string): Promise<void> {
     const normalized = normalizeActivationCode(code);
     await this.withSession((token) => this.api.authorizeActivation(token, normalized));
+  }
+
+  /** A one-time encrypted note with the state and the redacted log, for support. */
+  async createSupportReport(): Promise<string> {
+    const log = (await this.diskLog?.read(MAX_SUPPORT_NOTE_BYTES)) ?? "";
+    const report = supportReportText(this.state, { system: `Windows ${release()} (${process.arch})`, now: new Date() });
+    return createSupportNote(supportNoteText(report, log));
   }
 
   checkForUpdates(): Promise<void> {
