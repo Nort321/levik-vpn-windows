@@ -3,8 +3,12 @@ import { ApiEndpoints, DEFAULT_API_ORIGIN } from "../src/main/api/apiEndpoints";
 import { MobileApiClient } from "../src/main/api/mobileApiClient";
 import { DeviceIdentity } from "../src/main/security/deviceIdentity";
 import { RequestSigner } from "../src/main/security/requestSigner";
+import { useEndpointsDocument } from "../src/main/platform/serviceEndpoints";
 
-afterEach(() => vi.unstubAllGlobals());
+afterEach(() => {
+  vi.unstubAllGlobals();
+  useEndpointsDocument(null);
+});
 
 const healthy = () => new Response('{"ok":true}', {
   headers: { "Content-Type": "application/json" },
@@ -16,22 +20,35 @@ describe("trusted API endpoint discovery", () => {
       expect(init?.credentials).toBe("omit");
       expect(init?.redirect).toBe("error");
       expect(init?.headers).toEqual({ Accept: "application/json" });
-      if (url.hostname === "api.leviknet.org") throw new TypeError("blocked");
+      if (url.hostname.startsWith("api.")) throw new TypeError("blocked");
       return healthy();
     });
     vi.stubGlobal("fetch", fetchMock);
     const endpoints = new ApiEndpoints(DEFAULT_API_ORIGIN);
     expect((await endpoints.resolve()).origin).toBe("https://leviknet.org");
     await endpoints.resolve();
-    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
   });
 
   it("retains the legacy API as the last trusted fallback", async () => {
     vi.stubGlobal("fetch", vi.fn(async (url: URL) => {
-      if (url.hostname.endsWith(".org")) throw new TypeError("blocked");
+      if (!url.hostname.endsWith(".com")) throw new TypeError("blocked");
       return healthy();
     }));
     expect((await new ApiEndpoints(DEFAULT_API_ORIGIN).resolve()).origin).toBe("https://leviknet.com");
+  });
+
+  it("asks for a newer signed host list once every known host fails", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (url: URL) => {
+      if (url.hostname !== "api.reserve.example") throw new TypeError("blocked");
+      return healthy();
+    }));
+    const refresh = vi.fn(async () => {
+      useEndpointsDocument({ sequence: 2, apiOrigins: ["https://api.reserve.example"], webOrigin: "https://leviknet.org", configUrls: [] });
+      return true;
+    });
+    expect((await new ApiEndpoints(DEFAULT_API_ORIGIN, refresh).resolve()).origin).toBe("https://api.reserve.example");
+    expect(refresh).toHaveBeenCalledTimes(1);
   });
 
   it("does not discover production origins for an explicit override", async () => {

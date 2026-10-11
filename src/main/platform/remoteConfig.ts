@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import type { AppAnnouncement } from "../../shared/contracts";
-import { TELEMETRY_ORIGINS } from "../telemetry/telemetryClient";
+import { serviceEndpoints } from "./serviceEndpoints";
 
 /**
  * Anonymous app configuration from the website, docs/app-platform.md:
@@ -165,9 +165,9 @@ export class RemoteConfigClient {
     private readonly fetchImpl: Fetch = fetch,
   ) {}
 
-  /** Tries the main domain, then the reserve one. Null when both are unreachable. */
+  /** Tries the current hosts in order. Null when none answers. */
   async fetch(): Promise<{ response: unknown; config: RemoteConfig } | null> {
-    for (const origin of TELEMETRY_ORIGINS) {
+    for (const origin of serviceEndpoints().apiOrigins) {
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), 15_000);
       try {
@@ -180,8 +180,9 @@ export class RemoteConfigClient {
           headers: { Accept: "application/json", "X-Levik-Client": `${this.platform}/${this.version}` },
         });
         if (!reply.ok) {
-          // A rejected request would be rejected by the other domain too.
-          if (reply.status >= 400 && reply.status < 500) return null;
+          // A rejected request would be rejected by the other hosts too; a host
+          // that does not serve the configuration (404) is skipped.
+          if (reply.status >= 400 && reply.status < 500 && reply.status !== 404) return null;
           continue;
         }
         const text = await reply.text();

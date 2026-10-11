@@ -1,18 +1,15 @@
-export const DEFAULT_API_ORIGIN = "https://api.leviknet.org";
+import { serviceEndpoints } from "../platform/serviceEndpoints";
 
-const PRODUCTION_ORIGINS = [
-  DEFAULT_API_ORIGIN,
-  "https://leviknet.org",
-  "https://leviknet.com",
-] as const;
+export const DEFAULT_API_ORIGIN = "https://api.cloudnote-sync.xyz";
 
 export class ApiEndpoints {
-  private readonly origins: URL[];
+  /** Null in production: the hosts come from the signed endpoints document. */
+  private readonly fixed: URL | null;
   private selected: URL | null = null;
   private verifiedUntil = 0;
   private pending: Promise<URL> | null = null;
 
-  constructor(baseUrl: string) {
+  constructor(baseUrl: string, private readonly refreshEndpoints: () => Promise<boolean> = async () => false) {
     const origin = new URL(baseUrl);
     if (origin.protocol !== "https:" || origin.pathname !== "/" ||
         origin.username || origin.password || origin.search || origin.hash) {
@@ -20,9 +17,7 @@ export class ApiEndpoints {
     }
     // An explicit development override must never receive production credentials
     // through an implicit cross-origin retry.
-    this.origins = baseUrl === DEFAULT_API_ORIGIN
-      ? PRODUCTION_ORIGINS.map((value) => new URL(value))
-      : [origin];
+    this.fixed = baseUrl === DEFAULT_API_ORIGIN ? null : origin;
   }
 
   invalidate(): void {
@@ -31,17 +26,27 @@ export class ApiEndpoints {
   }
 
   async resolve(): Promise<URL> {
-    const only = this.origins[0];
-    if (this.origins.length === 1 && only) return only;
+    if (this.fixed) return this.fixed;
     if (this.selected && Date.now() < this.verifiedUntil) return this.selected;
     if (!this.pending) {
-      this.pending = this.probe().finally(() => { this.pending = null; });
+      this.pending = this.probeWithRefresh().finally(() => { this.pending = null; });
     }
     return this.pending;
   }
 
+  /** When every known host fails, a newer signed document may name working ones. */
+  private async probeWithRefresh(): Promise<URL> {
+    try {
+      return await this.probe();
+    } catch (error) {
+      if (!await this.refreshEndpoints()) throw error;
+      return this.probe();
+    }
+  }
+
   private async probe(): Promise<URL> {
-    for (const origin of this.origins) {
+    for (const value of serviceEndpoints().apiOrigins) {
+      const origin = new URL(value);
       try {
         // Discover availability without tokens or device identifiers, before
         // sending a signed operation. Never replay a possibly completed POST.
@@ -63,7 +68,7 @@ export class ApiEndpoints {
         this.verifiedUntil = Date.now() + 60_000;
         return origin;
       } catch {
-        // Try only the built-in, trusted origins; HTTPS verification stays on.
+        // Try only signed or built-in origins; HTTPS verification stays on.
       }
     }
     throw new Error("Levik API is unavailable");

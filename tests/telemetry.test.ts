@@ -151,11 +151,11 @@ describe("telemetry transport", () => {
     expect(await client.send("{}")).toBe("rejected");
     expect(await client.send("{}")).toBe("retry");
     const [url, init] = fetchImpl.mock.calls[0]!;
-    expect(String(url)).toBe("https://leviknet.org/api/telemetry/v1/sessions");
+    expect(String(url)).toBe("https://api.cloudnote-sync.xyz/api/telemetry/v1/sessions");
     expect(init).toMatchObject({ method: "POST", credentials: "omit" });
     expect(Object.keys(init?.headers ?? {})).toEqual(["Content-Type"]);
-    // 503 from the first origin falls back to the second one, which is offline.
-    expect(String(fetchImpl.mock.calls[3]![0])).toBe("https://leviknet.com/api/telemetry/v1/sessions");
+    // 503 from the first host falls back to the next one, which is offline.
+    expect(String(fetchImpl.mock.calls[3]![0])).toBe("https://api.leviknet.org/api/telemetry/v1/sessions");
   });
 
   it("accepts only a well-formed network token", async () => {
@@ -174,7 +174,7 @@ describe("ConnectionTelemetry", () => {
     const sent: string[] = [];
     const http = {
       send: vi.fn(async (body: string) => { sent.push(body); return "sent" as const; }),
-      networkToken: vi.fn(async () => ({ token: "net.token", expiresAt: Date.UTC(2026, 9, 11) })),
+      networkToken: vi.fn(async () => ({ token: "net.token", expiresAt: Date.now() + 60 * 60_000 })),
     };
     return { http: http as unknown as TelemetryClient, sent, mock: http };
   }

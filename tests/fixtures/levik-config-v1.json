@@ -1,0 +1,22 @@
+{
+  "schema": 1,
+  "sequence": 1,
+  "issuedAt": "2026-10-11T18:00:00Z",
+  "apiOrigins": [
+    "https://api.cloudnote-sync.xyz",
+    "https://api.leviknet.org",
+    "https://leviknet.org",
+    "https://leviknet.com"
+  ],
+  "webOrigin": "https://leviknet.org",
+  "subscriptionOrigins": [
+    "https://sub.cloudnote-sync.xyz",
+    "https://sub.leviknet.org"
+  ],
+  "configUrls": [
+    "https://api.cloudnote-sync.xyz/downloads/config/levik-config-v1.json",
+    "https://api.leviknet.org/downloads/config/levik-config-v1.json",
+    "https://raw.githubusercontent.com/Nort321/levik-vpn/main/config/levik-config-v1.json",
+    "https://cdn.jsdelivr.net/gh/Nort321/levik-vpn@main/config/levik-config-v1.json"
+  ]
+}

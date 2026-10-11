@@ -96,16 +96,24 @@ describe("remote configuration", () => {
     expect(adviceCandidates(servers, null, protocol)).toHaveLength(3);
   });
 
-  it("asks anonymously and falls back to the second domain", async () => {
+  it("asks anonymously and falls back to the next host", async () => {
     const fetchImpl = vi.fn<typeof fetch>()
       .mockRejectedValueOnce(new TypeError("fetch failed"))
       .mockResolvedValueOnce(json(200, { ok: true, announcements: [] }));
     const result = await new RemoteConfigClient("windows", "1.4.0", fetchImpl).fetch();
     expect(result?.config.announcements).toEqual([]);
     const [target, init] = fetchImpl.mock.calls[1]!;
-    expect(target).toBe("https://leviknet.com/api/app/v1/config");
+    expect(target).toBe("https://api.leviknet.org/api/app/v1/config");
     expect(init).toMatchObject({ method: "GET", credentials: "omit", redirect: "error" });
     expect(init?.headers).toEqual({ Accept: "application/json", "X-Levik-Client": "windows/1.4.0" });
+  });
+
+  it("skips a host that does not serve the configuration", async () => {
+    const fetchImpl = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(json(404, {}))
+      .mockResolvedValueOnce(json(200, { ok: true, announcements: [] }));
+    expect(await new RemoteConfigClient("windows", "1.4.0", fetchImpl).fetch()).not.toBeNull();
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
   });
 
   it("does not repeat a rejected request on the other domain", async () => {

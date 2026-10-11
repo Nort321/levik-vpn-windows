@@ -1,7 +1,6 @@
 import type { QueuedSession } from "./telemetryQueue";
 import type { TelemetrySessionBody } from "./sessionRecorder";
-
-export const TELEMETRY_ORIGINS = ["https://leviknet.org", "https://leviknet.com"] as const;
+import { serviceEndpoints } from "../platform/serviceEndpoints";
 export const MAX_BATCH_SESSIONS = 20;
 export const MAX_BATCH_BYTES = 128 * 1024;
 const MAX_AGE_S = (31 + 7) * 24 * 60 * 60;
@@ -58,7 +57,7 @@ export class TelemetryClient {
   constructor(private readonly fetchImpl: Fetch = fetch) {}
 
   async send(body: string): Promise<SendOutcome> {
-    for (const origin of TELEMETRY_ORIGINS) {
+    for (const origin of serviceEndpoints().apiOrigins) {
       try {
         const response = await this.fetchImpl(new URL("/api/telemetry/v1/sessions", origin), {
           method: "POST",
@@ -84,7 +83,7 @@ export class TelemetryClient {
    * the tunnel is up; through the tunnel the server answers with null.
    */
   async networkToken(): Promise<NetworkToken | null> {
-    for (const origin of TELEMETRY_ORIGINS) {
+    for (const origin of serviceEndpoints().apiOrigins) {
       try {
         const response = await this.fetchImpl(new URL("/api/telemetry/v1/network", origin), {
           method: "GET",
