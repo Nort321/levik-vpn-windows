@@ -31,6 +31,21 @@ describe("telemetry codes", () => {
     expect(classifyCoreLogLine("[Info] accepted tcp:example.com:443")).toBeNull();
   });
 
+  it("separates resolver failures from routine DNS lines", () => {
+    expect(classifyCoreLogLine("[Warning] app/dns: failed to lookup ip for domain example.com at server DOH//1.1.1.1 > empty response")).toBe("dns_empty");
+    expect(classifyCoreLogLine("[Warning] app/dns: failed to lookup ip for domain example.com at server DOH//1.1.1.1 > context deadline exceeded")).toBe("dns_failed");
+    expect(classifyCoreLogLine("[Warning] [7] proxy/freedom: failed to open connection > dial tcp: lookup example.com: no such host")).toBe("dns_failed");
+    expect(classifyCoreLogLine("[Info] app/dns: DOH//1.1.1.1 got answer: example.com. TypeAAAA -> [], rtt: 59ms")).toBeNull();
+    expect(classifyCoreLogLine("[Warning] [3] app/dispatcher: failed to route [levik-dns-out] > connection closed")).toBe("other");
+  });
+
+  it("classifies core start failures and crashes printed without a level", () => {
+    expect(classifyCoreLogLine("Failed to start: main: failed to create server > app/proxyman/inbound: failed to listen TCP on 47186 > listen tcp 127.0.0.1:47186: bind: An attempt was made to access a socket in a way forbidden by its access permissions.")).toBe("port_unavailable");
+    expect(classifyCoreLogLine("Failed to start: main: failed to create server > proxy/tun: failed to create tun device")).toBe("tun_failed");
+    expect(classifyCoreLogLine("Failed to start: main: failed to load config files")).toBe("core_start");
+    expect(classifyCoreLogLine("panic: runtime error: invalid memory address or nil pointer dereference")).toBe("core_panic");
+  });
+
   it("maps socket errors and servers to contract values", () => {
     expect(probeErrorCode(Object.assign(new Error("x"), { code: "ECONNRESET" }))).toBe("reset");
     expect(probeErrorCode(Object.assign(new Error("x"), { code: "ERR_TLS_CERT_ALTNAME_INVALID" }))).toBe("tls");

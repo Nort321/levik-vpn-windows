@@ -128,6 +128,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
   private tunnelHealthTimer: ReturnType<typeof setInterval> | null = null;
   private tunnelHealthCheckRunning = false;
   private tunnelHealthFailures = 0;
+  private coreFailure: string | null = null;
   private readonly failedServerIds = new Set<string>();
   private trafficDownloadOffset = 0;
   private trafficUploadOffset = 0;
@@ -911,7 +912,9 @@ export class AppController extends EventEmitter<AppControllerEvents> {
   private handleCoreLog(line: string): void {
     this.addLog(line);
     const code = classifyCoreLogLine(line);
-    if (code) this.telemetry.record((session) => session.coreLog(code));
+    if (!code) return;
+    if (CORE_FAILURE_CODES.has(code)) this.coreFailure = code;
+    this.telemetry.record((session) => session.coreLog(code));
   }
 
   private handleXrayExit(code: number | null, expected: boolean): void {
@@ -920,6 +923,20 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     if (expected || this.state.status !== "connected" || !this.lastConfig) return;
     this.recoveryReason = "core_exited";
     this.beginTunnelRecovery(`Туннель остановлен (код ${code ?? "?"}). Восстановление…`);
+  }
+
+  /**
+   * Some networks drop UDP, which TUIC and Hysteria2 need. With a manually
+   * chosen server the app keeps the user's choice and only suggests another.
+   */
+  private suggestServerOutsideUdp(): void {
+    const server = this.selectedServer();
+    if (!server || this.state.settings.automaticServer || this.reconnectAttempts < 2) return;
+    if (!UDP_PROTOCOLS.has(protocolOf(server))) return;
+    const alternative = this.bestServer(this.state.servers.filter((candidate) => !UDP_PROTOCOLS.has(protocolOf(candidate))));
+    this.patch({
+      statusDetail: `${server.name} не отвечает: похоже, эта сеть блокирует UDP.${alternative ? ` Попробуйте сервер ${alternative.name}.` : " Попробуйте другой сервер."}`,
+    });
   }
 
   private beginTunnelRecovery(detail: string, cause: AttemptCause | null = null): void {
@@ -998,6 +1015,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
           if (this.state.selectedServerId) this.failedServerIds.add(this.state.selectedServerId);
           this.addLog(`Переподключение: ${messageOf(error)}`);
           this.scheduleTunnelRestore(Math.min(30_000, 1_000 * 2 ** Math.min(++this.reconnectAttempts, 5)));
+          this.suggestServerOutsideUdp();
         }
       }).catch((error: unknown) => this.addLog(`Восстановление туннеля: ${messageOf(error)}`));
     }, delayMs);
@@ -1189,12 +1207,15 @@ export class AppController extends EventEmitter<AppControllerEvents> {
   /** Records an attempt; the returned progress names the step that failed. */
   private recordAttempt(server: TunnelServer, cause: AttemptCause): AttemptProgress {
     this.telemetry.record((session) => session.attempt(server.name, protocolOf(server), cause));
+    this.coreFailure = null;
     let stage: AttemptStage = "tun";
     let code = "helper_failed";
+    // Why the core could not start or died, when it said so in its output.
+    const detailed = () => stage !== "profile" && stage !== "tun" && this.coreFailure ? `${code}:${this.coreFailure}` : code;
     return {
-      get code() { return code; },
+      get code() { return detailed(); },
       reach: (nextStage, nextCode) => { stage = nextStage; code = nextCode; },
-      fail: () => this.telemetry.record((session) => session.attemptFailed(stage, code)),
+      fail: () => this.telemetry.record((session) => session.attemptFailed(stage, detailed())),
     };
   }
 
@@ -1242,8 +1263,12 @@ interface AttemptProgress {
   fail(): void;
 }
 
+const UDP_PROTOCOLS: ReadonlySet<string> = new Set(["tuic", "hysteria2"]);
+const CORE_FAILURE_CODES: ReadonlySet<string> = new Set(["port_unavailable", "tun_failed", "core_start", "core_panic"]);
+
+// Development runs are the developer's tests, not users' connections.
 function telemetryAllowed(settings: AppSettings): boolean {
-  return settings.connectionTelemetry && settings.telemetryNoticeShown;
+  return app.isPackaged && settings.connectionTelemetry && settings.telemetryNoticeShown;
 }
 
 function sessionSettings(settings: AppSettings): SessionSettings {

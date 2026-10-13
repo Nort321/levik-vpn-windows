@@ -214,9 +214,13 @@ export function bindXrayOutboundInterface(
         // Explicit direct binding also uses the destination address family for
         // UDP sockets. sendThrough would unnecessarily pin a DHCP IP/family.
         outbound.streamSettings = { sockopt: { interface: interfaceName } };
+        // An IPv6 answer would only produce an unroutable direct dial.
+        if (!ipv6 && isRecord(outbound.settings)) outbound.settings.domainStrategy = "UseIPv4";
       }
     }
   }
+  // Without IPv6 every AAAA query is a wasted round trip with an empty answer.
+  if (!ipv6 && isRecord(bound.dns)) bound.dns.queryStrategy = "UseIPv4";
   return bound;
 }
 

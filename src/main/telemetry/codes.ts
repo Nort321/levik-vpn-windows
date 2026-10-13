@@ -28,6 +28,8 @@ export function probeErrorCode(error: unknown): string {
 }
 
 const CORE_LOG_PATTERNS: ReadonlyArray<readonly [RegExp, string]> = [
+  [/only one usage of each socket address|address already in use|access a socket in a way forbidden/i, "port_unavailable"],
+  [/wintun|tun device|failed to (create|open|start) tun/i, "tun_failed"],
   [/reality/i, "reality_verify_failed"],
   [/no recent network activity|idle timeout/i, "quic_idle_timeout"],
   [/handshake did not complete|crypto_error|quic.*handshake/i, "quic_handshake"],
@@ -36,23 +38,30 @@ const CORE_LOG_PATTERNS: ReadonlyArray<readonly [RegExp, string]> = [
   [/connection refused|actively refused/i, "dial_refused"],
   [/connection reset|forcibly closed|broken pipe|wsarecv|wsasend/i, "conn_reset"],
   [/closed pipe|use of closed network connection/i, "closed_pipe"],
-  [/no such host|failed to (resolve|lookup)|lookup .* (failed|timeout)|dns/i, "dns_failed"],
+  // An empty answer (an AAAA query without IPv6) differs from a failed lookup.
+  [/empty response/i, "dns_empty"],
+  [/no such host|failed to (resolve|lookup)|lookup .* (failed|timeout)|app\/dns/i, "dns_failed"],
   [/i\/o timeout|deadline exceeded|timed? ?out/i, "dial_timeout"],
 ];
 
 const SEVERITY = /\[(warning|error)\]|\b(WARN|ERROR|FATAL)\b/i;
 const FAILURE = /fail|error|timeout|timed out|refused|reset|closed|invalid|reject|unauthori/i;
+// Xray prints why it could not start, and Go prints a crash, without a level.
+const CORE_START_FAILURE = /\bFailed to start:/;
+const CORE_CRASH = /\bpanic:|\bfatal error:/;
 
 /**
  * Xray ("[Warning] ...") and sing-box ("ERROR ...") problem lines reduced to a
  * code. Informational lines, including Xray's own start banner, return null.
  */
 export function classifyCoreLogLine(line: string): string | null {
-  if (!SEVERITY.test(line) || !FAILURE.test(line)) return null;
+  if (CORE_CRASH.test(line)) return "core_panic";
+  const startFailure = CORE_START_FAILURE.test(line);
+  if (!startFailure && (!SEVERITY.test(line) || !FAILURE.test(line))) return null;
   for (const [pattern, code] of CORE_LOG_PATTERNS) {
     if (pattern.test(line)) return code;
   }
-  return "other";
+  return startFailure ? "core_start" : "other";
 }
 
 /** Adapter names are localized and user-editable, so this is a best guess. */

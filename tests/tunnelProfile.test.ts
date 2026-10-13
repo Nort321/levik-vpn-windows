@@ -231,6 +231,7 @@ describe("Windows tunnel profile", () => {
     });
     expect(outbounds.find((outbound) => outbound.tag === "levik-block")).toEqual({ tag: "levik-block", protocol: "blackhole", settings: {} });
     expect(inbounds[0]?.settings.gateway).toEqual(["10.89.0.1/30", "fdfe:89::1/126"]);
+    expect(bound.dns).toMatchObject({ queryStrategy: "UseIP" });
     expect(config).toEqual(original);
   });
 
@@ -241,8 +242,12 @@ describe("Windows tunnel profile", () => {
     })), "subscription-1");
     const config = buildXrayConfig(profile, profile.servers[0]!, settings);
     const original = structuredClone(config);
-    const inbounds = bindXrayOutboundInterface(config, "Ethernet", false).inbounds as Array<{ settings: Record<string, unknown> }>;
+    const bound = bindXrayOutboundInterface(config, "Ethernet", false);
+    const inbounds = bound.inbounds as Array<{ settings: Record<string, unknown> }>;
+    const outbounds = bound.outbounds as Array<Record<string, unknown>>;
     expect(inbounds[0]?.settings.gateway).toEqual(["10.89.0.1/30"]);
+    expect(bound.dns).toMatchObject({ queryStrategy: "UseIPv4" });
+    expect(outbounds.find((outbound) => outbound.tag === "direct")?.settings).toEqual({ domainStrategy: "UseIPv4" });
     expect(inbounds[0]?.settings.autoSystemRoutingTable).toEqual(["0.0.0.0/1", "128.0.0.0/1"]);
     expect(inbounds[0]?.settings.autoOutboundsInterface).toBe("Ethernet");
     expect(config).toEqual(original);

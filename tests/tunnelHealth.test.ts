@@ -153,6 +153,37 @@ describe("VPN end-to-end health probe", () => {
     expect(onFailure).toHaveBeenCalledWith(["no_vpn_network", "timeout"]);
   });
 
+  it("waits during startup for a core whose local listener opens late", async () => {
+    const refused = () => Object.assign(new Error("refused"), { code: "ECONNREFUSED" });
+    const pending = isTunnelHealthy({ startup: true });
+    requests[0]!.emit("error", refused());
+    await vi.advanceTimersByTimeAsync(500);
+    requests[1]!.emit("error", refused());
+    await vi.advanceTimersByTimeAsync(500);
+    expect(requests).toHaveLength(3);
+    expect(requests[2]!.listenerCount("connect")).toBe(1);
+    establishProxy(2);
+    tlsSockets[0]!.emit("secureConnect");
+    await expect(pending).resolves.toBe(true);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("gives up on a startup listener that never opens", async () => {
+    const onFailure = vi.fn();
+    const pending = isTunnelHealthy({ startup: true, onFailure });
+    let answered = 0;
+    while (vi.getTimerCount() > 0 || answered < requests.length) {
+      for (; answered < requests.length; answered++) {
+        requests[answered]!.emit("error", Object.assign(new Error("refused"), { code: "ECONNREFUSED" }));
+      }
+      await vi.advanceTimersByTimeAsync(500);
+    }
+    await expect(pending).resolves.toBe(false);
+    expect(onFailure.mock.calls[0]![0]).toEqual(["no_vpn_network", "no_vpn_network", "no_vpn_network", "no_vpn_network"]);
+    expect(requests.length).toBeGreaterThan(20);
+    expect(requests.length).toBeLessThan(40);
+  });
+
   it("fails safely when the local listener is unavailable", async () => {
     const pending = isTunnelHealthy();
     requests[0]!.emit("error", new Error("ECONNREFUSED"));

@@ -513,6 +513,46 @@ describe("AppController connection telemetry", () => {
     expect(body.timeline.at(-1)).toMatchObject({ e: "attempt_failed", stage: "core", code: "core_start_failed" });
   });
 
+  it("names the reason the core gave for not starting", async () => {
+    const { controller, xray } = tunnelController();
+    const current = await withTelemetry(controller);
+    xray.start.mockImplementationOnce(async () => {
+      Reflect.apply(Reflect.get(controller, "handleCoreLog"), controller, [
+        "Failed to start: main: failed to create server > listen tcp 127.0.0.1:47186: bind: An attempt was made to access a socket in a way forbidden by its access permissions.",
+      ]);
+      throw new Error("startup failed");
+    });
+    await expect(controller.connect()).rejects.toThrow("startup failed");
+    await vi.waitFor(() => expect(current.http.send).toHaveBeenCalled());
+    const [request] = current.http.send.mock.calls.at(-1) as unknown as [string];
+    const body = (JSON.parse(request) as { sessions: ReturnType<SessionRecorder["snapshot"]>[] }).sessions[0]!;
+    expect(body).toMatchObject({ end: { by: "error", code: "core_start_failed:port_unavailable" } });
+    expect(body.timeline.at(-1)).toMatchObject({ e: "attempt_failed", stage: "core", code: "core_start_failed:port_unavailable" });
+  });
+
+  it("suggests a TCP server when a manually chosen UDP server keeps failing", () => {
+    const controller = new AppController();
+    const profile = prepareTunnelProfile(Buffer.from(JSON.stringify({
+      version: 1, profileId: "udp", subscriptionId: "sub", issuedAt: new Date().toISOString(),
+      source: {
+        mediaType: "text/plain",
+        content: "hysteria2://secret@hy.example:443?sni=hy.example#Hysteria2\nvless://11111111-1111-4111-8111-111111111111@tcp.example:443#Prime",
+      },
+    })), "sub");
+    const [udp, tcp] = profile.servers;
+    if (!udp || !tcp) throw new Error("Missing test servers");
+    const state = controller.snapshot();
+    Reflect.set(controller, "state", {
+      ...state, servers: profile.servers, selectedServerId: udp.id,
+      serverLatencies: { [tcp.id]: 30 }, settings: { ...state.settings, automaticServer: false },
+    });
+    Reflect.set(controller, "reconnectAttempts", 2);
+    Reflect.apply(Reflect.get(controller, "suggestServerOutsideUdp"), controller, []);
+    expect(controller.snapshot().statusDetail).toContain("блокирует UDP");
+    expect(controller.snapshot().statusDetail).toContain("Prime");
+    expect(controller.snapshot().selectedServerId).toBe(udp.id);
+  });
+
   it("marks a server change as a switch within the same session", async () => {
     const { controller, second } = tunnelController();
     const current = await withTelemetry(controller);

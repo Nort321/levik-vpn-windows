@@ -5,6 +5,10 @@ import { probeErrorCode } from "../telemetry/codes";
 
 export const TUNNEL_HEALTH_PORT = 47186;
 export const TUNNEL_HEALTH_TAG = "levik-health";
+// Xray opens its local listeners late when an antivirus scans it on start or
+// the disk is slow; a refused connection then means "not yet", not "broken".
+const STARTUP_LISTENER_WAIT_MS = 12_000;
+const STARTUP_LISTENER_POLL_MS = 500;
 
 // A local stats reply or successful upstream TCP accept does not prove that the
 // VPN can carry traffic. Complete a verified TLS handshake through its outbound.
@@ -16,19 +20,29 @@ export async function isTunnelHealthy(options: {
 } = {}): Promise<boolean> {
   const shouldContinue = options.shouldContinue ?? (() => true);
   const codes: string[] = [];
+  const listenerDeadline = Date.now() + (options.startup ? STARTUP_LISTENER_WAIT_MS : 0);
   // Newly created Windows routes and upstream transports can settle later than
   // the local listener. Retry readiness once without restarting a viable core.
   for (let attempt = 0; attempt < (options.startup ? 2 : 1); attempt++) {
-    if (attempt > 0) await new Promise<void>((resolve) => setTimeout(resolve, 1_000));
+    if (attempt > 0) await sleep(1_000);
     for (const host of ["cloudflare-dns.com", "www.google.com"]) {
       if (!shouldContinue()) return false;
-      const failure = await probeTunnel(host);
+      let failure = await probeTunnel(host);
+      while (failure === "no_vpn_network" && Date.now() < listenerDeadline) {
+        await sleep(STARTUP_LISTENER_POLL_MS);
+        if (!shouldContinue()) return false;
+        failure = await probeTunnel(host);
+      }
       if (failure === null) return shouldContinue();
       codes.push(failure);
     }
   }
   if (codes.length && shouldContinue()) options.onFailure?.(codes);
   return false;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise<void>((resolve) => setTimeout(resolve, ms));
 }
 
 /** Resolves null when the tunnel works, otherwise a telemetry failure code. */
