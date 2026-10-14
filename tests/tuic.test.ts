@@ -14,7 +14,7 @@ const PASSWORD = "_EnbjPjIrpPjymZ63JYDPCUY7WN9ZvWv";
 const settings: AppSettings = {
   routingMode: "bypassRu", automaticServer: true, autoReconnect: true, killSwitch: true, useDoh: true,
   dnsServer: "1.1.1.1", theme: "dark", launchAtLogin: false, autoConnectOnLaunch: false, closeToTray: true,
-  showTrayIcon: true, preventDnsLeaks: true, favoriteServerIds: [], antiDpiEnabled: true,
+  showTrayIcon: true, preventDnsLeaks: true, favoriteServerIds: [], favoriteNodes: null, antiDpiEnabled: true,
   antiDpiPackets: "tlshello", antiDpiLength: "100-200", antiDpiInterval: "10-20",
   splitTunnelMode: "off", splitTunnelProcesses: [],
   connectionTelemetry: false, telemetryNoticeShown: false, syncSettings: false,

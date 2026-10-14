@@ -127,7 +127,7 @@ describe("settings sync", () => {
   const settings = {
     routingMode: "global", automaticServer: true, autoReconnect: true, killSwitch: true, useDoh: true,
     dnsServer: "1.1.1.1", theme: "system", launchAtLogin: false, autoConnectOnLaunch: false, closeToTray: true,
-    preventDnsLeaks: true, favoriteServerIds: [], antiDpiEnabled: false, antiDpiPackets: "tlshello",
+    preventDnsLeaks: true, favoriteServerIds: [], favoriteNodes: null, antiDpiEnabled: false, antiDpiPackets: "tlshello",
     antiDpiLength: "100-200", antiDpiInterval: "10-20", splitTunnelMode: "off", splitTunnelProcesses: [],
     connectionTelemetry: true, telemetryNoticeShown: true, syncSettings: true,
   } satisfies AppSettings;

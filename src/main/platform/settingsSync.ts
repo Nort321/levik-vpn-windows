@@ -1,8 +1,10 @@
 import type { AppSettings } from "../../shared/contracts";
+import { isCanonicalNodeList } from "./favoriteNodes";
 
 /**
  * Settings that mean the same thing in every Levik VPN app, docs/app-platform.md.
- * Split tunnelling, DNS, theme, autostart and favourites stay on this computer.
+ * Split tunnelling, DNS, theme and autostart stay on this computer; favourites
+ * travel as node ids (favoriteNodes.ts).
  */
 export const SYNCED_KEYS = [
   "routingMode",
@@ -14,6 +16,7 @@ export const SYNCED_KEYS = [
   "antiDpiPackets",
   "antiDpiLength",
   "antiDpiInterval",
+  "favoriteNodes",
 ] as const;
 
 export type SyncedKey = (typeof SYNCED_KEYS)[number];
@@ -38,6 +41,8 @@ export function isPortable(key: SyncedKey, value: unknown): boolean {
     case "antiDpiLength":
     case "antiDpiInterval":
       return typeof value === "string" && value.length <= 16 && RANGE.test(value);
+    case "favoriteNodes":
+      return typeof value === "string" && isCanonicalNodeList(value);
     default:
       return typeof value === "boolean";
   }
@@ -51,11 +56,15 @@ export function portableSettings(settings: AppSettings): SyncedSettings {
   return result as SyncedSettings;
 }
 
-/** The shared fields the user just changed. */
+/**
+ * The shared fields the user just changed. A field that had no shareable value
+ * before (favourites before their first reconcile) is not an edit: the next
+ * exchange joins it with the account.
+ */
 export function syncedChanges(before: AppSettings, after: AppSettings): SyncedSettings {
   const result: Record<string, unknown> = {};
   for (const key of SYNCED_KEYS) {
-    if (before[key] !== after[key] && isPortable(key, after[key])) result[key] = after[key];
+    if (before[key] !== after[key] && isPortable(key, before[key]) && isPortable(key, after[key])) result[key] = after[key];
   }
   return result as SyncedSettings;
 }

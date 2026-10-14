@@ -15,7 +15,7 @@ const settings: AppSettings = {
   autoConnectOnLaunch: false,
   closeToTray: true,
   preventDnsLeaks: true,
-  favoriteServerIds: [],
+  favoriteServerIds: [], favoriteNodes: null,
   antiDpiEnabled: false,
   antiDpiPackets: "tlshello",
   antiDpiLength: "100-200",

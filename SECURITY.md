@@ -6,7 +6,7 @@ Only the latest signed Levik VPN for Windows release is supported.
 
 ## Reporting a vulnerability
 
-Do not disclose suspected vulnerabilities publicly. Contact the Levik VPN owner through the private support channel listed at https://leviknet.com.
+Do not disclose suspected vulnerabilities publicly. Contact the Levik VPN owner through the private support channel listed at https://leviknet.org.
 
 Never include access tokens, decrypted VPN profiles, private keys, or packet captures containing personal data in a report.
 

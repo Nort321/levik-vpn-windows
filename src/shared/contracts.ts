@@ -91,6 +91,8 @@ export interface AppSettings {
   closeToTray: boolean;
   preventDnsLeaks: boolean;
   favoriteServerIds: string[];
+  /** The account's favourite node list as last reconciled; null before the first reconcile. */
+  favoriteNodes: string | null;
   antiDpiEnabled: boolean;
   antiDpiPackets: string;
   antiDpiLength: string;
