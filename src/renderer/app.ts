@@ -1,4 +1,4 @@
-import type { AppSettings, AppSnapshot, AppTab, TunnelServer, WindowsProcess } from "../shared/contracts";
+import type { AppSettings, AppSnapshot, AppTab, TunnelServer, WindowsProcess, PendingApproval } from "../shared/contracts";
 import { activeVariant, groupServers, serverProtocolShortLabel, type ServerGroup } from "../shared/serverGroups";
 import { shouldShowLogin } from "../shared/sessionState";
 import { mergeProcessList, normalizeProcessSelection, processStatusLabel, resolveProcessCompanions, sortProcessList } from "../shared/processes";
@@ -9,10 +9,18 @@ const SUPPORT_CHAT_URL = "https://t.me/leviksupportbot";
 let state: AppSnapshot | null = null;
 let activeTab: AppTab = "home";
 let loginWaiting = false;
+/** The main process reported this sign-in as pending; when it stops, the attempt is over. */
+let loginSeenPending = false;
 let loginMode: "browser" | "qr" = "browser";
 let authorizationUri: string | null = null;
 let authorizationCode: string | null = null;
 let authorizationQrSvg: string | null = null;
+let authorizationMatch: number | null = null;
+let authorizationTelegramUri: string | null = null;
+let approvalRequested = false;
+/** Approvals hidden with "Later"; they stay pending on the server. */
+const hiddenApprovals = new Set<string>();
+let answeringApproval = false;
 let authorizationRetryTimer: ReturnType<typeof setTimeout> | null = null;
 let showProcessDialog = false;
 let processDialogLoading = false;
@@ -44,7 +52,8 @@ window.levik.onNavigate((tab) => {
 
 window.levik.onSnapshot((snapshot) => {
   state = snapshot;
-  if (snapshot.sessionAvailable) clearLoginWaiting();
+  if (loginWaiting && snapshot.loginPending) loginSeenPending = true;
+  if (snapshot.sessionAvailable || (loginWaiting && loginSeenPending && !snapshot.loginPending)) clearLoginWaiting();
   const nextSnapshotKey = snapshotRenderKey(snapshot);
   if (renderedSnapshotKey === nextSnapshotKey) {
     updateLiveData();
@@ -97,9 +106,11 @@ function render(preserveScroll = true): void {
     </div>
     ${showProcessDialog ? renderProcessDialog() : ""}
     ${devicesSubscriptionId ? renderDevicesDialog(devicesSubscriptionId) : ""}
-    ${supportDialog ? renderSupportDialog(supportDialog) : ""}`;
+    ${supportDialog ? renderSupportDialog(supportDialog) : ""}
+    ${renderApprovalDialog()}`;
   bindCommonEvents();
   bindPageEvents();
+  bindApprovalDialog();
   applyProgressWidths();
   applyProcessFilter();
   applyServerFilter();
@@ -123,15 +134,20 @@ function renderLogin(): void {
           <div class="login-qr" role="img" aria-label="QR-код для входа">${authorizationQrSvg ?? `<span class="spinner"></span>`}</div>
           ${authorizationCode ? `<div class="login-code">${escapeHtml(authorizationCode)}</div>` : ""}
           <p class="login-qr-caption">Если у вас уже выполнен вход на другом устройстве, отсканируйте этот QR-код приложением Levik VPN для быстрого входа</p>
+          ${renderLoginMatch()}
           <button class="button login-secondary" id="cancel-login-button">${icon("close")} Отмена</button>
         ` : `<button class="button primary login-primary" id="login-button" ${state?.busy || loginWaiting ? "disabled" : ""}>
           ${state?.busy ? `<span class="spinner"></span>` : icon("login")} ${loginWaiting ? "Ожидание подтверждения…" : "Войти через Levik Account"}
         </button>
-        ${loginWaiting && authorizationUri ? `<button class="button compact login-secondary" id="reopen-login-button">${icon("external")} Повторно открыть подтверждение</button>` : ""}
+        ${loginWaiting ? renderLoginMatch() : ""}
+        ${loginWaiting && authorizationUri ? `<button class="button compact login-secondary" id="reopen-login-button">${icon("external")} ${approvalRequested ? "Подтвердить в браузере" : "Повторно открыть подтверждение"}</button>` : ""}
         ${!loginWaiting ? `<button class="button login-secondary" id="qr-login-button">${icon("qr")} Вход по QR-коду</button>` : ""}`}
-        <div class="login-status">${escapeHtml(state?.statusDetail ?? (loginWaiting ? "Завершите вход в открывшемся браузере" : ""))}</div>
+        <div class="login-status">${escapeHtml(state?.statusDetail ?? (loginWaiting && !authorizationMatch ? "Завершите вход в открывшемся браузере" : ""))}</div>
       </section>
     </main>`;
+  document.getElementById("telegram-login-button")?.addEventListener("click", () => {
+    if (authorizationTelegramUri) void run(() => window.levik.openExternal(authorizationTelegramUri as string));
+  });
   document.getElementById("login-button")?.addEventListener("click", () => void beginLogin("browser"));
   document.getElementById("qr-login-button")?.addEventListener("click", () => void beginLogin("qr"));
   document.getElementById("cancel-login-button")?.addEventListener("click", () => {
@@ -335,6 +351,74 @@ function renderDevicesDialog(subscriptionId: string): string {
   return `<div class="dialog-backdrop" id="devices-dialog-backdrop"><section class="process-dialog card" role="dialog" aria-modal="true" aria-labelledby="devices-dialog-title"><header class="dialog-header"><div><h2 id="devices-dialog-title">Подключённые устройства</h2><p>Занято слотов: ${subscription.devices.used} из ${subscription.devices.limit}</p></div><button class="button icon-button" id="close-devices-dialog" aria-label="Закрыть">${icon("close")}</button></header><div class="device-list">${subscription.devices.items.length ? subscription.devices.items.map((device) => `<div class="device-row"><span class="process-icon">${icon("devices")}</span><span class="process-copy"><span class="process-name">${escapeHtml(device.label)}</span><span class="process-path">${escapeHtml(device.id)}</span></span>${subscription.actions.revokeDevice ? `<button class="button compact danger" data-revoke-device-id="${escapeAttribute(device.id)}" data-revoke-subscription-id="${escapeAttribute(subscription.uuid)}">${icon("unlink")} Отвязать</button>` : ""}</div>`).join("") : `<div class="empty">Активных устройств нет</div>`}</div><footer class="dialog-actions"><button class="button" id="close-devices-dialog-footer">Закрыть</button></footer></section></div>`;
 }
 
+/** The number of a sign-in in progress and the ways to approve it. */
+function renderLoginMatch(): string {
+  if (!authorizationMatch) return "";
+  const hint = approvalRequested
+    ? "Откройте Levik VPN на телефоне или другом компьютере: там уже ждёт запрос. Выберите это число."
+    : "Подтвердите вход в браузере, в Telegram или в Levik VPN на другом устройстве и выберите это число.";
+  return `<div class="login-match" aria-live="polite">
+    <span class="login-match-label">Число для подтверждения</span>
+    <div class="login-match-number" aria-label="Число ${authorizationMatch}">${authorizationMatch}</div>
+    <p class="login-match-hint">${hint}</p>
+    ${authorizationTelegramUri ? `<button class="button compact login-secondary" id="telegram-login-button">${icon("external")} Подтвердить в Telegram</button>` : ""}
+  </div>`;
+}
+
+function visibleApproval(): PendingApproval | null {
+  const now = Date.now();
+  return state?.pendingApprovals.find((approval) => !hiddenApprovals.has(approval.id) && Date.parse(approval.expiresAt) > now) ?? null;
+}
+
+function renderApprovalDialog(): string {
+  const approval = visibleApproval();
+  if (!approval) return "";
+  const numbers = approval.choices.map((choice) => `<button class="button approval-number" data-approval-number="${choice}" ${answeringApproval ? "disabled" : ""} aria-label="Число ${choice}">${choice}</button>`).join("");
+  return `<div class="dialog-backdrop"><section class="process-dialog approval-dialog card" role="alertdialog" aria-modal="true" aria-labelledby="approval-title" aria-describedby="approval-text" data-approval-id="${escapeAttribute(approval.id)}">
+    <header class="dialog-header"><div><h2 id="approval-title">Вход на новом устройстве</h2><p>${escapeHtml(approval.platformLabel)} · ${escapeHtml(approval.deviceName)}</p></div></header>
+    <p class="approval-text" id="approval-text">Выберите число, которое сейчас показано на этом устройстве. Если вход начинали не вы, нажмите «Это не я» — устройство не получит доступ.</p>
+    <div class="approval-numbers">${numbers}</div>
+    <footer class="dialog-actions"><button class="button" id="approval-later" ${answeringApproval ? "disabled" : ""}>Позже</button><span class="dialog-spacer"></span><button class="button danger" id="approval-decline" ${answeringApproval ? "disabled" : ""}>Это не я</button></footer>
+  </section></div>`;
+}
+
+async function answerApproval(id: string, number: number | null): Promise<void> {
+  answeringApproval = true;
+  render();
+  try {
+    const result = await window.levik.answerApproval(id, number);
+    hiddenApprovals.add(id);
+    showToast(result === "approved" ? "Вход подтверждён" : "Вход отменён: устройство не получит доступ");
+  } catch (error) {
+    showToast(error instanceof Error ? error.message : String(error));
+  } finally {
+    answeringApproval = false;
+    render();
+  }
+}
+
+function bindApprovalDialog(): void {
+  const dialog = document.querySelector<HTMLElement>(".approval-dialog");
+  const id = dialog?.dataset.approvalId;
+  if (!dialog || !id) return;
+  dialog.querySelectorAll<HTMLButtonElement>("[data-approval-number]").forEach((button) => {
+    button.addEventListener("click", () => void answerApproval(id, Number(button.dataset.approvalNumber)));
+  });
+  document.getElementById("approval-decline")?.addEventListener("click", () => void answerApproval(id, null));
+  document.getElementById("approval-later")?.addEventListener("click", () => {
+    hiddenApprovals.add(id);
+    render();
+  });
+  dialog.addEventListener("keydown", (event) => {
+    if (event.key !== "Escape" || answeringApproval) return;
+    event.preventDefault();
+    hiddenApprovals.add(id);
+    render();
+  });
+  // A modal question: keep the keyboard on it across re-renders.
+  if (!dialog.contains(document.activeElement)) dialog.querySelector<HTMLButtonElement>("[data-approval-number]")?.focus({ preventScroll: true });
+}
+
 function renderSupportDialog(dialog: { creating: boolean; url: string | null }): string {
   const content = dialog.url
     ? `<p class="support-dialog-text">Ссылка скопирована. Вставьте её в чат поддержки и опишите, что произошло. Открыть отчёт можно один раз в течение 7 дней.</p>
@@ -535,17 +619,22 @@ async function beginLogin(mode: "browser" | "qr"): Promise<void> {
     const challenge = await window.levik.login(mode === "browser");
     authorizationUri = challenge.verificationUri;
     authorizationCode = challenge.verificationCode;
+    authorizationMatch = challenge.matchNumber;
+    authorizationTelegramUri = challenge.telegramUri;
+    approvalRequested = challenge.approvalRequested;
+    if (state?.loginPending) loginSeenPending = true;
     authorizationQrSvg = mode === "qr"
       ? await QRCode.toString(challenge.verificationUri, { type: "svg", width: 232, margin: 1 })
       : null;
     render();
     if (mode === "browser" && authorizationRetryTimer) clearTimeout(authorizationRetryTimer);
-    if (mode === "browser") {
-    authorizationRetryTimer = setTimeout(() => {
-      if (state && shouldShowLogin(state) && loginWaiting && authorizationUri) {
-        void run(() => window.levik.openExternal(authorizationUri as string));
-      }
-    }, 7_500);
+    // The user's other apps were asked: the browser opens only on request.
+    if (mode === "browser" && !approvalRequested) {
+      authorizationRetryTimer = setTimeout(() => {
+        if (state && shouldShowLogin(state) && loginWaiting && authorizationUri) {
+          void run(() => window.levik.openExternal(authorizationUri as string));
+        }
+      }, 7_500);
     }
   } catch (error) {
     clearLoginWaiting();
@@ -559,6 +648,10 @@ function clearLoginWaiting(): void {
   authorizationUri = null;
   authorizationCode = null;
   authorizationQrSvg = null;
+  authorizationMatch = null;
+  authorizationTelegramUri = null;
+  approvalRequested = false;
+  loginSeenPending = false;
   if (authorizationRetryTimer) clearTimeout(authorizationRetryTimer);
   authorizationRetryTimer = null;
 }

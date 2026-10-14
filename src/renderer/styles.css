@@ -350,6 +350,14 @@ select option { color: var(--text); background-color: var(--select-bg); }
 .activation-controls { display: flex; gap: 10px; }
 .activation-controls input { min-width: 0; flex: 1; height: 42px; padding: 0 12px; border: 1px solid var(--border); border-radius: 10px; color: var(--text); background: var(--select-bg); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .04em; text-transform: uppercase; }
 .activation-controls .button { flex: none; }
+.login-match { margin-top: 18px; padding: 16px 14px 14px; border: 1px solid var(--border); border-radius: 16px; background: var(--select-bg); }
+.login-match-label { display: block; color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .08em; }
+.login-match-number { margin-top: 4px; color: var(--text); font-size: 56px; font-weight: 800; line-height: 1.05; font-variant-numeric: tabular-nums; }
+.login .login-match-hint { margin: 8px 0 0; font-size: 12px; line-height: 1.45; }
+.approval-dialog { width: min(440px, 100%); }
+.approval-text { margin: 16px 2px 0; color: var(--muted); font-size: 13px; line-height: 1.5; }
+.approval-numbers { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin: 18px 0 4px; }
+.button.approval-number { min-height: 64px; justify-content: center; font-size: 26px; font-weight: 800; font-variant-numeric: tabular-nums; }
 
 .dialog-backdrop { position: fixed; inset: 0; z-index: 20; display: grid; place-items: center; padding: 24px; background: var(--dialog-backdrop, rgba(2,7,14,.72)); backdrop-filter: blur(12px); }
 .process-dialog { width: min(620px, 100%); max-height: min(760px, 86vh); padding: 20px; display: flex; flex-direction: column; overflow: hidden; }

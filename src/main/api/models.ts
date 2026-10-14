@@ -7,13 +7,29 @@ export interface AuthChallengeResponse {
   verificationUriComplete?: string | null;
   pollIntervalSeconds: number;
   expiresAt: string;
+  matchNumber?: number;
+  approvalRequested?: boolean;
+  telegramUriComplete?: string;
 }
 
 export interface AuthStatusResponse {
   ok: boolean;
-  state: "pending" | "authenticated" | "expired" | "denied";
+  /** "declined": someone picked a wrong number or said it was not them. */
+  state: "pending" | "authenticated" | "expired" | "denied" | "declined";
   pollIntervalSeconds?: number;
   accessToken?: string | null;
+  accountHint?: string;
+}
+
+export interface ApprovalsResponse {
+  ok: boolean;
+  /** Checked by parseApprovals. */
+  approvals: unknown;
+}
+
+export interface ApprovalDecisionResponse {
+  ok: boolean;
+  state: "approved" | "declined";
 }
 
 export interface MobileAccountResponse {

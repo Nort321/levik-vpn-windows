@@ -128,6 +128,10 @@ export interface AppSnapshot {
   announcements: AppAnnouncement[];
   /** When the shared settings last matched the account. */
   settingsSyncedAt: number | null;
+  /** Sign-ins on the user's other devices waiting for this app to approve them. */
+  pendingApprovals: PendingApproval[];
+  /** A sign-in started on this computer is waiting for approval. */
+  loginPending: boolean;
   update: {
     status: UpdateStatus;
     version: string | null;
@@ -140,13 +144,32 @@ export interface LoginChallenge {
   verificationUri: string;
   verificationCode: string | null;
   expiresAt: string;
+  /** Shown large: the user picks it on a signed-in device, in Telegram or on the website. */
+  matchNumber: number | null;
+  /** The bot asks for the number there. */
+  telegramUri: string | null;
+  /** The account this computer was signed in to was asked on its other apps. */
+  approvalRequested: boolean;
 }
+
+export interface PendingApproval {
+  id: string;
+  deviceName: string;
+  platformLabel: string;
+  /** Three numbers; the new device shows one of them. */
+  choices: number[];
+  expiresAt: string;
+}
+
+export type ApprovalAnswerResult = "approved" | "declined";
 
 export interface LevikDesktopApi {
   snapshot(): Promise<AppSnapshot>;
   login(openExternal?: boolean): Promise<LoginChallenge>;
   cancelLogin(): Promise<void>;
   logout(): Promise<void>;
+  /** A number of the approval's choices, or null for "this is not me". */
+  answerApproval(id: string, number: number | null): Promise<ApprovalAnswerResult>;
   refreshAccount(): Promise<void>;
   selectSubscription(subscriptionId: string): Promise<void>;
   selectServer(serverId: string): Promise<void>;
@@ -197,6 +220,7 @@ export const IPC = {
   createSupportReport: "levik:create-support-report",
   dismissAnnouncement: "levik:dismiss-announcement",
   openCabinet: "levik:open-cabinet",
+  answerApproval: "levik:answer-approval",
   snapshotChanged: "levik:snapshot-changed",
   navigate: "levik:navigate",
 } as const;

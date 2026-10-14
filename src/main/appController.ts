@@ -9,12 +9,14 @@ import type {
   AppSettings,
   AppSnapshot,
   AppTab,
+  ApprovalAnswerResult,
   CabinetTarget,
   LoginChallenge,
+  PendingApproval,
   TunnelServer,
   TuicEndpoint,
 } from "../shared/contracts";
-import { isAuthenticationRejected, MobileApiClient } from "./api/mobileApiClient";
+import { isAuthenticationRejected, MobileApiClient, MobileApiError } from "./api/mobileApiClient";
 import type { AuthChallengeResponse, MobileAccountResponse } from "./api/models";
 import { DeviceIdentity } from "./security/deviceIdentity";
 import type { SerializedIdentity } from "./security/deviceIdentity";
@@ -61,6 +63,7 @@ import {
 import type { SyncedSettings } from "./platform/settingsSync";
 import { LiveEvents, presenceReport, samePresence } from "./platform/liveEvents";
 import type { LiveEvent, PresenceReport } from "./platform/liveEvents";
+import { isAccountHint, isApprovalAnswer, isTelegramLink, matchNumber, parseApprovals } from "./platform/loginApproval";
 import {
   canonicalNodeList,
   isCanonicalNodeList,
@@ -179,6 +182,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
   private sentPresence: PresenceReport | null = null;
   private sentPresenceAt = 0;
   private presenceTimer: ReturnType<typeof setTimeout> | null = null;
+  private approvalsTimer: ReturnType<typeof setTimeout> | null = null;
   private presenceKeepalive: ReturnType<typeof setInterval> | null = null;
   private presenceChain: Promise<void> = Promise.resolve();
   private lastAccountCheckAt = 0;
@@ -206,6 +210,8 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     busy: true,
     update: { status: "idle", version: null, progress: null, message: null },
     announcements: [],
+    pendingApprovals: [],
+    loginPending: false,
     settingsSyncedAt: null,
   };
 
@@ -312,8 +318,11 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     let generation = this.loginGeneration;
     this.patch({ busy: true, statusDetail: null });
     try {
+      const accountHint = await this.loadString("account_hint");
       const challenge = await this.api.createChallenge({
         accountActivationSupported: true,
+        numberMatchSupported: true,
+        ...(isAccountHint(accountHint) ? { accountHint } : {}),
         publicKeySpki: this.identity.publicKeySpkiBase64Url(),
         deviceLabel: "Levik VPN for Windows",
         deviceModel: `${platform()} ${process.arch}`.slice(0, 128),
@@ -327,10 +336,14 @@ export class AppController extends EventEmitter<AppControllerEvents> {
       void this.pollLogin(challenge, generation);
       const verificationUri = challenge.activationUriComplete ?? challenge.verificationUriComplete;
       if (!verificationUri) throw new Error("Сервер не вернул ссылку авторизации");
+      const telegramUri = challenge.telegramUriComplete;
       return {
         verificationUri,
         verificationCode: challenge.activationCode ?? challenge.verificationCode ?? null,
         expiresAt: challenge.expiresAt,
+        matchNumber: matchNumber(challenge.matchNumber),
+        telegramUri: typeof telegramUri === "string" && isTelegramLink(telegramUri) ? telegramUri : null,
+        approvalRequested: challenge.approvalRequested === true,
       };
     } finally {
       if (generation === this.loginGeneration) this.patch({ busy: false });
@@ -339,7 +352,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
 
   cancelLogin(): void {
     this.loginGeneration += 1;
-    this.patch({ busy: false, statusDetail: null });
+    this.patch({ busy: false, statusDetail: null, loginPending: false });
   }
 
   async logout(): Promise<void> {
@@ -679,6 +692,16 @@ export class AppController extends EventEmitter<AppControllerEvents> {
   }
 
   private async pollLogin(challenge: AuthChallengeResponse, generation: number): Promise<void> {
+    this.patch({ loginPending: true });
+    try {
+      await this.waitForLogin(challenge, generation);
+    } finally {
+      // The sign-in screen offers to start again once this attempt is over.
+      if (generation === this.loginGeneration) this.patch({ loginPending: false });
+    }
+  }
+
+  private async waitForLogin(challenge: AuthChallengeResponse, generation: number): Promise<void> {
     let intervalSeconds = clamp(challenge.pollIntervalSeconds, 2, 10);
     const expiresAt = Date.parse(challenge.expiresAt);
     while (generation === this.loginGeneration && Date.now() < expiresAt) {
@@ -688,6 +711,10 @@ export class AppController extends EventEmitter<AppControllerEvents> {
         const status = await this.api.pollStatus(challenge.loginToken);
         intervalSeconds = clamp(status.pollIntervalSeconds ?? intervalSeconds, 2, 10);
         if (status.state === "pending") continue;
+        if (status.state === "declined") {
+          this.patch({ statusDetail: "Вход отменён: выбрано другое число или нажато «Это не я»" });
+          return;
+        }
         if (status.state !== "authenticated" || !status.accessToken) {
           this.patch({ statusDetail: status.state === "denied" ? "Вход отклонён" : "Срок входа истёк" });
           return;
@@ -695,6 +722,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
         if (status.accessToken.length < 32 || status.accessToken.length > 4_096) throw new Error("Некорректная сессия");
         this.accessToken = status.accessToken;
         await this.secureStore.put("access_token", Buffer.from(status.accessToken));
+        if (isAccountHint(status.accountHint)) await this.secureStore.put("account_hint", Buffer.from(status.accountHint));
         this.patch({ sessionAvailable: true });
         this.startLiveEvents();
         try {
@@ -768,6 +796,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     switch (event) {
       case "ready":
       case "resync":
+        void this.refreshApprovals();
         void this.syncSettingsNow();
         void this.refreshRemoteConfig();
         void this.checkAccount();
@@ -784,6 +813,53 @@ export class AppController extends EventEmitter<AppControllerEvents> {
         break;
       case "presence":
         break;
+      case "approvals":
+        void this.refreshApprovals();
+        break;
+    }
+  }
+
+  /** Fetches sign-ins waiting for approval; a new one also gets a notification. */
+  private async refreshApprovals(): Promise<void> {
+    if (!this.accessToken) return;
+    if (this.approvalsTimer) clearTimeout(this.approvalsTimer);
+    this.approvalsTimer = null;
+    let approvals: PendingApproval[];
+    try {
+      approvals = parseApprovals((await this.withSession((token) => this.api.approvals(token))).approvals);
+    } catch (error) {
+      this.addLog(`Запросы на вход: ${messageOf(error)}`);
+      return;
+    }
+    const known = new Set(this.state.pendingApprovals.map((approval) => approval.id));
+    this.patch({ pendingApprovals: approvals });
+    for (const approval of approvals) {
+      if (known.has(approval.id)) continue;
+      this.emit("notify", {
+        title: "Подтвердите вход в Levik VPN",
+        body: `${approval.platformLabel} · ${approval.deviceName}. Выберите число, которое показано на этом устройстве.`,
+        tab: "home",
+      });
+    }
+    // Drop each request when it expires, even without another event.
+    const next = Math.min(...approvals.map((approval) => Date.parse(approval.expiresAt)));
+    if (Number.isFinite(next)) {
+      this.approvalsTimer = setTimeout(() => void this.refreshApprovals(), Math.max(1_000, next - Date.now() + 1_000));
+    }
+  }
+
+  async answerApproval(id: string, number: number | null): Promise<ApprovalAnswerResult> {
+    const approval = this.state.pendingApprovals.find((item) => item.id === id);
+    if (!approval || !isApprovalAnswer(approval, number)) throw new Error("Запрос на вход уже обработан или истёк");
+    try {
+      const response = await this.withSession((token) => this.api.decideApproval(token, id, number));
+      return response.state === "approved" ? "approved" : "declined";
+    } catch (error) {
+      if (error instanceof MobileApiError && error.status === 404) throw new Error("Запрос на вход уже обработан или истёк");
+      throw error;
+    } finally {
+      this.patch({ pendingApprovals: this.state.pendingApprovals.filter((item) => item.id !== id) });
+      void this.refreshApprovals();
     }
   }
 
@@ -1067,6 +1143,8 @@ export class AppController extends EventEmitter<AppControllerEvents> {
 
   private async clearLocalSession(statusDetail: string | null): Promise<void> {
     this.liveEvents?.stop();
+    if (this.approvalsTimer) clearTimeout(this.approvalsTimer);
+    this.approvalsTimer = null;
     this.sentPresence = null;
     this.accessToken = null;
     this.profile = null;
@@ -1091,6 +1169,8 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     ]);
     this.patch({
       settingsSyncedAt: null,
+      pendingApprovals: [],
+      loginPending: false,
       sessionAvailable: false,
       account: null,
       servers: [],

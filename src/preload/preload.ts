@@ -7,6 +7,7 @@ const api: LevikDesktopApi = {
   login: (openExternal = true) => ipcRenderer.invoke(IPC.login, openExternal),
   cancelLogin: () => ipcRenderer.invoke(IPC.cancelLogin),
   logout: () => ipcRenderer.invoke(IPC.logout),
+  answerApproval: (id: string, number: number | null) => ipcRenderer.invoke(IPC.answerApproval, id, number),
   refreshAccount: () => ipcRenderer.invoke(IPC.refreshAccount),
   selectSubscription: (subscriptionId) => ipcRenderer.invoke(IPC.selectSubscription, subscriptionId),
   selectServer: (serverId) => ipcRenderer.invoke(IPC.selectServer, serverId),

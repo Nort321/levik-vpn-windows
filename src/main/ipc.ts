@@ -11,11 +11,18 @@ export function registerIpc(controller: AppController, window: BrowserWindow): v
   ipcMain.handle(IPC.login, async (_event, shouldOpenExternal: unknown = true) => {
     if (typeof shouldOpenExternal !== "boolean") throw new Error("Некорректный способ входа");
     const challenge = await controller.beginLogin();
-    if (shouldOpenExternal) await openAllowedExternal(challenge.verificationUri);
+    // A remembered account is asked on its other apps first; the browser stays a fallback.
+    if (shouldOpenExternal && !challenge.approvalRequested) await openAllowedExternal(challenge.verificationUri);
     return challenge;
   });
   ipcMain.handle(IPC.cancelLogin, () => controller.cancelLogin());
   ipcMain.handle(IPC.logout, () => controller.logout());
+  ipcMain.handle(IPC.answerApproval, (_event, id: unknown, number: unknown) => {
+    if (typeof id !== "string" || (number !== null && typeof number !== "number")) {
+      throw new Error("Некорректный ответ на запрос входа");
+    }
+    return controller.answerApproval(id, number);
+  });
   ipcMain.handle(IPC.refreshAccount, () => controller.refreshAccount());
   ipcMain.handle(IPC.selectSubscription, (_event, subscriptionId: unknown) => {
     if (typeof subscriptionId !== "string") throw new Error("Некорректная подписка");

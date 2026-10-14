@@ -1,4 +1,6 @@
 import type {
+  ApprovalDecisionResponse,
+  ApprovalsResponse,
   AuthChallengeResponse,
   AuthStatusResponse,
   MobileAccountResponse,
@@ -40,6 +42,14 @@ export class MobileApiClient {
 
   pollStatus(loginToken: string): Promise<AuthStatusResponse> {
     return this.request("POST", "/api/mobile/v1/auth/status", { loginToken }, null);
+  }
+
+  approvals(accessToken: string): Promise<ApprovalsResponse> {
+    return this.request("GET", "/api/mobile/v1/approvals", null, accessToken);
+  }
+
+  decideApproval(accessToken: string, id: string, number: number | null): Promise<ApprovalDecisionResponse> {
+    return this.request("POST", "/api/mobile/v1/approvals", { id, number }, accessToken);
   }
 
   account(accessToken: string): Promise<MobileAccountResponse> {
