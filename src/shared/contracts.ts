@@ -104,6 +104,8 @@ export interface AppSettings {
   telemetryNoticeShown: boolean;
   /** Share routing, protection and Anti-DPI settings with the user's other apps. */
   syncSettings: boolean;
+  /** Show this computer as online on the devices page and in the user's other apps. */
+  sharePresence: boolean;
 }
 
 export interface AppSnapshot {

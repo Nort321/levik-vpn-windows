@@ -129,13 +129,13 @@ describe("settings sync", () => {
     dnsServer: "1.1.1.1", theme: "system", launchAtLogin: false, autoConnectOnLaunch: false, closeToTray: true,
     preventDnsLeaks: true, favoriteServerIds: [], favoriteNodes: null, antiDpiEnabled: false, antiDpiPackets: "tlshello",
     antiDpiLength: "100-200", antiDpiInterval: "10-20", splitTunnelMode: "off", splitTunnelProcesses: [],
-    connectionTelemetry: true, telemetryNoticeShown: true, syncSettings: true,
+    connectionTelemetry: true, telemetryNoticeShown: true, syncSettings: true, sharePresence: true,
   } satisfies AppSettings;
 
   it("shares only portable fields", () => {
     expect(portableSettings({ ...settings, antiDpiPackets: "1,2" })).toEqual({
       routingMode: "global", automaticServer: true, autoReconnect: true, killSwitch: true, useDoh: true,
-      antiDpiEnabled: false, antiDpiLength: "100-200", antiDpiInterval: "10-20",
+      antiDpiEnabled: false, antiDpiLength: "100-200", antiDpiInterval: "10-20", sharePresence: true,
     });
     expect(syncedChanges(settings, { ...settings, killSwitch: false, theme: "dark", dnsServer: "8.8.8.8" })).toEqual({ killSwitch: false });
   });

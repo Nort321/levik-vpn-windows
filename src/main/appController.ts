@@ -59,6 +59,8 @@ import {
   withoutConfirmed,
 } from "./platform/settingsSync";
 import type { SyncedSettings } from "./platform/settingsSync";
+import { LiveEvents, presenceReport, samePresence } from "./platform/liveEvents";
+import type { LiveEvent, PresenceReport } from "./platform/liveEvents";
 import {
   canonicalNodeList,
   isCanonicalNodeList,
@@ -79,6 +81,9 @@ const BACKGROUND_TICK_MS = 5 * 60_000;
 const ACCOUNT_CHECK_INTERVAL_MS = 6 * 60 * 60_000;
 const SETTINGS_SYNC_INTERVAL_MS = 30 * 60_000;
 const SETTINGS_PUSH_DELAY_MS = 1_500;
+/** The server forgets a device three minutes after its last report. */
+const PRESENCE_REFRESH_MS = 2 * 60_000;
+const PRESENCE_DEBOUNCE_MS = 1_500;
 const LINK_REFRESH_INTERVAL_MS = 30_000;
 /** Signed host list: checked twice a day, and at most once a minute when every host fails. */
 const ENDPOINTS_REFRESH_MS = 12 * 60 * 60_000;
@@ -107,6 +112,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   connectionTelemetry: true,
   telemetryNoticeShown: false,
   syncSettings: true,
+  sharePresence: true,
 };
 
 const SETTINGS_SCHEMA_VERSION = 2;
@@ -168,6 +174,13 @@ export class AppController extends EventEmitter<AppControllerEvents> {
   private settingsSyncChain: Promise<void> = Promise.resolve();
   private settingsPushTimer: ReturnType<typeof setTimeout> | null = null;
   private backgroundTimer: ReturnType<typeof setInterval> | null = null;
+  private liveEvents: LiveEvents | null = null;
+  /** What the server holds for this computer; null when it holds nothing. */
+  private sentPresence: PresenceReport | null = null;
+  private sentPresenceAt = 0;
+  private presenceTimer: ReturnType<typeof setTimeout> | null = null;
+  private presenceKeepalive: ReturnType<typeof setInterval> | null = null;
+  private presenceChain: Promise<void> = Promise.resolve();
   private lastAccountCheckAt = 0;
   private lastSettingsSyncAt = 0;
   private lastLinkRefreshAt = 0;
@@ -224,6 +237,13 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     this.xray.on("log", (line) => this.handleCoreLog(line));
     this.xray.on("exit", (code, expected) => this.handleXrayExit(code, expected));
     this.xray.on("stats", (downloadBytes, uploadBytes) => this.handleTrafficStats(downloadBytes, uploadBytes));
+    this.liveEvents = new LiveEvents(
+      (signal) => this.api.openEvents(this.requireToken(), signal),
+      isAuthenticationRejected,
+    );
+    this.liveEvents.on("event", (event) => this.handleLiveEvent(event));
+    // The stream does not clear the session itself; a regular request decides.
+    this.liveEvents.on("unauthorized", () => void this.checkAccount(true));
     this.accessToken = await this.loadString("access_token");
     this.state.sessionAvailable = this.accessToken !== null;
     this.state.settings = await this.loadSettings();
@@ -259,6 +279,8 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     void this.refreshRemoteConfig();
     void this.endpointsStore.refresh();
     this.backgroundTimer = setInterval(() => void this.backgroundTick(), BACKGROUND_TICK_MS);
+    this.presenceKeepalive = setInterval(() => this.reportPresenceSoon(), PRESENCE_REFRESH_MS);
+    this.startLiveEvents();
     if (this.accessToken) {
       try {
         await this.refreshAccount();
@@ -325,6 +347,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     await this.stopConnection("user", "user");
     const token = this.accessToken;
     if (token) {
+      await this.withdrawPresence();
       try {
         await this.api.logout(token);
       } catch (error) {
@@ -514,6 +537,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     if (previous.favoriteNodes !== next.favoriteNodes || previous.favoriteServerIds.join("\0") !== next.favoriteServerIds.join("\0")) {
       await this.reconcileFavorites();
     }
+    if (previous.sharePresence !== next.sharePresence) this.reportPresenceSoon(true);
     if (telemetryAllowed(previous) !== telemetryAllowed(next)) await this.telemetry.setEnabled(telemetryAllowed(next));
     this.telemetry.record((session) => session.updateSettings(sessionSettings(next)));
     if (!previous.automaticServer && next.automaticServer) void this.pingServers();
@@ -534,6 +558,9 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     this.tunnelHealthTimer = null;
     if (this.backgroundTimer) clearInterval(this.backgroundTimer);
     this.backgroundTimer = null;
+    this.stopPresence();
+    this.liveEvents?.stop();
+    await Promise.race([this.withdrawPresence(), delay(2_000)]);
     // Unsent setting changes are kept on disk and sent after the next start.
     if (this.settingsPushTimer) clearTimeout(this.settingsPushTimer);
     this.settingsPushTimer = null;
@@ -669,6 +696,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
         this.accessToken = status.accessToken;
         await this.secureStore.put("access_token", Buffer.from(status.accessToken));
         this.patch({ sessionAvailable: true });
+        this.startLiveEvents();
         try {
           await this.refreshAccount();
         } catch (error) {
@@ -711,19 +739,94 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     if (!stored || now - stored.fetchedAt >= stored.config.refreshAfterSeconds * 1_000) await this.refreshRemoteConfig();
     else await this.updateAnnouncements();
     if (!this.accessToken) return;
-    if (now - this.lastAccountCheckAt >= ACCOUNT_CHECK_INTERVAL_MS) {
-      try {
-        const response = await this.withSession((token) => this.api.account(token));
-        this.lastAccountCheckAt = Date.now();
-        this.patch({ account: mapAccount(response) });
-        await this.checkExpiry();
-      } catch (error) {
-        this.addLog(`Проверка подписки: ${messageOf(error)}`);
-      }
-    }
+    if (now - this.lastAccountCheckAt >= ACCOUNT_CHECK_INTERVAL_MS) await this.checkAccount();
+    if (!this.liveEvents?.active) this.startLiveEvents();
     if (Object.keys(this.pendingSync).length || now - this.lastSettingsSyncAt >= SETTINGS_SYNC_INTERVAL_MS) {
       await this.syncSettingsNow();
     }
+  }
+
+  private async checkAccount(force = false): Promise<void> {
+    if (!this.accessToken) return;
+    if (!force && Date.now() - this.lastAccountCheckAt < 10_000) return;
+    try {
+      const response = await this.withSession((token) => this.api.account(token));
+      this.lastAccountCheckAt = Date.now();
+      this.patch({ account: mapAccount(response) });
+      await this.checkExpiry();
+    } catch (error) {
+      this.addLog(`Проверка подписки: ${messageOf(error)}`);
+    }
+  }
+
+  private startLiveEvents(): void {
+    if (this.accessToken) this.liveEvents?.start();
+  }
+
+  /** docs/app-platform.md "Live events": every event names what to fetch again. */
+  private handleLiveEvent(event: LiveEvent): void {
+    switch (event) {
+      case "ready":
+      case "resync":
+        void this.syncSettingsNow();
+        void this.refreshRemoteConfig();
+        void this.checkAccount();
+        this.reportPresenceSoon(true);
+        break;
+      case "settings":
+        void this.syncSettingsNow();
+        break;
+      case "config":
+        void this.refreshRemoteConfig();
+        break;
+      case "devices":
+        void this.checkAccount(true);
+        break;
+      case "presence":
+        break;
+    }
+  }
+
+  /** Coalesces state changes; "force" also repeats an unchanged report. */
+  private reportPresenceSoon(force = false): void {
+    // Only between initialize() and shutdown().
+    if (!this.presenceKeepalive) return;
+    if (this.presenceTimer) clearTimeout(this.presenceTimer);
+    this.presenceTimer = setTimeout(() => {
+      this.presenceTimer = null;
+      this.presenceChain = this.presenceChain.then(() => this.sendPresence(force)).catch((error: unknown) => {
+        this.addLog(`Статус устройства: ${messageOf(error)}`);
+      });
+    }, PRESENCE_DEBOUNCE_MS);
+  }
+
+  private async sendPresence(force: boolean): Promise<void> {
+    if (!this.accessToken) return;
+    if (!this.state.settings.sharePresence) {
+      await this.withdrawPresence();
+      return;
+    }
+    const report = presenceReport(this.state.status, this.selectedServer());
+    const fresh = Date.now() - this.sentPresenceAt < PRESENCE_REFRESH_MS - 10_000;
+    if (!force && fresh && samePresence(this.sentPresence, report)) return;
+    const result = await this.withSession((token) => this.api.reportPresence(token, report));
+    this.sentPresence = result.shared ? report : null;
+    this.sentPresenceAt = Date.now();
+  }
+
+  /** Best effort: the server forgets this computer on its own three minutes later. */
+  private async withdrawPresence(): Promise<void> {
+    const token = this.accessToken;
+    if (!token || !this.sentPresence) return;
+    this.sentPresence = null;
+    await this.api.clearPresence(token).catch(() => {});
+  }
+
+  private stopPresence(): void {
+    if (this.presenceTimer) clearTimeout(this.presenceTimer);
+    this.presenceTimer = null;
+    if (this.presenceKeepalive) clearInterval(this.presenceKeepalive);
+    this.presenceKeepalive = null;
   }
 
   private refreshRemoteConfig(): Promise<void> {
@@ -963,6 +1066,8 @@ export class AppController extends EventEmitter<AppControllerEvents> {
   }
 
   private async clearLocalSession(statusDetail: string | null): Promise<void> {
+    this.liveEvents?.stop();
+    this.sentPresence = null;
     this.accessToken = null;
     this.profile = null;
     this.lastConfig = null;
@@ -1325,12 +1430,14 @@ export class AppController extends EventEmitter<AppControllerEvents> {
   }
 
   private patch(patch: Partial<AppSnapshot>): void {
-    if (patch.status && patch.status !== this.state.status) {
+    const statusChanged = patch.status !== undefined && patch.status !== this.state.status;
+    if (patch.status && statusChanged) {
       const detail = patch.statusDetail ?? null;
       this.diskLog?.write(`Состояние: ${patch.status}${detail ? ` — ${detail}` : ""}`);
     }
     this.state = { ...this.state, ...patch };
     this.emitChanged();
+    if (statusChanged) this.reportPresenceSoon();
   }
 
   private emitChanged(): void {
@@ -1428,6 +1535,8 @@ function validateSettings(value: AppSettings): AppSettings {
     connectionTelemetry: Boolean(value.connectionTelemetry),
     telemetryNoticeShown: Boolean(value.telemetryNoticeShown),
     syncSettings: Boolean(value.syncSettings),
+    // Settings saved before this field existed mean "on".
+    sharePresence: value.sharePresence !== false,
   };
 }
 

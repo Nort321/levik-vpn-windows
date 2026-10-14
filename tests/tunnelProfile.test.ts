@@ -24,7 +24,7 @@ const settings: AppSettings = {
   splitTunnelProcesses: [],
   connectionTelemetry: false,
   telemetryNoticeShown: false,
-  syncSettings: false,
+  syncSettings: false, sharePresence: true,
 };
 
 describe("Windows tunnel profile", () => {

@@ -17,6 +17,7 @@ export const SYNCED_KEYS = [
   "antiDpiLength",
   "antiDpiInterval",
   "favoriteNodes",
+  "sharePresence",
 ] as const;
 
 export type SyncedKey = (typeof SYNCED_KEYS)[number];

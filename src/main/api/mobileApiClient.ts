@@ -7,6 +7,9 @@ import type {
   WebHandoffResponse,
 } from "./models";
 import { RequestSigner } from "../security/requestSigner";
+import type { PresenceReport } from "../platform/liveEvents";
+
+type SignedRequest = ReturnType<RequestSigner["sign"]>;
 import { ApiEndpoints } from "./apiEndpoints";
 
 export class MobileApiError extends Error {
@@ -78,13 +81,60 @@ export class MobileApiClient {
     return this.request("PUT", "/api/mobile/v1/settings", { changes }, accessToken);
   }
 
+  /** This computer is online; whether its VPN is on and through which server. */
+  async reportPresence(accessToken: string, report: PresenceReport): Promise<{ shared: boolean }> {
+    const response = await this.request<{ ok: true; shared?: unknown }>(
+      "PUT", "/api/mobile/v1/presence", { ...report }, accessToken,
+    );
+    return { shared: response.shared !== false };
+  }
+
+  async clearPresence(accessToken: string): Promise<void> {
+    await this.request("DELETE", "/api/mobile/v1/presence", null, accessToken);
+  }
+
+  /** Live hints for this account (liveEvents.ts). The caller aborts the stream. */
+  async openEvents(accessToken: string, signal: AbortSignal): Promise<ReadableStream<Uint8Array>> {
+    const origin = await this.endpoints.resolve();
+    const url = new URL("/api/mobile/v1/events", origin);
+    const signed = this.signer.sign("GET", url.pathname, accessToken, Buffer.alloc(0));
+    const response = await fetch(url, {
+      method: "GET",
+      redirect: "error",
+      signal,
+      headers: { ...this.headers(signed, accessToken), Accept: "text/event-stream" },
+    });
+    if (response.status === 401) throw new MobileApiError("Сессия истекла. Войдите снова.", 401, true);
+    const contentType = response.headers.get("content-type") ?? "";
+    if (!response.ok || !response.body || !contentType.toLowerCase().startsWith("text/event-stream")) {
+      await response.body?.cancel().catch(() => {});
+      throw new MobileApiError("Канал событий недоступен", response.status);
+    }
+    return response.body;
+  }
+
   /** A one-time link that opens the website signed in to the same account. */
   webHandoff(accessToken: string, target: string): Promise<WebHandoffResponse> {
     return this.request("POST", "/api/mobile/v1/web-handoff", { target }, accessToken);
   }
 
+  private headers(signed: SignedRequest, accessToken: string | null): Record<string, string> {
+    return {
+      Accept: "application/json",
+      "Accept-Language": "ru-RU,ru;q=0.9,en;q=0.8",
+      "User-Agent": `LevikVPN-Windows/${this.version}`,
+      "X-Levik-App-Version": this.version,
+      "X-Levik-Client": `windows/${this.version}`,
+      "X-Levik-Device-Id": signed.deviceId,
+      "X-Levik-Timestamp": String(signed.timestamp),
+      "X-Levik-Nonce": signed.nonce,
+      "X-Levik-Signature": signed.signature,
+      ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
+    };
+  }
+
   private async request<Response>(
-    method: "GET" | "POST" | "PUT",
+    method: "GET" | "POST" | "PUT" | "DELETE",
     path: string,
     payload: Record<string, unknown> | null,
     accessToken: string | null,
@@ -94,7 +144,7 @@ export class MobileApiClient {
     catch { throw new MobileApiError("Не удалось связаться с Levik VPN"); }
     const url = new URL(path, origin);
     if (url.origin !== origin.origin) throw new Error("Cross-origin API request rejected");
-    const hasBody = method !== "GET";
+    const hasBody = method === "POST" || method === "PUT";
     const body = hasBody ? Buffer.from(JSON.stringify(payload ?? {})) : Buffer.alloc(0);
     const signed = this.signer.sign(method, url.pathname, accessToken, body);
     const controller = new AbortController();
@@ -105,17 +155,8 @@ export class MobileApiClient {
         redirect: "error",
         signal: controller.signal,
         headers: {
-          Accept: "application/json",
-          "Accept-Language": "ru-RU,ru;q=0.9,en;q=0.8",
-          "User-Agent": `LevikVPN-Windows/${this.version}`,
-          "X-Levik-App-Version": this.version,
-          "X-Levik-Client": `windows/${this.version}`,
-          "X-Levik-Device-Id": signed.deviceId,
-          "X-Levik-Timestamp": String(signed.timestamp),
-          "X-Levik-Nonce": signed.nonce,
-          "X-Levik-Signature": signed.signature,
+          ...this.headers(signed, accessToken),
           ...(hasBody ? { "Content-Type": "application/json" } : {}),
-          ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
         },
       };
       if (hasBody) requestInit.body = body;
