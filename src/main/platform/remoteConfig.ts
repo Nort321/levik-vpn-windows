@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import type { AppAnnouncement } from "../../shared/contracts";
+import { parseMaintenance, type MaintenanceWindow } from "./maintenance";
 import { serviceEndpoints } from "./serviceEndpoints";
 
 /**
@@ -27,6 +28,8 @@ export interface RemoteConfig {
   flags: Record<string, RemoteFlag>;
   announcements: AppAnnouncement[];
   protocols: ProtocolAdvice | null;
+  /** Planned work on servers, by node id. */
+  maintenance: MaintenanceWindow[];
   refreshAfterSeconds: number;
 }
 
@@ -67,7 +70,13 @@ export function parseRemoteConfig(value: unknown): RemoteConfig | null {
   const announcements = Array.isArray(value.announcements)
     ? value.announcements.slice(0, 20).flatMap((item) => parseAnnouncement(item) ?? [])
     : [];
-  return { flags, announcements, protocols: parseAdvice(value.protocols), refreshAfterSeconds: refresh };
+  return {
+    flags,
+    announcements,
+    protocols: parseAdvice(value.protocols),
+    maintenance: parseMaintenance(value.maintenance),
+    refreshAfterSeconds: refresh,
+  };
 }
 
 function parseAnnouncement(value: unknown): AppAnnouncement | null {

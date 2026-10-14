@@ -49,6 +49,12 @@ describe("remote configuration", () => {
       flags: { new_picker: { enabled: true, rolloutPercent: 150 }, "Bad-Key": { enabled: true } },
       announcements: [ANNOUNCEMENT, { ...ANNOUNCEMENT, id: "x" }, { ...ANNOUNCEMENT, id: "1b8f5f0e-7d1c-4d6f-9b6a-1d8f0e2a3b4c", linkUrl: "javascript:alert(1)" }],
       protocols: { preferred: ["hysteria2", "<script>"], avoid: ["vless-reality"] },
+      maintenance: [
+        { nodeId: "n1142bf5571df2373ffb23", startsAt: "2026-10-14T12:30:00Z", endsAt: "2026-10-14T13:30:00Z" },
+        { nodeId: "fi1.example.net", startsAt: "2026-10-14T12:30:00Z", endsAt: "2026-10-14T13:30:00Z" },
+        { nodeId: "n1142bf5571df2373ffb23", startsAt: "2026-10-14T12:30:00Z", endsAt: "2026-10-14T12:00:00Z" },
+        { nodeId: "n1142bf5571df2373ffb23", startsAt: "2026-10-14T12:30:00Z", endsAt: "2026-10-16T12:30:00Z" },
+      ],
     });
     expect(config).toEqual({
       flags: { new_picker: { enabled: true, rolloutPercent: 100 } },
@@ -57,6 +63,9 @@ describe("remote configuration", () => {
         { ...ANNOUNCEMENT, id: "1b8f5f0e-7d1c-4d6f-9b6a-1d8f0e2a3b4c", linkUrl: null, startsAt: Date.parse(ANNOUNCEMENT.startsAt), endsAt: Date.parse(ANNOUNCEMENT.endsAt) },
       ],
       protocols: { preferred: ["hysteria2"], avoid: ["vless-reality"] },
+      maintenance: [
+        { nodeId: "n1142bf5571df2373ffb23", startsAt: Date.parse("2026-10-14T12:30:00Z"), endsAt: Date.parse("2026-10-14T13:30:00Z") },
+      ],
       refreshAfterSeconds: 300,
     });
     expect(parseRemoteConfig({ ok: false })).toBeNull();

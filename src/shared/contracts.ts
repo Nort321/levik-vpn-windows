@@ -117,6 +117,8 @@ export interface AppSnapshot {
   account: AccountSummary | null;
   servers: TunnelServer[];
   serverLatencies: Record<string, number | null>;
+  /** Servers going into maintenance: server id → end of the work (ms since epoch). */
+  serverMaintenance: Record<string, number>;
   selectedServerId: string | null;
   selectedSubscriptionId: string | null;
   settings: AppSettings;

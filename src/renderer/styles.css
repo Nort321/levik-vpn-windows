@@ -284,6 +284,7 @@ select option { color: var(--text); background-color: var(--select-bg); }
 .server-copy { min-width: 0; flex: 1; }
 .server-name { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-weight: 650; }
 .server-meta { display: block; color: var(--muted); font-size: 12px; margin-top: 5px; }
+.server-maintenance { display: block; color: var(--warning); font-size: 12px; font-weight: 600; margin-top: 4px; }
 .radio { width: 18px; height: 18px; border: 2px solid var(--muted); border-radius: 50%; }
 .selected .radio { border-color: var(--blue); box-shadow: inset 0 0 0 4px var(--surface-strong); background: var(--blue); }
 

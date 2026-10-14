@@ -67,11 +67,13 @@ import { isAccountHint, isApprovalAnswer, isTelegramLink, matchNumber, parseAppr
 import {
   canonicalNodeList,
   isCanonicalNodeList,
+  nodeIdForServer,
   parseNodeList,
   reconcileFavorites,
   serversByNode,
   unionNodeLists,
 } from "./platform/favoriteNodes";
+import { avoidMaintenance, IdleMeter, maintenanceFor, maintenanceMove } from "./platform/maintenance";
 
 interface AppControllerEvents {
   changed: [snapshot: AppSnapshot];
@@ -81,6 +83,8 @@ interface AppControllerEvents {
 }
 
 const BACKGROUND_TICK_MS = 5 * 60_000;
+/** How often a connected app checks whether its server goes into maintenance. */
+const MAINTENANCE_CHECK_MS = 15_000;
 const ACCOUNT_CHECK_INTERVAL_MS = 6 * 60 * 60_000;
 const SETTINGS_SYNC_INTERVAL_MS = 30 * 60_000;
 const SETTINGS_PUSH_DELAY_MS = 1_500;
@@ -177,6 +181,9 @@ export class AppController extends EventEmitter<AppControllerEvents> {
   private settingsSyncChain: Promise<void> = Promise.resolve();
   private settingsPushTimer: ReturnType<typeof setTimeout> | null = null;
   private backgroundTimer: ReturnType<typeof setInterval> | null = null;
+  private maintenanceTimer: ReturnType<typeof setInterval> | null = null;
+  private maintenanceMoving = false;
+  private readonly idleMeter = new IdleMeter();
   private liveEvents: LiveEvents | null = null;
   /** What the server holds for this computer; null when it holds nothing. */
   private sentPresence: PresenceReport | null = null;
@@ -200,6 +207,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     account: null,
     servers: [],
     serverLatencies: {},
+    serverMaintenance: {},
     selectedServerId: null,
     selectedSubscriptionId: null,
     settings: DEFAULT_SETTINGS,
@@ -285,6 +293,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     void this.refreshRemoteConfig();
     void this.endpointsStore.refresh();
     this.backgroundTimer = setInterval(() => void this.backgroundTick(), BACKGROUND_TICK_MS);
+    this.maintenanceTimer = setInterval(() => void this.checkMaintenance(), MAINTENANCE_CHECK_MS);
     this.presenceKeepalive = setInterval(() => this.reportPresenceSoon(), PRESENCE_REFRESH_MS);
     this.startLiveEvents();
     if (this.accessToken) {
@@ -571,6 +580,8 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     this.tunnelHealthTimer = null;
     if (this.backgroundTimer) clearInterval(this.backgroundTimer);
     this.backgroundTimer = null;
+    if (this.maintenanceTimer) clearInterval(this.maintenanceTimer);
+    this.maintenanceTimer = null;
     this.stopPresence();
     this.liveEvents?.stop();
     await Promise.race([this.withdrawPresence(), delay(2_000)]);
@@ -913,6 +924,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
       this.remoteStored = mergeFetched(this.remoteStored, fetched, Date.now(), !outside || this.tunnelActive());
       await this.remoteConfigStore.save(this.remoteStored);
       await this.updateAnnouncements();
+      void this.checkMaintenance();
     })().catch((error: unknown) => {
       this.addLog(`Конфигурация приложения: ${messageOf(error)}`);
     }).finally(() => {
@@ -1354,6 +1366,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     this.lastRawUpload = uploadBytes;
     const totalDownload = this.trafficDownloadOffset + downloadBytes;
     const totalUpload = this.trafficUploadOffset + uploadBytes;
+    this.idleMeter.record(totalDownload + totalUpload, Date.now());
     if (totalDownload !== this.state.downloadBytes || totalUpload !== this.state.uploadBytes) {
       this.patch({ downloadBytes: totalDownload, uploadBytes: totalUpload });
     }
@@ -1422,6 +1435,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
   }
 
   private resetTrafficStats(): void {
+    this.idleMeter.reset();
     this.trafficDownloadOffset = 0;
     this.trafficUploadOffset = 0;
     this.lastRawDownload = 0;
@@ -1434,12 +1448,58 @@ export class AppController extends EventEmitter<AppControllerEvents> {
       ?? null;
   }
 
+  private maintenanceWindows() {
+    return this.remoteStored?.config.maintenance ?? [];
+  }
+
+  /** Servers the list marks as under maintenance, with the end of the work. */
+  private serverMaintenance(now: number): Record<string, number> {
+    const marked: Record<string, number> = {};
+    for (const server of this.state.servers) {
+      const window = maintenanceFor(this.maintenanceWindows(), nodeIdForServer(server), now);
+      if (window) marked[server.id] = window.endsAt;
+    }
+    return marked;
+  }
+
+  /**
+   * Moves off a server before its maintenance starts: as soon as the connection
+   * is idle, and two minutes before the start at the latest. docs/app-platform.md.
+   */
+  private async checkMaintenance(): Promise<void> {
+    const now = Date.now();
+    const marked = this.serverMaintenance(now);
+    if (JSON.stringify(marked) !== JSON.stringify(this.state.serverMaintenance)) this.patch({ serverMaintenance: marked });
+    if (this.maintenanceMoving || this.state.busy || this.state.status !== "connected" || !this.xray.isRunning()) return;
+    const current = this.selectedServer();
+    if (!current) return;
+    const move = maintenanceMove(maintenanceFor(this.maintenanceWindows(), nodeIdForServer(current), now), now);
+    if (move === "stay" || (move === "when-idle" && !this.idleMeter.idle(now))) return;
+    const target = this.bestServer(this.state.servers.filter((item) => item.id !== current.id));
+    if (!target || maintenanceFor(this.maintenanceWindows(), nodeIdForServer(target), now)) return;
+    this.maintenanceMoving = true;
+    try {
+      this.addLog(`Обслуживание сервера ${current.name}: переключение на ${target.name}`);
+      await this.selectServer(target.id);
+      this.emit("notify", {
+        title: `Сервер «${current.name}» уходит на обслуживание`,
+        body: `Levik VPN заранее переключился на «${target.name}».`,
+        tab: "home",
+      });
+    } catch (error) {
+      this.addLog(`Переключение перед обслуживанием: ${messageOf(error)}`);
+    } finally {
+      this.maintenanceMoving = false;
+    }
+  }
+
   private bestServer(servers: TunnelServer[]): TunnelServer | null {
     // TUIC is an explicit per-server choice; automatic selection keeps Xray protocols.
     const xrayServers = servers.filter((item) => !item.tuic);
     const pool = xrayServers.length ? xrayServers : servers;
     const nonRussian = pool.filter((item) => item.countryCode.toUpperCase() !== "RU");
-    const eligible = nonRussian.length ? nonRussian : pool;
+    // Servers going into maintenance are left out while others remain.
+    const eligible = avoidMaintenance(nonRussian.length ? nonRussian : pool, this.maintenanceWindows(), nodeIdForServer, Date.now());
     // Protocols that work on the user's operator first, unless none of them answers.
     const advised = adviceCandidates(eligible, currentAdvice(this.remoteStored, Date.now()), protocolOf);
     const measured = (items: TunnelServer[]) => items.some((item) => this.state.serverLatencies[item.id] != null);
