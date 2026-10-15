@@ -533,3 +533,12 @@ select option { color: var(--text); background-color: var(--select-bg); }
   .game-metrics { gap: 10px; }
   .game-metrics > div { padding-left: 10px; }
 }
+
+.section-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.remote-devices { min-height: 0; max-height: 320px; padding: 12px 2px 0; }
+.presence.online { color: var(--green); }
+.remote-unavailable { flex: none; color: var(--muted); font-size: 11px; }
+.remote-dialog { width: min(520px, calc(100vw - 40px)); }
+.remote-commands { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; padding: 14px 0 4px; }
+.remote-command { justify-content: flex-start; }
+.remote-status { min-height: 40px; margin: 8px 0 0; display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 12px; line-height: 1.45; }

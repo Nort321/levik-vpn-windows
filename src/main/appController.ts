@@ -78,6 +78,18 @@ import {
 import { avoidMaintenance, IdleMeter, maintenanceFor, maintenanceMove } from "./platform/maintenance";
 import { gameProcesses, normalizeGameIds } from "../shared/games";
 import { bestGameRoute, measureGameRoute, GAME_PROBE_PORT, GAME_DATA_PROBE_PORT, gameTag } from "./vpn/gameRoutes";
+import {
+  createReplyKey,
+  openReply,
+  parseDeliveredCommands,
+  parseIssuedCommands,
+  parseRemoteDevices,
+  sealForReply,
+} from "./platform/remoteCommands";
+import type { DeliveredCommand } from "./platform/remoteCommands";
+import { isFinalState, isRemoteCommand, REMOTE_COMMAND_LABELS } from "../shared/remote";
+import type { RemoteCommand, RemoteSnapshot } from "../shared/remote";
+import type { KeyObject } from "node:crypto";
 
 interface AppControllerEvents {
   changed: [snapshot: AppSnapshot];
@@ -89,6 +101,9 @@ interface AppControllerEvents {
 const BACKGROUND_TICK_MS = 5 * 60_000;
 /** How often a connected app checks whether its server goes into maintenance. */
 const MAINTENANCE_CHECK_MS = 15_000;
+/** After the remote list was shown, events keep it current this long. */
+const REMOTE_WATCH_MS = 10 * 60_000;
+const MAX_HANDLED_COMMANDS = 200;
 const ACCOUNT_CHECK_INTERVAL_MS = 6 * 60 * 60_000;
 const SETTINGS_SYNC_INTERVAL_MS = 30 * 60_000;
 const SETTINGS_PUSH_DELAY_MS = 1_500;
@@ -197,6 +212,11 @@ export class AppController extends EventEmitter<AppControllerEvents> {
   private backgroundTimer: ReturnType<typeof setInterval> | null = null;
   private maintenanceTimer: ReturnType<typeof setInterval> | null = null;
   private maintenanceMoving = false;
+  private commandChain: Promise<void> = Promise.resolve();
+  private readonly handledCommands = new Set<string>();
+  /** Private keys of diagnostics requests sent from here, by command id. */
+  private readonly replyKeys = new Map<string, KeyObject>();
+  private remoteWatchedUntil = 0;
   private readonly idleMeter = new IdleMeter();
   private liveEvents: LiveEvents | null = null;
   /** What the server holds for this computer; null when it holds nothing. */
@@ -222,6 +242,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     servers: [],
     serverLatencies: {},
     serverMaintenance: {},
+    remote: { devices: [], commands: [], notes: {}, loadedAt: null },
     selectedServerId: null,
     selectedSubscriptionId: null,
     settings: DEFAULT_SETTINGS,
@@ -929,6 +950,8 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     switch (event) {
       case "ready":
       case "resync":
+        this.runCommands();
+        this.refreshRemoteIfWatched();
         void this.refreshApprovals();
         void this.syncSettingsNow();
         void this.refreshRemoteConfig();
@@ -943,12 +966,138 @@ export class AppController extends EventEmitter<AppControllerEvents> {
         break;
       case "devices":
         void this.checkAccount(true);
+        this.refreshRemoteIfWatched();
         break;
       case "presence":
+        this.refreshRemoteIfWatched();
         break;
       case "approvals":
         void this.refreshApprovals();
         break;
+      case "commands":
+        this.runCommands();
+        this.refreshRemoteIfWatched();
+        break;
+    }
+  }
+
+  /** The account's apps for the remote; events keep the list current for a while. */
+  async refreshRemote(watch = true): Promise<void> {
+    if (!this.accessToken) return;
+    if (watch) this.remoteWatchedUntil = Date.now() + REMOTE_WATCH_MS;
+    const response = await this.withSession((token) => this.api.remoteDevices(token));
+    const commands = parseIssuedCommands(response.commands);
+    const notes = { ...this.state.remote.notes };
+    for (const command of commands) {
+      const key = this.replyKeys.get(command.id);
+      if (!key || !isFinalState(command.state)) continue;
+      this.replyKeys.delete(command.id);
+      const link = command.state === "done" && command.detail ? openReply(key, command.detail) : null;
+      if (link) notes[command.id] = link;
+    }
+    this.patch({ remote: { devices: parseRemoteDevices(response.devices), commands, notes, loadedAt: Date.now() } });
+  }
+
+  private refreshRemoteIfWatched(): void {
+    if (Date.now() >= this.remoteWatchedUntil) return;
+    void this.refreshRemote(false).catch((error: unknown) => this.addLog(`Пульт: ${messageOf(error)}`));
+  }
+
+  /** Asks another app of the account to do something; there is no command to disconnect. */
+  async sendRemoteCommand(deviceId: string, command: RemoteCommand): Promise<void> {
+    if (!isRemoteCommand(command)) throw new Error("Неизвестная команда");
+    if (!this.state.remote.devices.some((item) => item.deviceId === deviceId && item.remote)) {
+      throw new Error("Устройство недоступно для пульта");
+    }
+    const reply = command === "collect_diagnostics" ? createReplyKey() : null;
+    const response = await this.withSession((token) => this.api.issueCommand(token, deviceId, command, reply?.replyKey ?? null));
+    const [issued] = parseIssuedCommands([response.command]);
+    if (issued && reply) this.replyKeys.set(issued.id, reply.privateKey);
+    await this.refreshRemote(false);
+  }
+
+  /** A diagnostics link opened with this app's key; nothing else can be opened this way. */
+  remoteNote(commandId: string): string {
+    const link = this.state.remote.notes[commandId];
+    if (!link) throw new Error("Диагностика недоступна");
+    return link;
+  }
+
+  /** Runs the commands sent to this компьютер, one at a time, docs/app-platform.md "Remote". */
+  private runCommands(): void {
+    this.commandChain = this.commandChain
+      .then(() => this.takeAndRunCommands())
+      .catch((error: unknown) => this.addLog(`Пульт: ${messageOf(error)}`));
+  }
+
+  private async takeAndRunCommands(): Promise<void> {
+    if (!this.accessToken) return;
+    const response = await this.withSession((token) => this.api.takeCommands(token));
+    for (const command of parseDeliveredCommands(response.commands)) {
+      if (this.handledCommands.has(command.id)) continue;
+      this.handledCommands.add(command.id);
+      if (this.handledCommands.size > MAX_HANDLED_COMMANDS) {
+        const oldest = this.handledCommands.values().next().value;
+        if (oldest !== undefined) this.handledCommands.delete(oldest);
+      }
+      const outcome = await this.executeCommand(command);
+      await this.withSession((token) => this.api.commandResult(token, command.id, outcome.result, outcome.detail))
+        .catch((error: unknown) => this.addLog(`Пульт: ${messageOf(error)}`));
+    }
+  }
+
+  private async executeCommand(command: DeliveredCommand): Promise<{ result: "done" | "failed" | "unsupported"; detail: string | null }> {
+    // Only the fixed list runs; a disconnect or anything else is refused here too.
+    if (!isRemoteCommand(command.command)) return { result: "unsupported", detail: null };
+    this.addLog(`Пульт: ${REMOTE_COMMAND_LABELS[command.command]}`);
+    try {
+      switch (command.command) {
+        case "connect":
+          if (this.state.status === "connected" || this.state.status === "connecting" || this.xray.isRunning()) {
+            return { result: "done", detail: "already_connected" };
+          }
+          if (this.state.busy) return { result: "failed", detail: "busy" };
+          await this.connect("user");
+          this.emit("notify", { title: "Levik VPN подключён", body: "Подключение включено с другого вашего устройства.", tab: "home" });
+          return { result: "done", detail: null };
+        case "auto_server": {
+          if (!this.state.settings.automaticServer) await this.updateSettings({ automaticServer: true });
+          if (this.xray.isRunning()) {
+            await this.pingServers();
+            const best = this.bestServer(this.state.servers);
+            if (best && best.id !== this.state.selectedServerId) await this.selectServer(best.id);
+          }
+          return { result: "done", detail: null };
+        }
+        case "refresh_profile":
+          if (this.state.busy) return { result: "failed", detail: "busy" };
+          await this.refreshAccount();
+          return { result: "done", detail: null };
+        case "check_update": {
+          if (!this.updater) return { result: "unsupported", detail: null };
+          await this.updater.check(false);
+          const update = this.state.update;
+          if ((update.status === "available" || update.status === "downloaded") && update.version) {
+            return { result: "done", detail: `available:${update.version}` };
+          }
+          return update.status === "upToDate"
+            ? { result: "done", detail: "up_to_date" }
+            : { result: "failed", detail: "update_check_failed" };
+        }
+        case "collect_diagnostics": {
+          if (!command.replyKey) return { result: "failed", detail: null };
+          const link = await this.createSupportReport();
+          this.emit("notify", {
+            title: "Собрана диагностика",
+            body: "Её запросили с другого вашего устройства. Отчёт зашифрован и откроется только там.",
+            tab: "profile",
+          });
+          return { result: "done", detail: sealForReply(command.replyKey, link) };
+        }
+      }
+    } catch (error) {
+      this.addLog(`Пульт: ${messageOf(error)}`);
+      return { result: "failed", detail: null };
     }
   }
 
@@ -1280,6 +1429,8 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     this.gameValidatedAt = 0;
     this.updateGame({ available: false, routes: [], quality: {}, activeRouteId: null, recommendedRouteId: null });
     this.liveEvents?.stop();
+    this.replyKeys.clear();
+    this.remoteWatchedUntil = 0;
     if (this.approvalsTimer) clearTimeout(this.approvalsTimer);
     this.approvalsTimer = null;
     this.sentPresence = null;
@@ -1307,6 +1458,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     this.patch({
       settingsSyncedAt: null,
       pendingApprovals: [],
+      remote: { devices: [], commands: [], notes: {}, loadedAt: null },
       loginPending: false,
       sessionAvailable: false,
       account: null,

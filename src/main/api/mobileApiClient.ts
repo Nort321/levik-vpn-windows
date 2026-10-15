@@ -3,13 +3,17 @@ import type {
   ApprovalsResponse,
   AuthChallengeResponse,
   AuthStatusResponse,
+  IssueCommandResponse,
   MobileAccountResponse,
+  RemoteCommandsResponse,
+  RemoteDevicesResponse,
   SettingsDocumentResponse,
   TunnelProfileResponse,
   WebHandoffResponse,
 } from "./models";
 import { RequestSigner } from "../security/requestSigner";
 import type { PresenceReport } from "../platform/liveEvents";
+import type { RemoteCommand } from "../../shared/remote";
 
 type SignedRequest = ReturnType<RequestSigner["sign"]>;
 import { ApiEndpoints } from "./apiEndpoints";
@@ -50,6 +54,24 @@ export class MobileApiClient {
 
   decideApproval(accessToken: string, id: string, number: number | null): Promise<ApprovalDecisionResponse> {
     return this.request("POST", "/api/mobile/v1/approvals", { id, number }, accessToken);
+  }
+
+  /** The account's apps with their live status and the remote commands sent lately. */
+  remoteDevices(accessToken: string): Promise<RemoteDevicesResponse> {
+    return this.request("GET", "/api/mobile/v1/devices", null, accessToken);
+  }
+
+  issueCommand(accessToken: string, deviceId: string, command: RemoteCommand, replyKey: string | null): Promise<IssueCommandResponse> {
+    return this.request("POST", "/api/mobile/v1/commands", { deviceId, command, ...(replyKey ? { replyKey } : {}) }, accessToken);
+  }
+
+  /** Commands waiting for this computer; asking also makes it reachable by the remote. */
+  takeCommands(accessToken: string): Promise<RemoteCommandsResponse> {
+    return this.request("GET", "/api/mobile/v1/commands", null, accessToken);
+  }
+
+  async commandResult(accessToken: string, id: string, result: "done" | "failed" | "unsupported", detail: string | null): Promise<void> {
+    await this.request("POST", "/api/mobile/v1/commands/result", { id, result, detail }, accessToken);
   }
 
   account(accessToken: string): Promise<MobileAccountResponse> {

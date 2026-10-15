@@ -27,6 +27,23 @@ export interface ApprovalsResponse {
   approvals: unknown;
 }
 
+/** docs/app-platform.md "Remote"; the lists are checked by remoteCommands.ts. */
+export interface RemoteDevicesResponse {
+  ok: boolean;
+  devices: unknown;
+  commands: unknown;
+}
+
+export interface RemoteCommandsResponse {
+  ok: boolean;
+  commands: unknown;
+}
+
+export interface IssueCommandResponse {
+  ok: boolean;
+  command: unknown;
+}
+
 export interface ApprovalDecisionResponse {
   ok: boolean;
   state: "approved" | "declined";

@@ -1,6 +1,7 @@
 import { clipboard, dialog, ipcMain, shell } from "electron";
 import type { BrowserWindow } from "electron";
 import { IPC } from "../shared/contracts";
+import { isRemoteCommand } from "../shared/remote";
 import type { AppSettings } from "../shared/contracts";
 import { AppController } from "./appController";
 import { listWindowsProcesses, windowsProcessFromPath } from "./windows/processes";
@@ -85,6 +86,18 @@ export function registerIpc(controller: AppController, window: BrowserWindow): v
   ipcMain.handle(IPC.openCabinet, async (_event, target: unknown) => {
     if (!isCabinetTarget(target)) throw new Error("Некорректная страница кабинета");
     await openAllowedExternal(await controller.cabinetUrl(target));
+  });
+  ipcMain.handle(IPC.refreshRemote, () => controller.refreshRemote());
+  ipcMain.handle(IPC.sendRemoteCommand, (_event, deviceId: unknown, command: unknown) => {
+    if (typeof deviceId !== "string" || deviceId.length > 160 || !isRemoteCommand(command)) throw new Error("Некорректная команда");
+    return controller.sendRemoteCommand(deviceId, command);
+  });
+  ipcMain.handle(IPC.openRemoteNote, async (_event, commandId: unknown) => {
+    if (typeof commandId !== "string") throw new Error("Некорректная команда");
+    // Only a note link this app decrypted itself (remoteCommands.ts checks its form).
+    const link = controller.remoteNote(commandId);
+    clipboard.writeText(link);
+    await shell.openExternal(new URL(link).toString());
   });
   controller.on("navigate", (tab) => {
     if (!window.isDestroyed()) window.webContents.send(IPC.navigate, tab);

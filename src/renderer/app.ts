@@ -4,6 +4,8 @@ import { shouldShowLogin } from "../shared/sessionState";
 import { mergeProcessList, normalizeProcessSelection, processStatusLabel, resolveProcessCompanions, sortProcessList } from "../shared/processes";
 import QRCode from "qrcode";
 import { GAMES, gameProcesses } from "../shared/games";
+import { isFinalState, REMOTE_COMMANDS, REMOTE_COMMAND_LABELS, remoteIdleHint, remoteStatusText } from "../shared/remote";
+import type { IssuedCommand, RemoteCommand, RemoteDevice } from "../shared/remote";
 
 const SUPPORT_CHAT_URL = "https://t.me/leviksupportbot";
 
@@ -38,6 +40,15 @@ let toastTimer: ReturnType<typeof setTimeout> | null = null;
 let activationCodeInput = "";
 let activationSubmitting = false;
 let renderedSnapshotKey: string | null = null;
+/** The device whose remote is open. */
+let remoteDeviceId: string | null = null;
+let remoteSending: RemoteCommand | null = null;
+let remoteLoading = false;
+let remoteRequestedAt = 0;
+let remotePollTimer: ReturnType<typeof setInterval> | null = null;
+const REMOTE_STALE_MS = 60_000;
+const REMOTE_POLL_MS = 5_000;
+const REMOTE_PLATFORM_LABELS: Record<RemoteDevice["platform"], string> = { android: "Android", windows: "Windows", macos: "macOS", linux: "Linux" };
 
 const root = requiredElement("app");
 
@@ -111,10 +122,13 @@ function render(preserveScroll = true): void {
     ${showProcessDialog ? renderProcessDialog() : ""}
     ${devicesSubscriptionId ? renderDevicesDialog(devicesSubscriptionId) : ""}
     ${supportDialog ? renderSupportDialog(supportDialog) : ""}
+    ${remoteDeviceId ? renderRemoteDialog(remoteDeviceId) : ""}
     ${renderApprovalDialog()}`;
   bindCommonEvents();
   bindPageEvents();
   bindApprovalDialog();
+  bindRemoteDialog();
+  if (activeTab === "profile") loadRemoteIfStale();
   applyProgressWidths();
   applyProcessFilter();
   applyServerFilter();
@@ -353,6 +367,7 @@ function renderProfile(): string {
     <header class="page-header"><div><h1>Профиль и настройки</h1><div class="subtitle">Levik Account и параметры Windows-клиента</div></div><div class="toolbar"><button class="button" id="cabinet-button">${icon("external")} Личный кабинет</button><button class="button" id="support-button">${icon("support")} Поддержка</button><button class="button danger" id="logout-button">${icon("logout")} Выйти</button></div></header>
     <div class="profile-grid">
       ${accountSection}
+      ${renderRemoteDevices()}
       <section class="section card"><h2 class="card-title">Авторизовать устройство</h2><div class="card-caption">Введите код, показанный на экране другого устройства.</div><form class="activation-form" id="activation-form"><label for="activation-code">Код активации</label><div class="activation-controls"><input id="activation-code" type="text" inputmode="text" autocomplete="one-time-code" maxlength="19" placeholder="XXXX-XXXX-XXXX-XXXX" value="${escapeAttribute(activationCodeInput)}" ${activationSubmitting ? "disabled" : ""} /><button class="button primary" type="submit" ${activationSubmitting ? "disabled" : ""}>${activationSubmitting ? `<span class="spinner"></span>` : icon("link")} Авторизовать</button></div></form></section>
       <section class="section card"><h2 class="card-title">Настройки</h2><div class="settings-list">
         ${selectSetting("Маршрутизация", "Как направлять системный трафик", "routing-mode", state.settings.routingMode, [["global","Весь трафик"],["bypassRu","Обход ресурсов РФ"],["blockedOnly","Только заблокированное"]])}
@@ -406,6 +421,147 @@ function subscriptionCard(subscription: NonNullable<AppSnapshot["account"]>["sub
   const limit = subscription.traffic.limitBytes;
   const percent = limit > 0 ? Math.min(100, Math.round(subscription.traffic.usedBytes / limit * 100)) : 0;
   return `<div class="subscription-wrap"><button class="subscription ${selected ? "selected" : ""}" data-subscription-id="${escapeAttribute(subscription.uuid)}"><span class="subscription-head"><span class="subscription-title">${escapeHtml(subscription.title)}</span><span class="badge">${escapeHtml(subscription.status)}</span></span><span class="progress" role="progressbar" aria-label="Использовано трафика" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${percent}"><span class="progress-fill ${subscription.traffic.usedBytes > 0 ? "has-usage" : ""}" data-progress="${percent}"></span></span><span class="subscription-meta"><span>${formatBytes(subscription.traffic.usedBytes)} из ${limit > 0 ? formatBytes(limit) : "∞"}</span><span>${subscription.devices.used}/${subscription.devices.limit} устройств</span></span></button><div class="subscription-actions"><button class="button compact" data-devices-subscription-id="${escapeAttribute(subscription.uuid)}">${icon("devices")} Устройства</button>${subscription.shield.supported ? `<button class="button compact" data-shield-subscription-id="${escapeAttribute(subscription.uuid)}" data-shield-enabled="${subscription.shield.enabled}">${icon("shield")} Shield: ${subscription.shield.enabled ? "вкл." : "выкл."}</button>` : ""}${subscription.actions.renew ? `<button class="button compact" data-renew-subscription-id="${escapeAttribute(subscription.uuid)}">${icon("renew")} Продлить</button>` : ""}</div></div>`;
+}
+
+function renderRemoteDevices(): string {
+  if (!state?.account) return "";
+  const remote = state.remote;
+  const others = remote.devices.filter((device) => !device.current);
+  const list = remote.loadedAt === null
+    ? `<div class="empty">${remoteLoading ? `<span class="spinner"></span> Загружаем устройства…` : "Не удалось загрузить устройства"}</div>`
+    : others.length
+      ? `<div class="device-list remote-devices">${others.map(remoteDeviceRow).join("")}</div>`
+      : `<div class="empty">Других устройств с Levik VPN пока нет</div>`;
+  return `<section class="section card" aria-labelledby="remote-devices-title"><div class="section-head"><div><h2 class="card-title" id="remote-devices-title">Мои устройства</h2><div class="card-caption">Пульт помогает другому вашему устройству: подключить VPN, выбрать сервер или собрать диагностику.</div></div><button class="button icon-button" id="remote-refresh-button" aria-label="Обновить список устройств" ${remoteLoading ? "disabled" : ""}>${icon("refresh")}</button></div>${list}</section>`;
+}
+
+function remoteDeviceRow(device: RemoteDevice): string {
+  const presence = device.online
+    ? `<span class="presence online">В сети${device.vpnConnected ? ` · VPN включён${device.country ? ` · ${escapeHtml(device.country)}` : ""}` : " · VPN выключен"}</span>`
+    : `<span class="presence">Не в сети</span>`;
+  const meta = [REMOTE_PLATFORM_LABELS[device.platform], device.appVersion ? `версия ${escapeHtml(device.appVersion)}` : ""].filter(Boolean).join(" · ");
+  const action = device.remote
+    ? `<button class="button compact" data-remote-device-id="${escapeAttribute(device.deviceId)}" aria-label="Пульт: ${escapeAttribute(device.name)}">${icon("remote")} Пульт</button>`
+    : `<span class="remote-unavailable">Обновите приложение для пульта</span>`;
+  return `<div class="device-row"><span class="process-icon">${icon("devices")}</span><span class="process-copy"><span class="process-name">${escapeHtml(device.name)}</span><span class="process-path">${meta} · ${presence}</span></span>${action}</div>`;
+}
+
+function latestRemoteCommand(deviceId: string): IssuedCommand | undefined {
+  // The server lists the newest command first.
+  return state?.remote.commands.find((command) => command.deviceId === deviceId);
+}
+
+function renderRemoteDialog(deviceId: string): string {
+  const device = state?.remote.devices.find((item) => item.deviceId === deviceId);
+  if (!device) return "";
+  const command = latestRemoteCommand(deviceId);
+  const waiting = command !== undefined && !isFinalState(command.state);
+  const note = command && state?.remote.notes[command.id];
+  const buttons = REMOTE_COMMANDS.map((id) => `<button class="button remote-command" data-remote-command="${id}" ${remoteSending !== null || waiting ? "disabled" : ""}>${icon(REMOTE_COMMAND_ICONS[id])} ${remoteSending === id ? "Отправляем…" : REMOTE_COMMAND_LABELS[id]}</button>`).join("");
+  const status = command ? `${escapeHtml(REMOTE_COMMAND_LABELS[command.command])}: ${escapeHtml(remoteStatusText(command, device))}` : escapeHtml(remoteIdleHint(device));
+  return `<div class="dialog-backdrop" id="remote-dialog-backdrop"><section class="process-dialog remote-dialog card" role="dialog" aria-modal="true" aria-labelledby="remote-dialog-title" aria-describedby="remote-dialog-status">
+    <header class="dialog-header"><div><h2 id="remote-dialog-title">Пульт: ${escapeHtml(device.name)}</h2><p>${REMOTE_PLATFORM_LABELS[device.platform]} · ${device.online ? (device.vpnConnected ? "VPN включён" : "в сети, VPN выключен") : "не в сети"}</p></div><button class="button icon-button" id="close-remote-dialog" aria-label="Закрыть">${icon("close")}</button></header>
+    <div class="remote-commands">${buttons}</div>
+    <p class="remote-status" id="remote-dialog-status" aria-live="polite">${waiting ? `<span class="spinner"></span> ` : ""}${status}</p>
+    <footer class="dialog-actions"><span class="dialog-spacer"></span>${note ? `<button class="button primary" data-remote-note="${escapeAttribute(command.id)}">${icon("external")} Открыть диагностику</button>` : ""}<button class="button" id="close-remote-dialog-footer">Закрыть</button></footer>
+  </section></div>`;
+}
+
+const REMOTE_COMMAND_ICONS: Record<RemoteCommand, IconName> = {
+  connect: "power",
+  auto_server: "servers",
+  refresh_profile: "refresh",
+  check_update: "update",
+  collect_diagnostics: "support",
+};
+
+function loadRemoteIfStale(): void {
+  const loadedAt = state?.remote.loadedAt ?? null;
+  const now = Date.now();
+  if (!state?.account || remoteLoading || (loadedAt !== null && now - loadedAt < REMOTE_STALE_MS) || now - remoteRequestedAt < REMOTE_STALE_MS) return;
+  void loadRemote();
+}
+
+async function loadRemote(): Promise<void> {
+  remoteRequestedAt = Date.now();
+  remoteLoading = true;
+  render();
+  try {
+    await window.levik.refreshRemote();
+  } catch (error) {
+    showToast(error instanceof Error ? error.message : String(error));
+  } finally {
+    remoteLoading = false;
+    render();
+  }
+}
+
+async function sendRemoteCommand(deviceId: string, command: RemoteCommand): Promise<void> {
+  remoteSending = command;
+  render();
+  try {
+    await window.levik.sendRemoteCommand(deviceId, command);
+  } catch (error) {
+    showToast(error instanceof Error ? error.message : String(error));
+  } finally {
+    remoteSending = null;
+    render();
+  }
+}
+
+function openRemoteDialog(deviceId: string): void {
+  remoteDeviceId = deviceId;
+  // Live events keep the answer coming; polling covers a dropped stream.
+  if (!remotePollTimer) {
+    remotePollTimer = setInterval(() => {
+      const command = remoteDeviceId ? latestRemoteCommand(remoteDeviceId) : undefined;
+      if (command && !isFinalState(command.state) && !document.hidden) void window.levik.refreshRemote().catch(() => undefined);
+    }, REMOTE_POLL_MS);
+  }
+  render();
+}
+
+function closeRemoteDialog(): void {
+  const deviceId = remoteDeviceId;
+  remoteDeviceId = null;
+  if (remotePollTimer) clearInterval(remotePollTimer);
+  remotePollTimer = null;
+  render();
+  if (deviceId) document.querySelector<HTMLButtonElement>(`[data-remote-device-id="${CSS.escape(deviceId)}"]`)?.focus({ preventScroll: true });
+}
+
+function bindRemoteDialog(): void {
+  document.getElementById("remote-refresh-button")?.addEventListener("click", () => void loadRemote());
+  document.querySelectorAll<HTMLElement>("[data-remote-device-id]").forEach((button) => button.addEventListener("click", () => {
+    const deviceId = button.dataset.remoteDeviceId;
+    if (deviceId) openRemoteDialog(deviceId);
+  }));
+  const dialog = document.querySelector<HTMLElement>(".remote-dialog");
+  const deviceId = remoteDeviceId;
+  if (!dialog || !deviceId) return;
+  dialog.querySelectorAll<HTMLElement>("[data-remote-command]").forEach((button) => button.addEventListener("click", () => {
+    const command = REMOTE_COMMANDS.find((item) => item === button.dataset.remoteCommand);
+    if (command) void sendRemoteCommand(deviceId, command);
+  }));
+  dialog.querySelectorAll<HTMLElement>("[data-remote-note]").forEach((button) => button.addEventListener("click", () => {
+    const commandId = button.dataset.remoteNote;
+    if (commandId) void run(async () => {
+      await window.levik.openRemoteNote(commandId);
+      showToast("Ссылка на диагностику скопирована");
+    });
+  }));
+  document.getElementById("close-remote-dialog")?.addEventListener("click", closeRemoteDialog);
+  document.getElementById("close-remote-dialog-footer")?.addEventListener("click", closeRemoteDialog);
+  document.getElementById("remote-dialog-backdrop")?.addEventListener("click", (event) => {
+    if (event.target === event.currentTarget) closeRemoteDialog();
+  });
+  dialog.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") closeRemoteDialog();
+  });
+  // Snapshots re-render the page; keep the keyboard in the dialog.
+  if (!dialog.contains(document.activeElement)) {
+    dialog.querySelector<HTMLButtonElement>("[data-remote-command]:not([disabled]), #close-remote-dialog")?.focus({ preventScroll: true });
+  }
 }
 
 function updateSetting(): string {
@@ -999,7 +1155,7 @@ function escapeAttribute(value: string): string {
   return escapeHtml(value.replace(/[\r\n]/g, ""));
 }
 
-type IconName = "game" | "shield" | "home" | "servers" | "stats" | "profile" | "power" | "refresh" | "server" | "clock" | "download" | "upload" | "support" | "logout" | "login" | "external" | "process" | "close" | "check" | "search" | "star" | "pulse" | "browse" | "save" | "devices" | "unlink" | "renew" | "update" | "install" | "qr" | "link";
+type IconName = "game" | "shield" | "home" | "servers" | "stats" | "profile" | "power" | "refresh" | "server" | "clock" | "download" | "upload" | "support" | "logout" | "login" | "external" | "process" | "close" | "check" | "search" | "star" | "pulse" | "browse" | "save" | "devices" | "unlink" | "renew" | "update" | "install" | "qr" | "link" | "remote";
 
 function icon(name: IconName): string {
   const paths: Record<IconName, string> = {
@@ -1034,6 +1190,7 @@ function icon(name: IconName): string {
     install: '<path d="M12 3v11M8 10l4 4 4-4"/><rect x="4" y="17" width="16" height="4" rx="1"/>',
     qr: '<rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><path d="M15 14h2v2h-2zM19 14h2v4h-2zM14 19h4v2h-4zM20 20h1v1h-1z"/>',
     link: '<path d="M10 13a5 5 0 0 0 7.5.5l2-2a5 5 0 0 0-7-7l-1.1 1.1"/><path d="M14 11a5 5 0 0 0-7.5-.5l-2 2a5 5 0 0 0 7 7l1.1-1.1"/>',
+    remote: '<rect x="7" y="2" width="10" height="20" rx="3"/><circle cx="12" cy="8" r="2"/><path d="M10 14h.01M14 14h.01M10 17h.01M14 17h.01"/>',
   };
   return `<svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">${paths[name]}</svg>`;
 }

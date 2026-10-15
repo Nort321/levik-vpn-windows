@@ -1,3 +1,5 @@
+import type { RemoteCommand, RemoteSnapshot } from "./remote";
+
 export type AppTab = "home" | "servers" | "game" | "stats" | "profile";
 export type ConnectionStatus = "disconnected" | "connecting" | "connected" | "reconnecting" | "disconnecting" | "error";
 export type RoutingMode = "global" | "bypassRu" | "blockedOnly";
@@ -139,6 +141,8 @@ export interface AppSnapshot {
   settingsSyncedAt: number | null;
   /** Sign-ins on the user's other devices waiting for this app to approve them. */
   pendingApprovals: PendingApproval[];
+  /** The user's other apps for the remote, docs/app-platform.md "Remote". */
+  remote: RemoteSnapshot;
   /** A sign-in started on this computer is waiting for approval. */
   loginPending: boolean;
   update: {
@@ -201,6 +205,12 @@ export interface LevikDesktopApi {
   dismissAnnouncement(id: string): Promise<void>;
   /** Opens the page in the browser, signed in to the same account when possible. */
   openCabinet(target: CabinetTarget): Promise<void>;
+  /** Loads the user's other apps; live events keep the list current for a while. */
+  refreshRemote(): Promise<void>;
+  /** Sends a command to another app of the account; disconnecting is not one. */
+  sendRemoteCommand(deviceId: string, command: RemoteCommand): Promise<void>;
+  /** Opens a diagnostics report collected for this app and copies its link. */
+  openRemoteNote(commandId: string): Promise<void>;
   onSnapshot(listener: (snapshot: AppSnapshot) => void): () => void;
   /** A levik:// link or a notification asks for a tab. */
   onNavigate(listener: (tab: AppTab) => void): () => void;
@@ -232,6 +242,9 @@ export const IPC = {
   dismissAnnouncement: "levik:dismiss-announcement",
   openCabinet: "levik:open-cabinet",
   answerApproval: "levik:answer-approval",
+  refreshRemote: "levik:refresh-remote",
+  sendRemoteCommand: "levik:send-remote-command",
+  openRemoteNote: "levik:open-remote-note",
   snapshotChanged: "levik:snapshot-changed",
   navigate: "levik:navigate",
 } as const;
