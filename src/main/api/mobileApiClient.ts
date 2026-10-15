@@ -7,6 +7,7 @@ import type {
   MobileAccountResponse,
   RemoteCommandsResponse,
   AccountNotificationsResponse,
+  HomeSightingResponse,
   RemoteDevicesResponse,
   SettingsDocumentResponse,
   TunnelProfileResponse,
@@ -74,6 +75,11 @@ export class MobileApiClient {
   /** Notices due for the account; taking them delivers them (docs/app-platform.md "Notifications"). */
   takeNotifications(accessToken: string): Promise<AccountNotificationsResponse> {
     return this.request("GET", "/api/mobile/v1/notifications", null, accessToken);
+  }
+
+  /** Levik Home: a beacon heard on the local network (docs/app-platform.md "Levik Home"). */
+  reportHomeSighting(accessToken: string, sighting: { homeId: string; window: number; proof: string }): Promise<HomeSightingResponse> {
+    return this.request("POST", "/api/mobile/v1/home/sighting", sighting, accessToken);
   }
 
   async commandResult(accessToken: string, id: string, result: "done" | "failed" | "unsupported", detail: string | null): Promise<void> {

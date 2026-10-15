@@ -117,6 +117,8 @@ export interface AppSettings {
   syncSettings: boolean;
   /** Show this computer as online on the devices page and in the user's other apps. */
   sharePresence: boolean;
+  /** Levik Home: disconnect at home while the router's VPN protects the network. */
+  sleepAtHome: boolean;
 }
 
 export interface AppSnapshot {

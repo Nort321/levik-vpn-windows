@@ -15,7 +15,7 @@ const settings: AppSettings = {
   preventDnsLeaks: true, favoriteServerIds: [], favoriteNodes: null, antiDpiEnabled: false,
   antiDpiPackets: "tlshello", antiDpiLength: "100-200", antiDpiInterval: "10-20", splitTunnelMode: "off",
   splitTunnelProcesses: [], connectionTelemetry: false, telemetryNoticeShown: true, syncSettings: true,
-  sharePresence: true, gameEnabled: true, gameIds: ["valorant"],
+  sharePresence: true, sleepAtHome: true, gameEnabled: true, gameIds: ["valorant"],
 };
 
 async function freePort(): Promise<number> {

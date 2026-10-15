@@ -46,6 +46,8 @@ import { cabinetFallbackUrl, isAllowedExternalUrl, isHandoffUrl } from "./platfo
 import { ServiceEndpointsStore } from "./platform/serviceEndpoints";
 import { DEFAULT_API_ORIGIN } from "./api/apiEndpoints";
 import { parseAccountNotices } from "./platform/accountNotices";
+import { beaconFresh, HomeSleepPolicy, localAddresses, parseSighting, protects, scanHomes } from "./platform/levikHome";
+import type { HomeAction, HomeBeacon, VerifiedHome } from "./platform/levikHome";
 import { expiryNotices, NoticeState } from "./platform/notices";
 import type { AppNotice } from "./platform/notices";
 import {
@@ -105,6 +107,10 @@ interface AppControllerEvents {
 }
 
 const BACKGROUND_TICK_MS = 5 * 60_000;
+/** Levik Home: how often to listen for the home router while awake with the VPN on, asleep, or with it off. */
+const HOME_TICK_MS = 60_000;
+const HOME_CONNECTED_SCAN_MS = 2 * 60_000;
+const HOME_IDLE_SCAN_MS = 10 * 60_000;
 /** How often a connected app checks whether its server goes into maintenance. */
 const MAINTENANCE_CHECK_MS = 15_000;
 /** After the remote list was shown, events keep it current this long. */
@@ -150,6 +156,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   telemetryNoticeShown: false,
   syncSettings: true,
   sharePresence: true,
+  sleepAtHome: true,
 };
 
 const SETTINGS_SCHEMA_VERSION = 2;
@@ -218,6 +225,14 @@ export class AppController extends EventEmitter<AppControllerEvents> {
   private settingsSyncChain: Promise<void> = Promise.resolve();
   private settingsPushTimer: ReturnType<typeof setTimeout> | null = null;
   private backgroundTimer: ReturnType<typeof setInterval> | null = null;
+  private homeTimer: ReturnType<typeof setInterval> | null = null;
+  private readonly homePolicy = new HomeSleepPolicy();
+  private homeChain: Promise<void> = Promise.resolve();
+  /** The server's answer per home for the window it was given in. */
+  private readonly homeAnswers = new Map<string, { window: number; home: VerifiedHome | null }>();
+  /** The computer's addresses when the VPN fell asleep: another network means it left home. */
+  private homeAddresses: string | null = null;
+  private lastHomeScanAt = 0;
   private maintenanceTimer: ReturnType<typeof setInterval> | null = null;
   private maintenanceMoving = false;
   private commandChain: Promise<void> = Promise.resolve();
@@ -351,6 +366,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     void this.refreshRemoteConfig();
     void this.endpointsStore.refresh();
     this.backgroundTimer = setInterval(() => void this.backgroundTick(), BACKGROUND_TICK_MS);
+    this.homeTimer = setInterval(() => this.checkHomeSoon(), HOME_TICK_MS);
     this.maintenanceTimer = setInterval(() => void this.checkMaintenance(), MAINTENANCE_CHECK_MS);
     this.presenceKeepalive = setInterval(() => this.reportPresenceSoon(), PRESENCE_REFRESH_MS);
     this.startLiveEvents();
@@ -424,6 +440,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
 
   async logout(): Promise<void> {
     this.loginGeneration += 1;
+    this.homePolicy.stopped();
     await this.stopConnection("user", "user");
     const token = this.accessToken;
     if (token) {
@@ -496,6 +513,8 @@ export class AppController extends EventEmitter<AppControllerEvents> {
 
   async connect(trigger: SessionTrigger = "user"): Promise<void> {
     if (this.xray.isRunning() || this.state.status === "connecting") return;
+    // Connecting by hand at home: the VPN stays on until the next arrival.
+    if (trigger === "user" && this.homePolicy.asleep) this.homePolicy.resumedByUser();
     const generation = this.connectionGeneration;
     if (this.state.settings.gameEnabled && Date.now() - this.gameValidatedAt > 5 * 60_000 && this.state.selectedSubscriptionId) {
       await this.loadTunnelProfile(this.state.selectedSubscriptionId);
@@ -649,6 +668,8 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     this.gameMonitor = null;
     if (this.backgroundTimer) clearInterval(this.backgroundTimer);
     this.backgroundTimer = null;
+    if (this.homeTimer) clearInterval(this.homeTimer);
+    this.homeTimer = null;
     if (this.maintenanceTimer) clearInterval(this.maintenanceTimer);
     this.maintenanceTimer = null;
     this.stopPresence();
@@ -960,6 +981,78 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     if (!this.liveEvents?.active) this.startLiveEvents();
     if (Object.keys(this.pendingSync).length || now - this.lastSettingsSyncAt >= SETTINGS_SYNC_INTERVAL_MS) {
       await this.syncSettingsNow();
+    }
+  }
+
+  private checkHomeSoon(): void {
+    this.homeChain = this.homeChain.then(() => this.checkHome()).catch((error: unknown) => {
+      this.addLog(`Levik Home: ${messageOf(error)}`);
+    });
+  }
+
+  /**
+   * Levik Home, docs/app-platform.md "Levik Home": tells the server that the
+   * computer is at the account's home (it then takes no slot), and while the
+   * home router's VPN protects the network, keeps the computer's VPN off
+   * until it leaves.
+   */
+  private async checkHome(): Promise<void> {
+    if (!this.accessToken) return;
+    const now = Date.now();
+    const asleep = this.homePolicy.asleep;
+    const addresses = localAddresses().join(",");
+    if (asleep && addresses !== this.homeAddresses) {
+      await this.applyHome(this.homePolicy.left());
+      return;
+    }
+    const connected = this.state.status === "connected";
+    const interval = asleep ? HOME_TICK_MS : connected ? HOME_CONNECTED_SCAN_MS : HOME_IDLE_SCAN_MS;
+    if (now - this.lastHomeScanAt < interval - 5_000 || !addresses) {
+      await this.applyHome(this.homePolicy.silence(now));
+      return;
+    }
+    this.lastHomeScanAt = now;
+    const home = await this.listenForHome(now);
+    await this.applyHome(this.homePolicy.heard(home, Date.now(), this.state.status === "connected", this.state.settings.sleepAtHome));
+  }
+
+  /** The account's home heard on this network, preferring one whose router protects it. */
+  private async listenForHome(now: number): Promise<VerifiedHome | null> {
+    const homes: VerifiedHome[] = [];
+    for (const beacon of (await scanHomes()).filter((item) => beaconFresh(item, now))) {
+      const home = await this.verifyHome(beacon);
+      if (home) homes.push(home);
+    }
+    return homes.find(protects) ?? homes[0] ?? null;
+  }
+
+  /** One report per home and window: the answer does not change within it. */
+  private async verifyHome(beacon: HomeBeacon): Promise<VerifiedHome | null> {
+    const known = this.homeAnswers.get(beacon.homeId);
+    if (known?.window === beacon.window) return known.home;
+    let home: VerifiedHome | null;
+    try {
+      home = parseSighting(await this.withSession((token) => this.api.reportHomeSighting(token, beacon)));
+    } catch (error) {
+      this.addLog(`Levik Home: ${messageOf(error)}`);
+      return null;
+    }
+    if (this.homeAnswers.size >= 16) this.homeAnswers.clear();
+    this.homeAnswers.set(beacon.homeId, { window: beacon.window, home });
+    return home;
+  }
+
+  private async applyHome(action: HomeAction): Promise<void> {
+    if (action.kind === "sleep") {
+      this.homeAddresses = localAddresses().join(",");
+      this.addLog(`Levik Home: дома «${action.home}» VPN включён на роутере, Levik VPN отключается`);
+      await this.stopConnection("system", "home");
+      this.patch({ statusDetail: `Дома: «${action.home}» защищает VPN роутера. Levik VPN подключится, когда вы уйдёте` });
+    } else if (action.kind === "wake") {
+      this.homeAddresses = null;
+      if (this.state.status !== "disconnected" || this.xray.isRunning()) return;
+      this.addLog("Levik Home: вы ушли из дома, Levik VPN подключается");
+      await this.connect("resume");
     }
   }
 
@@ -2133,6 +2226,7 @@ function validateSettings(value: AppSettings): AppSettings {
     syncSettings: Boolean(value.syncSettings),
     // Settings saved before this field existed mean "on".
     sharePresence: value.sharePresence !== false,
+    sleepAtHome: value.sleepAtHome !== false,
   };
 }
 

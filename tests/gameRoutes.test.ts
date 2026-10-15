@@ -11,7 +11,7 @@ const settings: AppSettings = {
   preventDnsLeaks: true, favoriteServerIds: [], favoriteNodes: null, antiDpiEnabled: true,
   antiDpiPackets: "tlshello", antiDpiLength: "100-200", antiDpiInterval: "10-20",
   splitTunnelMode: "bypass", splitTunnelProcesses: ["VALORANT.exe"], connectionTelemetry: false,
-  telemetryNoticeShown: true, syncSettings: true, sharePresence: true,
+  telemetryNoticeShown: true, syncSettings: true, sharePresence: true, sleepAtHome: true,
   gameEnabled: true, gameIds: ["valorant"], gameProcesses: [], gameRouteId: null,
 };
 const source = [

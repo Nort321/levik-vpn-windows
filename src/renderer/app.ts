@@ -387,6 +387,7 @@ function renderProfile(): string {
         ${switchSetting("Закрытие в трей", "Кнопка закрытия скрывает приложение", "closeToTray", state.settings.closeToTray)}
         ${switchSetting("Синхронизация настроек", syncHelp(), "syncSettings", state.settings.syncSettings)}
         ${switchSetting("Показывать статус «в сети»", "На странице устройств и в других ваших приложениях: открыт ли Levik VPN и включён ли VPN. Без IP-адресов и истории", "sharePresence", state.settings.sharePresence)}
+        ${switchSetting("Засыпать дома", "Когда домашнюю сеть защищает роутер Levik Home с включённым VPN, Levik VPN отключается и подключается снова, как только вы уходите", "sleepAtHome", state.settings.sleepAtHome)}
         ${switchSetting("Статистика качества подключения", "Анонимно сообщать об обрывах и ошибках подключения. Без IP-адресов, сайтов и данных аккаунта", "connectionTelemetry", state.settings.connectionTelemetry)}
         ${selectSetting("Оформление", "Единый стиль Levik VPN", "theme", state.settings.theme, [["system","Системная"],["dark","Тёмная"],["light","Светлая"],["amoled","AMOLED"]])}
         ${updateSetting()}
@@ -774,7 +775,7 @@ function bindPageEvents(): void {
   document.querySelectorAll<HTMLElement>("[data-setting]").forEach((button) => button.addEventListener("click", () => {
     const currentState = state;
     if (!currentState) return;
-    const key = button.dataset.setting as "automaticServer" | "autoReconnect" | "autoConnectOnLaunch" | "killSwitch" | "useDoh" | "preventDnsLeaks" | "antiDpiEnabled" | "launchAtLogin" | "closeToTray" | "connectionTelemetry" | "syncSettings" | "sharePresence";
+    const key = button.dataset.setting as "automaticServer" | "autoReconnect" | "autoConnectOnLaunch" | "killSwitch" | "useDoh" | "preventDnsLeaks" | "antiDpiEnabled" | "launchAtLogin" | "closeToTray" | "connectionTelemetry" | "syncSettings" | "sharePresence" | "sleepAtHome";
     // Choosing in Settings also answers the first-run notice.
     const patch: Partial<AppSettings> = key === "connectionTelemetry"
       ? { connectionTelemetry: !currentState.settings.connectionTelemetry, telemetryNoticeShown: true }

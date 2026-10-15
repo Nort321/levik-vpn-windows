@@ -138,7 +138,7 @@ describe("settings sync", () => {
     dnsServer: "1.1.1.1", theme: "system", launchAtLogin: false, autoConnectOnLaunch: false, closeToTray: true,
     preventDnsLeaks: true, favoriteServerIds: [], favoriteNodes: null, antiDpiEnabled: false, antiDpiPackets: "tlshello",
     antiDpiLength: "100-200", antiDpiInterval: "10-20", splitTunnelMode: "off", splitTunnelProcesses: [],
-    connectionTelemetry: true, telemetryNoticeShown: true, syncSettings: true, sharePresence: true,
+    connectionTelemetry: true, telemetryNoticeShown: true, syncSettings: true, sharePresence: true, sleepAtHome: true,
   } satisfies AppSettings;
 
   it("shares only portable fields", () => {
