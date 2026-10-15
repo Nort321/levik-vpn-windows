@@ -22,6 +22,7 @@ vi.mock("../src/main/windows/killSwitch", () => ({
 
 import { AppController } from "../src/main/appController";
 import {
+  allowedFromFamily,
   createReplyKey,
   openReply,
   parseDeliveredCommands,
@@ -39,12 +40,17 @@ describe("remote command parsing", () => {
     expect(parseDeliveredCommands([
       { id: ID(1), command: "connect", replyKey: null },
       { id: ID(2), command: "disconnect" },
+      { id: ID(6), command: "refresh_profile", via: "family" },
       { id: "not-a-uuid", command: "connect" },
       "junk",
     ])).toEqual([
-      { id: ID(1), command: "connect", replyKey: null },
-      { id: ID(2), command: "disconnect", replyKey: null },
+      { id: ID(1), command: "connect", replyKey: null, fromFamily: false },
+      { id: ID(2), command: "disconnect", replyKey: null, fromFamily: false },
+      { id: ID(6), command: "refresh_profile", replyKey: null, fromFamily: true },
     ]);
+    // The family owner only repairs.
+    expect(["connect", "collect_diagnostics", "disconnect"].some(allowedFromFamily)).toBe(false);
+    expect(["auto_server", "refresh_profile", "check_update"].every(allowedFromFamily)).toBe(true);
     expect(parseIssuedCommands([
       { id: ID(3), deviceId: "phone", command: "check_update", state: "done", detail: "available:2.8.0" },
       { id: ID(4), deviceId: "phone", command: "disconnect", state: "done", detail: null },

@@ -12,7 +12,23 @@ export interface DeliveredCommand {
   id: string;
   command: string;
   replyKey: string | null;
+  /** Sent by the family owner, who may only repair: docs/app-platform.md "Family help". */
+  fromFamily: boolean;
 }
+
+/** What the family owner may run on a member's app; the server holds the same line. */
+const FAMILY_COMMANDS: readonly string[] = ["auto_server", "refresh_profile", "check_update"];
+
+export function allowedFromFamily(command: string): boolean {
+  return FAMILY_COMMANDS.includes(command);
+}
+
+/** What the member is told after the family owner repaired their app. */
+export const FAMILY_HELP_TEXT: Readonly<Record<string, string>> = {
+  refresh_profile: "Профиль обновлён.",
+  auto_server: "Сервер теперь выбирается автоматически.",
+  check_update: "Levik VPN проверил обновление.",
+};
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const STATES: readonly RemoteCommandState[] = ["pending", "delivered", "done", "failed", "unsupported", "expired"];
@@ -35,7 +51,7 @@ export function parseDeliveredCommands(value: unknown): DeliveredCommand[] {
     const id = typeof entry?.id === "string" && UUID.test(entry.id) ? entry.id : null;
     const command = text(entry?.command, 40);
     if (!id || !command) return [];
-    return [{ id, command, replyKey: text(entry?.replyKey, 1000) }];
+    return [{ id, command, replyKey: text(entry?.replyKey, 1000), fromFamily: entry?.via === "family" }];
   });
 }
 
