@@ -154,6 +154,24 @@ export interface AppSnapshot {
   };
 }
 
+/** The one button under a diagnosis; docs/app-platform.md "Diagnosis". */
+export type DiagnosisAction = "retry" | "networkSettings" | "connect" | "bestServer" | "servers" | "support";
+
+export const DIAGNOSIS_ACTIONS: readonly DiagnosisAction[] = ["retry", "networkSettings", "connect", "bestServer", "servers", "support"];
+
+export function isDiagnosisAction(value: unknown): value is DiagnosisAction {
+  return typeof value === "string" && (DIAGNOSIS_ACTIONS as readonly string[]).includes(value);
+}
+
+/** "It's not the VPN": one sentence and at most one button. */
+export interface DiagnosisSummary {
+  /** A stable code for support, such as SERVICE_RESTRICTED. */
+  verdict: string;
+  text: string;
+  action: DiagnosisAction | null;
+  actionLabel: string | null;
+}
+
 export interface LoginChallenge {
   verificationUri: string;
   verificationCode: string | null;
@@ -203,6 +221,9 @@ export interface LevikDesktopApi {
   installUpdate(): Promise<void>;
   /** Creates the note, copies its link and returns it. */
   createSupportReport(): Promise<string>;
+  /** Checks the network, the VPN and popular services; the support report includes the result. */
+  diagnose(): Promise<DiagnosisSummary>;
+  applyDiagnosisAction(action: DiagnosisAction): Promise<void>;
   dismissAnnouncement(id: string): Promise<void>;
   /** Opens the page in the browser, signed in to the same account when possible. */
   openCabinet(target: CabinetTarget): Promise<void>;
@@ -240,6 +261,8 @@ export const IPC = {
   downloadUpdate: "levik:download-update",
   installUpdate: "levik:install-update",
   createSupportReport: "levik:create-support-report",
+  diagnose: "levik:diagnose",
+  applyDiagnosisAction: "levik:apply-diagnosis-action",
   dismissAnnouncement: "levik:dismiss-announcement",
   openCabinet: "levik:open-cabinet",
   answerApproval: "levik:answer-approval",

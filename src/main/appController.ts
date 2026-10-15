@@ -1,4 +1,4 @@
-import { app } from "electron";
+import { app, net } from "electron";
 import { randomBytes } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { platform, release } from "node:os";
@@ -12,6 +12,8 @@ import type {
   AppTab,
   ApprovalAnswerResult,
   CabinetTarget,
+  DiagnosisAction,
+  DiagnosisSummary,
   LoginChallenge,
   PendingApproval,
   TunnelServer,
@@ -76,6 +78,7 @@ import {
   unionNodeLists,
 } from "./platform/favoriteNodes";
 import { avoidMaintenance, IdleMeter, maintenanceFor, maintenanceMove } from "./platform/maintenance";
+import { captivePortal, checkServices, diagnosisSummary, diagnosisVerdict, parseDiagnoseReport, vpnPhase } from "./platform/diagnosis";
 import { gameProcesses, normalizeGameIds } from "../shared/games";
 import { bestGameRoute, measureGameRoute, GAME_PROBE_PORT, GAME_DATA_PROBE_PORT, gameTag } from "./vpn/gameRoutes";
 import {
@@ -189,6 +192,8 @@ export class AppController extends EventEmitter<AppControllerEvents> {
   private lastRawUpload = 0;
   private pingPromise: Promise<void> | null = null;
   private resumePromise: Promise<void> | null = null;
+  private diagnosisPromise: Promise<DiagnosisSummary> | null = null;
+  private lastDiagnosis: { at: number; summary: DiagnosisSummary } | null = null;
   private killSwitchHealthTimer: ReturnType<typeof setInterval> | null = null;
   private killSwitchHealthCheckRunning = false;
   private readonly telemetry = new ConnectionTelemetry(join(app.getPath("userData"), "telemetry"), {
@@ -763,8 +768,33 @@ export class AppController extends EventEmitter<AppControllerEvents> {
   /** A one-time encrypted note with the state and the redacted log, for support. */
   async createSupportReport(): Promise<string> {
     const log = (await this.diskLog?.read(MAX_SUPPORT_NOTE_BYTES)) ?? "";
-    const report = supportReportText(this.state, { system: `Windows ${release()} (${process.arch})`, now: new Date() });
+    const now = new Date();
+    const diagnosis = this.lastDiagnosis && now.getTime() - this.lastDiagnosis.at < DIAGNOSIS_REPORT_MS ? this.lastDiagnosis.summary : null;
+    const report = supportReportText(this.state, { system: `Windows ${release()} (${process.arch})`, now, diagnosis });
     return createSupportNote(supportNoteText(report, log));
+  }
+
+  /** "It's not the VPN": one sentence for the support dialog, docs/app-platform.md "Diagnosis". */
+  diagnose(): Promise<DiagnosisSummary> {
+    this.diagnosisPromise ??= this.runDiagnosis().finally(() => { this.diagnosisPromise = null; });
+    return this.diagnosisPromise;
+  }
+
+  async applyDiagnosisAction(action: DiagnosisAction): Promise<void> {
+    switch (action) {
+      case "connect":
+        await this.connect("user");
+        return;
+      case "bestServer":
+        await this.useBestServer();
+        return;
+      case "servers":
+        this.emit("navigate", "servers");
+        return;
+      default:
+        // Retrying and the report run in the window; the system settings open from ipc.ts.
+        return;
+    }
   }
 
   async dismissAnnouncement(id: string): Promise<void> {
@@ -1842,6 +1872,45 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     }
   }
 
+  private async runDiagnosis(): Promise<DiagnosisSummary> {
+    const vpn = vpnPhase(this.state.status);
+    // Chromium's network stack follows the system's routing and proxy, as the user's apps do.
+    const viaSystem = (url: string, init: RequestInit) => net.fetch(url, init);
+    const online = net.isOnline();
+    const [checks, captive, raw] = await Promise.all([
+      online ? checkServices(viaSystem) : Promise.resolve([]),
+      online && vpn === "off" ? captivePortal(viaSystem, CAPTIVE_PROBE) : Promise.resolve(false),
+      online ? this.remoteConfig.diagnose().catch(() => null) : Promise.resolve(null),
+    ]);
+    const server = this.selectedServer();
+    const verdict = diagnosisVerdict({
+      network: !online ? "none" : captive ? "captive" : "ok",
+      cellular: false,
+      vpn,
+      serverCountry: server?.countryCode.toUpperCase() ?? null,
+      serverNodeId: server ? nodeIdForServer(server) : null,
+      protocol: server ? protocolOf(server) : null,
+      failingServices: checks.filter((item) => !item.ok).map((item) => item.slug),
+      anyServiceWorks: checks.some((item) => item.ok),
+      report: parseDiagnoseReport(raw),
+      now: Date.now(),
+    });
+    const summary = diagnosisSummary(verdict, { networkSettings: true });
+    this.lastDiagnosis = { at: Date.now(), summary };
+    this.addLog(`Диагностика: ${summary.verdict}`);
+    return summary;
+  }
+
+  /** To the fastest server other than the current one; connects when the VPN is off. */
+  private async useBestServer(): Promise<void> {
+    const current = this.selectedServer();
+    await this.pingServers();
+    const others = this.state.servers.filter((item) => item.id !== current?.id);
+    const target = this.bestServer(others.length ? others : this.state.servers);
+    if (target && target.id !== this.state.selectedServerId) await this.selectServer(target.id);
+    if (!this.xray.isRunning()) await this.connect("user");
+  }
+
   private bestServer(servers: TunnelServer[]): TunnelServer | null {
     // TUIC is an explicit per-server choice; automatic selection keeps Xray protocols.
     const xrayServers = servers.filter((item) => !item.tuic);
@@ -2062,3 +2131,8 @@ function delay(milliseconds: number): Promise<void> {
 function clamp(value: number, minimum: number, maximum: number): number {
   return Math.max(minimum, Math.min(maximum, value));
 }
+
+/** A diagnosis older than this says little about the problem in the report. */
+const DIAGNOSIS_REPORT_MS = 30 * 60_000;
+/** The check Windows itself uses to find a sign-in page. */
+const CAPTIVE_PROBE = { url: "http://www.msftconnecttest.com/connecttest.txt", expect: "Microsoft Connect Test" };

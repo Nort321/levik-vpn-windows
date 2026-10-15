@@ -1,17 +1,19 @@
-import type { AppSnapshot } from "../../shared/contracts";
+import type { AppSnapshot, DiagnosisSummary } from "../../shared/contracts";
 import { protocolOf } from "../telemetry/codes";
 import { redactLogLine } from "./diskLog";
 
 export interface SupportReportContext {
   system: string;
   now: Date;
+  /** The last check from the support dialog, when recent. */
+  diagnosis?: DiagnosisSummary | null;
 }
 
 /**
  * The header of a support note: what support asks first, without the
  * account, subscription, device identifiers or addresses.
  */
-export function supportReportText(snapshot: AppSnapshot, { system, now }: SupportReportContext): string {
+export function supportReportText(snapshot: AppSnapshot, { system, now, diagnosis }: SupportReportContext): string {
   const { settings } = snapshot;
   const server = snapshot.servers.find((item) => item.id === snapshot.selectedServerId);
   const on = (enabled: boolean) => (enabled ? "вкл" : "выкл");
@@ -27,5 +29,6 @@ export function supportReportText(snapshot: AppSnapshot, { system, now }: Suppor
     `Текущее подключение: ${session}`,
     `Маршрутизация: ${settings.routingMode}; раздельное туннелирование: ${settings.splitTunnelMode}`,
     `Автовосстановление ${on(settings.autoReconnect)}, kill switch ${on(settings.killSwitch)}, защита DNS ${on(settings.preventDnsLeaks)}, DoH ${on(settings.useDoh)}, anti-DPI ${on(settings.antiDpiEnabled)}`,
+    ...(diagnosis ? [`Диагностика: ${diagnosis.verdict} — ${diagnosis.text}`] : []),
   ].join("\n");
 }

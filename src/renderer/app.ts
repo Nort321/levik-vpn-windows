@@ -1,4 +1,5 @@
-import type { AppSettings, AppSnapshot, AppTab, TunnelServer, WindowsProcess, PendingApproval } from "../shared/contracts";
+import type { AppSettings, AppSnapshot, AppTab, DiagnosisAction, DiagnosisSummary, TunnelServer, WindowsProcess, PendingApproval } from "../shared/contracts";
+import { isDiagnosisAction } from "../shared/contracts";
 import { activeVariant, groupServers, serverProtocolShortLabel, type ServerGroup } from "../shared/serverGroups";
 import { shouldShowLogin } from "../shared/sessionState";
 import { mergeProcessList, normalizeProcessSelection, processStatusLabel, resolveProcessCompanions, sortProcessList } from "../shared/processes";
@@ -36,6 +37,8 @@ let gameSearchQuery = "";
 let favoritesOnly = false;
 let devicesSubscriptionId: string | null = null;
 let supportDialog: { creating: boolean; url: string | null } | null = null;
+/** "It's not the VPN": checked each time the support dialog opens. */
+let diagnosis: { running: boolean; result: DiagnosisSummary | null } = { running: false, result: null };
 let toastTimer: ReturnType<typeof setTimeout> | null = null;
 let activationCodeInput = "";
 let activationSubmitting = false;
@@ -672,10 +675,21 @@ function renderSupportDialog(dialog: { creating: boolean; url: string | null }):
       <div class="support-link-row"><input class="support-link" id="support-link" type="text" readonly value="${escapeAttribute(dialog.url)}" /><button class="button" id="copy-support-link">${icon("check")} Скопировать</button></div>`
     : `<p class="support-dialog-text">Отчёт поможет быстрее разобраться с подключением. В него войдут версии приложения и Windows, состояние подключения, выбранный сервер, настройки и последние записи журнала. IP-адреса, посещённые сайты и данные аккаунта в журнале скрыты.</p>
       <p class="support-dialog-text">Отчёт шифруется на этом компьютере, а ключ остаётся только в ссылке. Прочитать отчёт сможет тот, кому вы её отправите.</p>`;
+  const check = dialog.url ? "" : renderDiagnosis();
   const actions = dialog.url
     ? `<span class="dialog-spacer"></span><button class="button" id="close-support-dialog-footer">Закрыть</button><button class="button primary" id="open-support-chat">${icon("external")} Открыть чат поддержки</button>`
     : `<button class="button" id="support-without-report">${icon("external")} Написать без отчёта</button><span class="dialog-spacer"></span><button class="button primary" id="create-support-report" ${dialog.creating ? "disabled" : ""}>${dialog.creating ? `<span class="spinner"></span> Готовим отчёт…` : `${icon("support")} Создать отчёт`}</button>`;
-  return `<div class="dialog-backdrop" id="support-dialog-backdrop"><section class="process-dialog support-dialog card" role="dialog" aria-modal="true" aria-labelledby="support-dialog-title"><header class="dialog-header"><div><h2 id="support-dialog-title">Сообщить о проблеме</h2><p>Чат поддержки Levik VPN в Telegram</p></div><button class="button icon-button" id="close-support-dialog" aria-label="Закрыть">${icon("close")}</button></header><div class="support-dialog-body">${content}</div><footer class="dialog-actions">${actions}</footer></section></div>`;
+  return `<div class="dialog-backdrop" id="support-dialog-backdrop"><section class="process-dialog support-dialog card" role="dialog" aria-modal="true" aria-labelledby="support-dialog-title"><header class="dialog-header"><div><h2 id="support-dialog-title">Сообщить о проблеме</h2><p>Чат поддержки Levik VPN в Telegram</p></div><button class="button icon-button" id="close-support-dialog" aria-label="Закрыть">${icon("close")}</button></header><div class="support-dialog-body">${check}${content}</div><footer class="dialog-actions">${actions}</footer></section></div>`;
+}
+
+function renderDiagnosis(): string {
+  const { running, result } = diagnosis;
+  const body = running || !result
+    ? `<p class="diagnosis-text"><span class="spinner small"></span> Проверяем сеть, VPN и популярные сервисы…</p>`
+    : `<p class="diagnosis-text">${escapeHtml(result.text)}</p>${result.action && result.action !== "support" && result.actionLabel
+      ? `<button class="button" id="diagnosis-action" data-diagnosis-action="${escapeAttribute(result.action)}">${escapeHtml(result.actionLabel)}</button>`
+      : ""}`;
+  return `<section class="diagnosis" aria-live="polite" aria-busy="${running}"><span class="diagnosis-icon">${icon("pulse")}</span><div class="diagnosis-body">${body}</div></section>`;
 }
 
 function switchSetting(name: string, help: string, key: keyof AppSettings, enabled: boolean): string {
@@ -855,6 +869,12 @@ function bindPageEvents(): void {
   document.getElementById("support-button")?.addEventListener("click", () => {
     supportDialog = { creating: false, url: null };
     render();
+    void runDiagnosis();
+  });
+  const diagnosisButton = document.getElementById("diagnosis-action");
+  diagnosisButton?.addEventListener("click", () => {
+    const action = diagnosisButton.dataset.diagnosisAction;
+    if (isDiagnosisAction(action)) void applyDiagnosisAction(action);
   });
   document.getElementById("close-support-dialog")?.addEventListener("click", closeSupportDialog);
   document.getElementById("close-support-dialog-footer")?.addEventListener("click", closeSupportDialog);
@@ -986,6 +1006,29 @@ async function createSupportReport(): Promise<void> {
     showToast(error instanceof Error ? error.message : String(error));
   }
   render();
+}
+
+async function runDiagnosis(): Promise<void> {
+  if (diagnosis.running) return;
+  diagnosis = { running: true, result: null };
+  render();
+  try {
+    diagnosis = { running: false, result: await window.levik.diagnose() };
+  } catch {
+    diagnosis = {
+      running: false,
+      result: { verdict: "FAILED", text: "Не удалось проверить. Создайте отчёт — поддержка разберётся.", action: null, actionLabel: null },
+    };
+  }
+  render();
+}
+
+async function applyDiagnosisAction(action: DiagnosisAction): Promise<void> {
+  if (action === "retry") return runDiagnosis();
+  if (action === "support") return createSupportReport();
+  // Connecting or switching shows on the main screen; the settings open beside the dialog.
+  if (action !== "networkSettings") closeSupportDialog();
+  await run(() => window.levik.applyDiagnosisAction(action));
 }
 
 function closeSupportDialog(): void {

@@ -391,6 +391,12 @@ select option { color: var(--text); background-color: var(--select-bg); }
 .support-dialog .dialog-actions { flex-wrap: wrap; }
 .support-dialog-body { display: grid; gap: 12px; padding: 16px 2px; }
 .support-dialog-text { margin: 0; color: var(--muted); font-size: 13px; line-height: 1.55; }
+.diagnosis { display: flex; align-items: flex-start; gap: 12px; padding: 14px; border: 1px solid var(--border); border-radius: 12px; background: var(--select-bg); }
+.diagnosis-icon { display: grid; flex-shrink: 0; place-items: center; width: 32px; height: 32px; border-radius: 9px; color: var(--blue); background: rgba(54,135,255,.12); }
+.diagnosis-icon svg { width: 18px; height: 18px; }
+.diagnosis-body { display: grid; flex: 1; gap: 10px; justify-items: start; min-width: 0; }
+.diagnosis-text { display: flex; align-items: center; gap: 8px; margin: 0; font-size: 14px; font-weight: 600; line-height: 1.45; }
+.spinner.small { width: 14px; height: 14px; }
 .support-link-label { margin-top: 4px; font-size: 12px; font-weight: 600; }
 .support-link-row { display: flex; gap: 8px; }
 .support-link { min-width: 0; flex: 1; height: 42px; padding: 0 12px; border: 1px solid var(--border); border-radius: 10px; color: var(--text); background: var(--select-bg); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }

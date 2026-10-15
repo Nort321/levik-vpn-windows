@@ -1,6 +1,6 @@
 import { contextBridge, ipcRenderer } from "electron";
 import { IPC } from "../shared/contracts";
-import type { AppSettings, AppSnapshot, AppTab, LevikDesktopApi } from "../shared/contracts";
+import type { AppSettings, AppSnapshot, AppTab, DiagnosisSummary, LevikDesktopApi } from "../shared/contracts";
 
 const api: LevikDesktopApi = {
   snapshot: () => ipcRenderer.invoke(IPC.snapshot) as Promise<AppSnapshot>,
@@ -26,6 +26,8 @@ const api: LevikDesktopApi = {
   downloadUpdate: () => ipcRenderer.invoke(IPC.downloadUpdate),
   installUpdate: () => ipcRenderer.invoke(IPC.installUpdate),
   createSupportReport: () => ipcRenderer.invoke(IPC.createSupportReport) as Promise<string>,
+  diagnose: () => ipcRenderer.invoke(IPC.diagnose) as Promise<DiagnosisSummary>,
+  applyDiagnosisAction: (action) => ipcRenderer.invoke(IPC.applyDiagnosisAction, action),
   dismissAnnouncement: (id) => ipcRenderer.invoke(IPC.dismissAnnouncement, id),
   openCabinet: (target) => ipcRenderer.invoke(IPC.openCabinet, target),
   refreshRemote: () => ipcRenderer.invoke(IPC.refreshRemote),

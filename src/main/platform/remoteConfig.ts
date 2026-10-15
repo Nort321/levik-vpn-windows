@@ -102,7 +102,7 @@ function parseAnnouncement(value: unknown): AppAnnouncement | null {
   };
 }
 
-function parseAdvice(value: unknown): ProtocolAdvice | null {
+export function parseAdvice(value: unknown): ProtocolAdvice | null {
   if (!isRecord(value) || !Array.isArray(value.preferred) || !Array.isArray(value.avoid)) return null;
   const list = (items: unknown[]) => items.filter((item): item is string => typeof item === "string" && PROTOCOL.test(item)).slice(0, 16);
   return { preferred: list(value.preferred), avoid: list(value.avoid) };
@@ -176,11 +176,22 @@ export class RemoteConfigClient {
 
   /** Tries the current hosts in order. Null when none answers. */
   async fetch(): Promise<{ response: unknown; config: RemoteConfig } | null> {
+    const response = await this.get("/api/app/v1/config");
+    const config = response === null ? null : parseRemoteConfig(response);
+    return config ? { response, config } : null;
+  }
+
+  /** What the website knows about the network and the services, as received; docs/app-platform.md "Diagnosis". */
+  diagnose(): Promise<unknown> {
+    return this.get("/api/app/v1/diagnose", 10_000);
+  }
+
+  private async get(path: string, timeoutMs = 15_000): Promise<unknown> {
     for (const origin of serviceEndpoints().apiOrigins) {
       const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 15_000);
+      const timer = setTimeout(() => controller.abort(), timeoutMs);
       try {
-        const reply = await this.fetchImpl(`${origin}/api/app/v1/config`, {
+        const reply = await this.fetchImpl(`${origin}${path}`, {
           method: "GET",
           credentials: "omit",
           redirect: "error",
@@ -190,15 +201,14 @@ export class RemoteConfigClient {
         });
         if (!reply.ok) {
           // A rejected request would be rejected by the other hosts too; a host
-          // that does not serve the configuration (404) is skipped.
+          // that does not serve the path (404) is skipped.
           if (reply.status >= 400 && reply.status < 500 && reply.status !== 404) return null;
           continue;
         }
         const text = await reply.text();
         if (text.length > MAX_RESPONSE_BYTES) return null;
         const response: unknown = JSON.parse(text);
-        const config = parseRemoteConfig(response);
-        return config ? { response, config } : null;
+        return response;
       } catch {
         continue;
       } finally {
