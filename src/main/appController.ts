@@ -250,6 +250,14 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     }, 60_000);
     this.profile = await this.loadProfile();
     if (this.profile) {
+      // Keep the Game switch reachable during an API outage so the user can
+      // disable it and connect with the ordinary cached profile. Connecting
+      // with Game still requires a fresh server-side profile below.
+      const cachedGame = this.profile.game;
+      this.updateGame({ available: cachedGame?.enabled === true && this.state.sessionAvailable
+        && (!this.profile.subscriptionExpiresAt || Date.parse(this.profile.subscriptionExpiresAt) > Date.now()),
+        routes: (cachedGame?.servers ?? []).map(({ id, name, countryCode }) => ({ id, name, countryCode })),
+      });
       this.state.servers = this.profile.servers;
       this.state.selectedSubscriptionId = this.profile.subscriptionId;
       this.state.selectedServerId = await this.loadString("selected_server")
@@ -771,8 +779,9 @@ export class AppController extends EventEmitter<AppControllerEvents> {
       if (replacingGame) await this.stopTunnelForReplacement();
       this.profile = profile;
       this.gameValidatedAt = Date.now();
-      if (!profile.game?.enabled && this.state.settings.gameEnabled) {
-        this.state.settings = { ...this.state.settings, gameEnabled: false };
+      const routeRemoved = this.state.settings.gameRouteId && !profile.game?.servers.some((server) => server.id === this.state.settings.gameRouteId);
+      if ((!profile.game?.enabled && this.state.settings.gameEnabled) || routeRemoved) {
+        this.state.settings = { ...this.state.settings, gameEnabled: profile.game?.enabled === true && this.state.settings.gameEnabled === true, gameRouteId: null };
         await this.secureStore.put("settings", Buffer.from(JSON.stringify(serializeSettings(this.state.settings))));
       }
       this.updateGame({ available: profile.game?.enabled === true,
