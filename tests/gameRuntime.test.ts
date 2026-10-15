@@ -93,18 +93,18 @@ describe("Game routing with the bundled Xray core", () => {
       expect(gamePackets).toBe(0);
       const candidate = await measureGameRoute(probePort!, "test-pass", AbortSignal.timeout(5000));
       expect(candidate.lossPercent).toBe(0);
-      expect(gamePackets).toBe(8);
+      expect(gamePackets).toBe(10);
       const blocked = await measureGameRoute(gameAppPort!, "test-pass", AbortSignal.timeout(300));
       expect(blocked.latencyMs).toBeNull();
       expect(normalPackets).toBe(0);
       execFileSync(executable, ["api", "bo", `--server=127.0.0.1:${apiPort}`, "-b", GAME_BALANCER, gameTag(0)], { stdio: "pipe", timeout: 5000 });
       const gaming = await measureGameRoute(gameAppPort!, "test-pass", AbortSignal.timeout(5000));
       expect(gaming.lossPercent).toBe(0);
-      expect(gamePackets).toBe(16);
+      expect(gamePackets).toBe(20);
       const ordinary = await measureGameRoute(normalAppPort!, "test-pass", AbortSignal.timeout(5000));
       expect(ordinary.lossPercent).toBe(0);
-      expect(normalPackets).toBe(8);
-      expect(gamePackets).toBe(16);
+      expect(normalPackets).toBe(10);
+      expect(gamePackets).toBe(20);
     } finally {
       if (core && core.exitCode === null) { const done = once(core, "exit"); core.kill(); await done; }
       gameDns.close(); normalDns.close();

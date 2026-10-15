@@ -74,9 +74,17 @@ export class XrayManager extends EventEmitter<XrayEvents> {
       try {
         const proxies = await this.gameTuic.startRoutes(gameTuic, interfaceName);
         for (const [tag, proxy] of proxies) launchConfig = withTuicProxy(launchConfig, proxy, tag);
-      } catch (error) {
-        await this.stop();
-        throw error;
+      } catch {
+        await this.gameTuic.stop();
+        const tags = new Set(gameTuic.map((route) => route.tag));
+        const outbounds = Array.isArray(launchConfig.outbounds) ? launchConfig.outbounds : [];
+        launchConfig = { ...launchConfig, outbounds: outbounds.map((outbound: unknown) => {
+          if (typeof outbound === "object" && outbound !== null && "tag" in outbound && typeof outbound.tag === "string" && tags.has(outbound.tag)) {
+            return { tag: outbound.tag, protocol: "blackhole", settings: {} };
+          }
+          return outbound;
+        }) };
+        this.emit("log", "Game: TUIC недоступен; проверяем остальные игровые маршруты");
       }
     }
     const configInput = Buffer.from(JSON.stringify(bindXrayOutboundInterface(launchConfig, interfaceName, outbound.ipv6)), "utf8");

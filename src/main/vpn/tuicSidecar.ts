@@ -94,7 +94,12 @@ export class TuicSidecar extends EventEmitter<TuicSidecarEvents> {
     const outbounds: unknown[] = [];
     const rules: unknown[] = [];
     for (const { tag, endpoint } of routes) {
-      const proxy = { port: await freeLoopbackPort(), id: randomUUID() };
+      let port = await freeLoopbackPort();
+      for (let attempt = 0; [...proxies.values()].some((value) => value.port === port); attempt++) {
+        if (attempt >= 8) throw new Error("Не удалось выделить игровые порты TUIC");
+        port = await freeLoopbackPort();
+      }
+      const proxy = { port, id: randomUUID() };
       const config = buildTuicSidecarConfig(endpoint, proxy, interfaceName);
       const inbound = (config.inbounds as Record<string, unknown>[])[0]!;
       const outbound = (config.outbounds as Record<string, unknown>[])[0]!;

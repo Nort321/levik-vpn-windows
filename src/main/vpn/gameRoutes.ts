@@ -45,7 +45,9 @@ export function bestGameRoute(servers: TunnelServer[], quality: Record<string, G
 export async function measureGameRoute(port: number, password: string, signal: AbortSignal): Promise<GameRouteQuality> {
   // Separate associations also prevent destination aliasing in UDP transports.
   const samples = await Promise.all([[1, 1, 1, 1], [8, 8, 8, 8]].map((address) => measureGameTarget(port, password, signal, address)));
-  return summarizeGameSamples(samples.flat());
+  const quality = summarizeGameSamples(samples.flat());
+  const jitter = samples.map((target) => summarizeGameSamples(target).jitterMs).filter((value): value is number => value !== null);
+  return { ...quality, jitterMs: jitter.length ? Math.round(jitter.reduce((sum, value) => sum + value, 0) / jitter.length) : null };
 }
 
 async function measureGameTarget(port: number, password: string, signal: AbortSignal, address: number[]): Promise<Array<number | null>> {
@@ -103,10 +105,13 @@ async function measureGameTarget(port: number, password: string, signal: AbortSi
     await new Promise<void>((resolve, reject) => {
       const onError = (): void => reject(new Error("SOCKS UDP socket unavailable"));
       udp.once("error", onError);
-      udp.connect(relayPort, "127.0.0.1", () => { udp.removeListener("error", onError); resolve(); });
+      udp.once("close", onError);
+      udp.connect(relayPort, "127.0.0.1", () => { udp.removeListener("error", onError); udp.removeListener("close", onError); resolve(); });
     });
     clearTimeout(deadline);
-    for (let index = 0; index < count && !signal.aborted && !failure; index++) {
+    // Warm the authenticated transport before measuring jitter; a QUIC/TLS
+    // handshake is connection setup, not jitter of an established game flow.
+    for (let index = -1; index < count && !signal.aborted && !failure; index++) {
       const id = randomBytes(2);
       const dns = Buffer.concat([id, Buffer.from("01000001000000000000076578616d706c6503636f6d0000010001", "hex")]);
       const packet = Buffer.concat([Buffer.from([0, 0, 0, 1, ...address, 0, 53]), dns]);
@@ -135,7 +140,7 @@ async function measureGameTarget(port: number, password: string, signal: AbortSi
         signal.addEventListener("abort", onClose, { once: true });
         udp.send(packet, (error) => { if (error) finish(null); });
       });
-      samples.push(latency);
+      if (index >= 0) samples.push(latency);
       if (!signal.aborted) await new Promise<void>((resolve) => setTimeout(resolve, 100));
     }
   } catch {

@@ -61,13 +61,14 @@ export function buildXrayConfig(
       { type: "field", inboundTag: [gameProbeTag(index)], ip: ["1.1.1.1", "8.8.8.8"], port: "53", network: "udp", outboundTag: gameTag(index) },
       { type: "field", inboundTag: [gameProbeTag(index)], outboundTag: "levik-block" },
     ]),
-    { type: "field", ip: LOCAL_CIDRS, outboundTag: "direct" },
+    ...(gameRules.length ? [{ type: "field", ip: LOCAL_CIDRS, outboundTag: "direct" }] : []),
     // Explicit Game selection wins over process bypass and regional direct rules.
     ...(gameRules.length ? [{ type: "field", process: gameRules, network: "tcp,udp",
       ...(gaming ? { balancerTag: GAME_BALANCER } : { outboundTag: "levik-block" }), ruleTag: "game" }] : []),
     ...(processBypass
       ? [{ type: "field", process: processes, network: "tcp,udp", outboundTag: "direct", ruleTag: "process-bypass" }]
       : []),
+    ...(!gameRules.length ? [{ type: "field", ip: LOCAL_CIDRS, outboundTag: "direct" }] : []),
     ...(settings.splitTunnelMode === "only" && processes.length
       ? [{ type: "field", process: processes, network: "tcp,udp", outboundTag: server.tag }]
       : []),
