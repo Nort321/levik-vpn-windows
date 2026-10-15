@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { bestGameRoute, summarizeGameSamples, GAME_BALANCER, GAME_BLOCK } from "../src/main/vpn/gameRoutes";
+import { bestGameRoute, summarizeGameSamples, gameDnsProbe, GAME_BALANCER, GAME_BLOCK, GAME_DATA_PROBE_TAG } from "../src/main/vpn/gameRoutes";
 import { gameProcesses, normalizeGameIds } from "../src/shared/games";
 import { prepareTunnelProfile } from "../src/main/vpn/tunnelProfile";
-import { buildXrayConfig, GAME_MULTIPATH } from "../src/main/vpn/xrayConfig";
+import { buildXrayConfig, bindXrayOutboundInterface, GAME_MULTIPATH, GAME_UDP_BALANCER } from "../src/main/vpn/xrayConfig";
 import type { AppSettings, TunnelServer } from "../src/shared/contracts";
 
 const settings: AppSettings = {
@@ -63,9 +63,16 @@ describe("Game access and routing", () => {
     const config = buildXrayConfig(p, p.servers[0]!, { ...settings, gameMultipath: true }, "session-password");
     const rules = (config.routing as { rules: Record<string, unknown>[] }).rules;
     const redundant = rules.find((rule) => rule.ruleTag === "game-multipath")!;
-    expect(redundant).toMatchObject({ network: "udp", ip: ["0.0.0.0/0"], outboundTag: GAME_MULTIPATH, process: ["VALORANT.exe", "VALORANT-Win64-Shipping.exe"] });
+    expect(redundant).toMatchObject({ network: "udp", ip: ["0.0.0.0/0"], balancerTag: GAME_UDP_BALANCER, process: ["VALORANT.exe", "VALORANT-Win64-Shipping.exe"] });
     expect(rules.indexOf(redundant)).toBeLessThan(rules.findIndex((rule) => rule.ruleTag === "game"));
     expect(rules.find((rule) => rule.port === "37079")).toMatchObject({ ip: ["127.0.0.1"], network: "udp", inboundTag: ["levik-game-probe-0"] });
+    expect(rules.filter((rule) => (rule.inboundTag as string[] | undefined)?.includes(GAME_DATA_PROBE_TAG))).toEqual([
+      expect.objectContaining({ ip: ["1.1.1.1", "8.8.8.8"], network: "udp", port: "53", outboundTag: GAME_MULTIPATH }),
+      expect.objectContaining({ outboundTag: "levik-block" }),
+    ]);
+    const bound = bindXrayOutboundInterface(config, "Ethernet", true, "Loopback Pseudo-Interface 1");
+    expect((bound.outbounds as Array<Record<string, unknown>>).find((outbound) => outbound.tag === GAME_MULTIPATH))
+      .toHaveProperty("streamSettings.sockopt.interface", "Loopback Pseudo-Interface 1");
     const revoked = profile({ enabled: false, endpoints: [endpoint] });
     const denied = buildXrayConfig(revoked, revoked.servers[0]!, { ...settings, gameMultipath: true }, "session-password");
     expect((denied.outbounds as Array<{ tag: string }>).some((outbound) => outbound.tag === GAME_MULTIPATH)).toBe(false);
@@ -79,6 +86,15 @@ describe("Game access and routing", () => {
 });
 
 describe("Game quality selection", () => {
+  it("builds a 1200-byte DNS probe with a valid EDNS padding record", () => {
+    const plain = gameDnsProbe(Buffer.from([0x12, 0x34]));
+    const padded = gameDnsProbe(Buffer.from([0x12, 0x34]), 1200);
+    expect(padded.length).toBe(1200);
+    expect(padded.readUInt16BE(10)).toBe(1);
+    expect(padded.readUInt16BE(plain.length + 1)).toBe(41);
+    expect(padded.readUInt16BE(plain.length + 11)).toBe(12);
+    expect(padded.readUInt16BE(plain.length + 13)).toBe(1200 - plain.length - 15);
+  });
   const server = (id: string, protocol = "hysteria"): TunnelServer => ({ id, tag: id, name: id, countryCode: "RU", outbound: { protocol } });
   it("chooses stability over one low latency and rejects unusable paths", () => {
     const servers = [server("fast"), server("steady"), server("down")];

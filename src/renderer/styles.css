@@ -497,7 +497,7 @@ select option { color: var(--text); background-color: var(--select-bg); }
 .game-path > svg { width: 20px; height: 20px; color: var(--blue-bright); }
 .game-path-ordinary { opacity: .8; }
 .game-path-ordinary .game-path-number { color: var(--muted); }
-.game-proof { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; padding: 18px 0; border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); }
+.game-proof { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; padding: 18px 0; border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); }
 .game-proof strong { display: block; font-size: 23px; font-variant-numeric: tabular-nums; }
 .game-proof span { display: block; font-size: 10px; color: var(--muted); margin-top: 6px; line-height: 1.5; }
 .game-chart-heading { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-top: 26px; font-size: 12px; }

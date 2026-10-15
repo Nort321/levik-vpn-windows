@@ -7,6 +7,8 @@ import type { GameRouteQuality, TunnelServer } from "../../shared/contracts";
 export const GAME_BALANCER = "levik-game";
 export const GAME_BLOCK = "levik-game-block";
 export const GAME_PROBE_PORT = 47210;
+export const GAME_DATA_PROBE_PORT = 47280;
+export const GAME_DATA_PROBE_TAG = "levik-game-data-check";
 export const GAME_PROBE_USER = "levik-game";
 export const gameTag = (index: number): string => `levik-game-route-${index}`;
 export const gameProbeTag = (index: number): string => `levik-game-probe-${index}`;
@@ -41,15 +43,15 @@ export function bestGameRoute(servers: TunnelServer[], quality: Record<string, G
 /** Measures real UDP DNS round trips through one authenticated, loopback SOCKS inbound.
  * These are control-point measurements, never presented as a game's match ping.
  */
-export async function measureGameRoute(port: number, password: string, signal: AbortSignal): Promise<GameRouteQuality> {
+export async function measureGameRoute(port: number, password: string, signal: AbortSignal, payloadBytes = 0): Promise<GameRouteQuality> {
   // Separate associations also prevent destination aliasing in UDP transports.
-  const samples = await Promise.all([[1, 1, 1, 1], [8, 8, 8, 8]].map((address) => measureGameTarget(port, password, signal, address)));
+  const samples = await Promise.all([[1, 1, 1, 1], [8, 8, 8, 8]].map((address) => measureGameTarget(port, password, signal, address, payloadBytes)));
   const quality = summarizeGameSamples(samples.flat());
   const jitter = samples.map((target) => summarizeGameSamples(target).jitterMs).filter((value): value is number => value !== null);
   return { ...quality, jitterMs: jitter.length ? Math.round(jitter.reduce((sum, value) => sum + value, 0) / jitter.length) : null };
 }
 
-async function measureGameTarget(port: number, password: string, signal: AbortSignal, address: number[]): Promise<Array<number | null>> {
+async function measureGameTarget(port: number, password: string, signal: AbortSignal, address: number[], payloadBytes: number): Promise<Array<number | null>> {
   const count = SAMPLE_COUNT / 2;
   const samples: Array<number | null> = [];
   const tcp = new Socket();
@@ -112,7 +114,7 @@ async function measureGameTarget(port: number, password: string, signal: AbortSi
     // handshake is connection setup, not jitter of an established game flow.
     for (let index = -1; index < count && !signal.aborted && !failure; index++) {
       const id = randomBytes(2);
-      const dns = Buffer.concat([id, Buffer.from("01000001000000000000076578616d706c6503636f6d0000010001", "hex")]);
+      const dns = gameDnsProbe(id, payloadBytes);
       const packet = Buffer.concat([Buffer.from([0, 0, 0, 1, ...address, 0, 53]), dns]);
       const latency = await new Promise<number | null>((resolve) => {
         let settled = false;
@@ -151,4 +153,17 @@ async function measureGameTarget(port: number, password: string, signal: AbortSi
   }
   while (samples.length < count) samples.push(null);
   return samples;
+}
+
+/** RFC 7830 EDNS padding tests transport payload size without synthetic game traffic. */
+export function gameDnsProbe(id: Buffer, payloadBytes = 0): Buffer {
+  const question = Buffer.concat([id, Buffer.from("01000001000000000000076578616d706c6503636f6d0000010001", "hex")]);
+  if (!payloadBytes) return question;
+  if (id.length !== 2 || payloadBytes < question.length + 15 || payloadBytes > 1472) throw new Error("Invalid probe size");
+  question.writeUInt16BE(1, 10);
+  const padding = payloadBytes - question.length - 15;
+  const opt = Buffer.alloc(15 + padding);
+  opt.writeUInt16BE(41, 1); opt.writeUInt16BE(1232, 3);
+  opt.writeUInt16BE(4 + padding, 9); opt.writeUInt16BE(12, 11); opt.writeUInt16BE(padding, 13);
+  return Buffer.concat([question, opt]);
 }

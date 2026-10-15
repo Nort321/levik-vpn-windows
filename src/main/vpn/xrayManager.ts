@@ -5,11 +5,12 @@ import { join } from "node:path";
 import { EventEmitter } from "node:events";
 import { promisify } from "node:util";
 import { parseXrayStats, XRAY_STATS_ENDPOINT } from "./xrayStats";
-import { bindXrayOutboundInterface, GAME_MULTIPATH } from "./xrayConfig";
+import { bindXrayOutboundInterface, GAME_MULTIPATH, GAME_UDP_BALANCER } from "./xrayConfig";
 import { GameMultipath } from "./multipath/client";
+import { networkInterfaces } from "node:os";
 import { findWindowsOutboundInterface } from "../windows/outboundInterface";
 import { TuicSidecar, withTuicProxy } from "./tuicSidecar";
-import type { TuicEndpoint } from "../../shared/contracts";
+import type { TuicEndpoint, GameMultipathStats } from "../../shared/contracts";
 import { GAME_BALANCER, GAME_BLOCK, gameTag } from "./gameRoutes";
 
 const execFileAsync = promisify(execFile);
@@ -30,11 +31,26 @@ export class XrayManager extends EventEmitter<XrayEvents> {
   private readonly gameTuic = new TuicSidecar(stopChild);
   private outboundName: string | null = null;
   private multipath: GameMultipath | null = null;
+  private gameUdpFallback = false;
 
-  get gameMultipathStats() { return this.multipath?.snapshot() ?? null; }
+  get gameMultipathStats(): GameMultipathStats | null {
+    const stats = this.multipath?.snapshot();
+    return stats ? { ...stats, ...(this.gameUdpFallback ? { state: "fallback" as const } : {}) } : null;
+  }
+
+  async selectGameUdpRoute(index: number | null): Promise<void> {
+    const child = this.process;
+    if (!child) throw new Error("VPN disconnected");
+    await execFileAsync(this.executablePath(), ["api", "bo", `--server=${XRAY_STATS_ENDPOINT}`, "-b", GAME_UDP_BALANCER,
+      index === null ? GAME_MULTIPATH : gameTag(index)], { windowsHide: true, timeout: 4_000, maxBuffer: 16 * 1024 });
+    if (this.process !== child) throw new Error("VPN connection changed");
+    this.gameUdpFallback = index !== null;
+    if (index === null) this.multipath?.startCounting();
+    else await this.multipath?.stop();
+  }
 
   async connectGameMultipath(candidates: Array<{ index: number; port: number }>, password: string): Promise<void> {
-    await this.multipath?.connect(candidates.slice(0, 4), password);
+    await this.multipath?.connect(candidates, password);
   }
 
   constructor() {
@@ -97,11 +113,12 @@ export class XrayManager extends EventEmitter<XrayEvents> {
     }
     if (Array.isArray(launchConfig.outbounds) && launchConfig.outbounds.some((outbound: unknown) =>
       typeof outbound === "object" && outbound !== null && "tag" in outbound && outbound.tag === GAME_MULTIPATH)) {
-      this.multipath = new GameMultipath();
+      this.multipath = new GameMultipath(false);
       const local = await this.multipath.listen();
       launchConfig = withTuicProxy(launchConfig, { port: local.port, id: local.uuid }, GAME_MULTIPATH);
     }
-    const configInput = Buffer.from(JSON.stringify(bindXrayOutboundInterface(launchConfig, interfaceName, outbound.ipv6)), "utf8");
+    const loopback = Object.entries(networkInterfaces()).find(([, addresses]) => addresses?.some((address) => address.address === "127.0.0.1"))?.[0];
+    const configInput = Buffer.from(JSON.stringify(bindXrayOutboundInterface(launchConfig, interfaceName, outbound.ipv6, loopback)), "utf8");
     this.emit("log", `Xray: outbound interface [${interfaceName}] (TCP/UDP, direct, IPv6 ${outbound.ipv6 ? "on" : "off"})`);
     try {
       await this.validate(configInput);
@@ -135,6 +152,7 @@ export class XrayManager extends EventEmitter<XrayEvents> {
   }
 
   async stop(): Promise<void> {
+    this.gameUdpFallback = false;
     const multipath = this.multipath; this.multipath = null;
     await multipath?.stop();
     this.stopStatsPolling();

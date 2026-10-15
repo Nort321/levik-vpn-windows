@@ -3,7 +3,7 @@ import { randomBytes } from "node:crypto";
 import { decode, encode, HEADER, MAX_PAYLOAD, Kind, publicIPv4, RELAY_PORT, SequenceWindow, type Packet } from "./wire";
 
 interface Flow { socket: Socket; seen: SequenceWindow; sequence: number; address: string; port: number; touched: number }
-interface Session { paths: Map<number, { address: string; port: number; touched: number }>; flows: Map<string, Flow>; touched: number; tokens: number; refilled: number }
+interface Session { paths: Map<number, { address: string; port: number; touched: number; active: boolean }>; flows: Map<string, Flow>; touched: number; tokens: number; refilled: number }
 
 /** Loopback-only egress. Access is granted by the node's Game inbound rule. */
 export async function startRelay(options: { port?: number; allowTestLoopback?: boolean } = {}) {
@@ -40,7 +40,7 @@ export async function startRelay(options: { port?: number; allowTestLoopback?: b
     }
     if (!charge(session, data.length, now)) return;
     session.touched = now;
-    session.paths.set(packet.path, { address: remote.address, port: remote.port, touched: now });
+    session.paths.set(packet.path, { address: remote.address, port: remote.port, touched: now, active: packet.kind === Kind.Up || packet.payload[0] !== 0 });
     if (packet.kind === Kind.Ping) {
       if (packet.payload.length <= 32) send(encode({ ...packet, kind: Kind.Pong, payload: instance }), remote);
       return;
@@ -60,12 +60,11 @@ export async function startRelay(options: { port?: number; allowTestLoopback?: b
       upstream.on("error", () => {});
       upstream.on("message", (payload, peer) => {
         if (peer.address !== targetFlow.address || peer.port !== targetFlow.port || payload.length > MAX_PAYLOAD || targetFlow.sequence >= 0xffffffff) return;
-        if (!charge(targetSession, payload.length * targetSession.paths.size, Date.now())) return;
+        const activePaths = [...targetSession.paths].filter(([, endpoint]) => endpoint.active && Date.now() - endpoint.touched < 10_000);
+        if (!charge(targetSession, payload.length * activePaths.length, Date.now())) return;
         targetFlow.touched = Date.now();
         const response: Packet = { ...envelope, kind: Kind.Down, sequence: targetFlow.sequence++, payload };
-        for (const [path, endpoint] of targetSession.paths) {
-          if (Date.now() - endpoint.touched < 10_000) send(encode({ ...response, path }), endpoint);
-        }
+        for (const [path, endpoint] of activePaths) send(encode({ ...response, path }), endpoint);
       });
     }
     if (flow.address !== packet.address || flow.port !== packet.port || !flow.seen.accept(packet.sequence)) { counts.duplicates++; return; }

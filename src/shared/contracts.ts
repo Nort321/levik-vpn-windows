@@ -227,8 +227,8 @@ export interface GameSnapshot {
 }
 
 export interface GameMultipathStats {
-  state: "protected" | "single" | "unavailable";
-  paths: Array<{ routeIndex: number; latencyMs: number | null; responding: boolean; firstReplies: number }>;
+  state: "protected" | "single" | "unavailable" | "fallback";
+  paths: Array<{ routeIndex: number; latencyMs: number | null; responding: boolean; active?: boolean; firstReplies: number }>;
   receivedPackets: number;
   duplicateReplies: number;
   uploadedPackets: number;

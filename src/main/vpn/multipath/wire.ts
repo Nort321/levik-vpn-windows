@@ -4,6 +4,7 @@ import { isIP } from "node:net";
 // publicly: possession of a session id is not a substitute for VPN authentication.
 export const RELAY_PORT = 37079;
 export const HEADER = 56;
+export const MAX_PATHS = 8;
 export const MAX_PAYLOAD = 60_000;
 export const enum Kind { Ping = 1, Pong = 2, Up = 3, Down = 4 }
 export interface Packet {
@@ -12,7 +13,7 @@ export interface Packet {
 }
 export function encode(packet: Packet): Buffer {
   if (packet.session.length !== 32 || packet.flow.length !== 8 || packet.payload.length > MAX_PAYLOAD
-    || isIP(packet.address) !== 4 || packet.path < 0 || packet.path > 1) throw new Error("Invalid Game packet");
+    || isIP(packet.address) !== 4 || packet.path < 0 || packet.path >= MAX_PATHS) throw new Error("Invalid Game packet");
   const out = Buffer.allocUnsafe(HEADER + packet.payload.length);
   out.write("LGM1", 0, "ascii"); out[4] = packet.kind; out[5] = packet.path;
   packet.session.copy(out, 6); packet.flow.copy(out, 38); out.writeUInt32BE(packet.sequence, 46);
@@ -22,7 +23,7 @@ export function encode(packet: Packet): Buffer {
 }
 export function decode(data: Buffer): Packet | null {
   if (data.length < HEADER || data.length > HEADER + MAX_PAYLOAD || data.toString("ascii", 0, 4) !== "LGM1"
-    || data[4]! < Kind.Ping || data[4]! > Kind.Down || data[5]! > 1) return null;
+    || data[4]! < Kind.Ping || data[4]! > Kind.Down || data[5]! >= MAX_PATHS) return null;
   return { kind: data[4]!, path: data[5]!, session: data.subarray(6, 38), flow: data.subarray(38, 46),
     sequence: data.readUInt32BE(46), address: [...data.subarray(50, 54)].join("."),
     port: data.readUInt16BE(54), payload: data.subarray(HEADER) };

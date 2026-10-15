@@ -62,7 +62,7 @@ import {
 } from "./platform/settingsSync";
 import type { SyncedSettings } from "./platform/settingsSync";
 import { gameProcesses, normalizeGameIds } from "../shared/games";
-import { bestGameRoute, measureGameRoute, GAME_PROBE_PORT, gameTag } from "./vpn/gameRoutes";
+import { bestGameRoute, measureGameRoute, GAME_PROBE_PORT, GAME_DATA_PROBE_PORT, gameTag } from "./vpn/gameRoutes";
 
 interface AppControllerEvents {
   changed: [snapshot: AppSnapshot];
@@ -1231,11 +1231,34 @@ export class AppController extends EventEmitter<AppControllerEvents> {
         if (this.state.settings.gameMultipath && this.gamePassword) {
           const quality = this.state.game?.quality ?? {};
           const candidates = (this.profile?.game?.servers ?? []).map((server, index) => ({ server, index }))
-            .filter(({ server }) => ["hysteria", "tuic"].includes(String(server.outbound.protocol)) && quality[server.id]?.latencyMs != null && quality[server.id]!.lossPercent <= 25)
+            .filter(({ server }) => ["hysteria", "tuic", "vless"].includes(String(server.outbound.protocol)))
             .sort((a, b) => (quality[a.server.id]?.latencyMs ?? Infinity) - (quality[b.server.id]?.latencyMs ?? Infinity))
             .map(({ index }) => ({ index, port: GAME_PROBE_PORT + index }));
-          try { await this.xray.connectGameMultipath(candidates, this.gamePassword); }
-          catch { this.updateGame({ phase: "degraded", message: "Multipath недоступен: игровые UDP-пакеты приостановлены. Выберите минимальную задержку и переподключитесь. Обычный VPN работает." }); }
+          try {
+            await this.xray.connectGameMultipath(candidates, this.gamePassword);
+            this.assertCurrentConnection(generation);
+            const dataAbort = new AbortController();
+            this.gameProbeAbort = dataAbort;
+            const dataCheck = await measureGameRoute(GAME_DATA_PROBE_PORT, this.gamePassword,
+              AbortSignal.any([dataAbort.signal, AbortSignal.timeout(12_000)]), 1200).finally(() => {
+                if (this.gameProbeAbort === dataAbort) this.gameProbeAbort = null;
+              });
+            this.assertCurrentConnection(generation);
+            if (dataCheck.latencyMs === null || dataCheck.lossPercent > 25) throw new Error("Game UDP validation failed");
+            const primary = this.xray.gameMultipathStats?.paths.filter((path) => path.responding)
+              .sort((a, b) => (a.latencyMs ?? Infinity) - (b.latencyMs ?? Infinity))[0];
+            if (!primary) throw new Error("No Game path");
+            await this.xray.selectGameRoute(primary.routeIndex);
+            await this.xray.selectGameUdpRoute(null);
+            this.updateGame({ activeRouteId: this.profile?.game?.servers[primary.routeIndex]?.id ?? null, phase: "ready", message: null });
+          } catch {
+            this.assertCurrentConnection(generation);
+            const fallback = this.profile?.game?.servers.findIndex((server) => server.id === this.state.game?.activeRouteId) ?? -1;
+            if (fallback >= 0) {
+              await this.xray.selectGameUdpRoute(fallback);
+              this.updateGame({ message: "Multipath не запустился. Игра работает через основной игровой туннель; повторная попытка — при следующем подключении." });
+            } else this.updateGame({ phase: "degraded", message: "Игровые маршруты недоступны. Переподключите VPN." });
+          }
           this.assertCurrentConnection(generation);
           this.updateGame({ multipath: this.xray.gameMultipathStats });
         }

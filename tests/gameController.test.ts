@@ -22,6 +22,25 @@ function controller() {
 }
 
 describe("Game controller", () => {
+  it.each([false, true])("requires full-size UDP through multipath before activation (data works: %s)", async (working) => {
+    vi.mocked(measureGameRoute).mockReset();
+    vi.mocked(measureGameRoute).mockResolvedValueOnce(summarizeGameSamples(Array(8).fill(20)))
+      .mockResolvedValueOnce(summarizeGameSamples(Array(8).fill(30)))
+      .mockResolvedValueOnce(summarizeGameSamples(Array(8).fill(working ? 25 : null)));
+    const { app, state, selectGameRoute } = controller();
+    state.settings.gameMultipath = true;
+    const selectGameUdpRoute = vi.fn().mockResolvedValue(undefined);
+    Reflect.set(app, "xray", { isRunning: () => true, start: vi.fn(), stop: vi.fn(), selectGameRoute,
+      selectGameUdpRoute, connectGameMultipath: vi.fn(), gameMultipathStats: {
+        state: "protected", paths: [{ routeIndex: 0, responding: true, latencyMs: 20 }],
+      } });
+    Reflect.set(app, "killSwitch", { allowTunnel: vi.fn() });
+    const start = Reflect.get(app, "startXray") as (config: Record<string, unknown>, generation: number) => Promise<void>;
+    await start.call(app, {}, Reflect.get(app, "connectionGeneration") as number);
+    expect(vi.mocked(measureGameRoute).mock.calls.at(-1)?.[3]).toBe(1200);
+    expect(selectGameUdpRoute).toHaveBeenCalledWith(working ? null : 0);
+    if (!working) expect(app.snapshot().game?.message).toContain("основной игровой туннель");
+  });
   it("rejects renderer attempts to enable Game without an authorized profile", async () => {
     const app = new AppController();
     await expect(app.updateSettings({ gameEnabled: true, gameIds: ["valorant"] })).rejects.toThrow("Game Squad");
