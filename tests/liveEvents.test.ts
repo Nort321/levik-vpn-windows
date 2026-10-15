@@ -13,6 +13,7 @@ describe("event stream parser", () => {
     expect(parser.push("retry: 5000\nevent: rea")).toEqual([]);
     expect(parser.push("dy\ndata: {}\n\n: ping\n\nevent: settings\r\ndata: {}\r\n\r\n")).toEqual(["ready", "settings"]);
     expect(parser.push("event: wipe\ndata: {}\n\n")).toEqual([]);
+    expect(parser.push("event: rules\ndata: {}\n\n")).toEqual(["rules"]);
     expect(parser.push("data: {}\n\n")).toEqual([]);
   });
 

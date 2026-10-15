@@ -24,7 +24,7 @@ import { DeviceIdentity } from "./security/deviceIdentity";
 import type { SerializedIdentity } from "./security/deviceIdentity";
 import { RequestSigner } from "./security/requestSigner";
 import { SecureStore } from "./security/secureStore";
-import { decryptTunnelProfile, prepareTunnelProfile } from "./vpn/tunnelProfile";
+import { decryptTunnelProfile, prepareTunnelProfile, ruleRoutingKey } from "./vpn/tunnelProfile";
 import type { PreparedTunnelProfile } from "./vpn/tunnelProfile";
 import { buildXrayConfig } from "./vpn/xrayConfig";
 import { XrayManager } from "./vpn/xrayManager";
@@ -980,6 +980,29 @@ export class AppController extends EventEmitter<AppControllerEvents> {
         this.runCommands();
         this.refreshRemoteIfWatched();
         break;
+      case "rules":
+        void this.applyAccountRules();
+        break;
+    }
+  }
+
+  /**
+   * The account's rules changed, docs/app-platform.md "Account rules". The
+   * server folds them into the tunnel profile: fetch it and, while connected,
+   * reconnect when the routing it carries changed.
+   */
+  private async applyAccountRules(): Promise<void> {
+    const subscriptionId = this.state.selectedSubscriptionId;
+    if (!this.accessToken || !subscriptionId || this.state.busy) return;
+    const before = ruleRoutingKey(this.profile);
+    try {
+      await this.loadTunnelProfile(subscriptionId);
+      if (ruleRoutingKey(this.profile) === before || !this.xray.isRunning()) return;
+      this.addLog("Правила аккаунта изменились: переподключение");
+      await this.stopTunnelForReplacement();
+      await this.connect();
+    } catch (error) {
+      this.addLog(`Правила аккаунта: ${messageOf(error)}`);
     }
   }
 

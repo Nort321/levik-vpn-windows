@@ -2,7 +2,7 @@ import { clipboard, dialog, ipcMain, shell } from "electron";
 import type { BrowserWindow } from "electron";
 import { IPC } from "../shared/contracts";
 import { isRemoteCommand } from "../shared/remote";
-import type { AppSettings } from "../shared/contracts";
+import type { AppSettings, CabinetTarget } from "../shared/contracts";
 import { AppController } from "./appController";
 import { listWindowsProcesses, windowsProcessFromPath } from "./windows/processes";
 import { isAllowedExternalUrl, isCabinetTarget } from "./platform/links";
@@ -85,7 +85,7 @@ export function registerIpc(controller: AppController, window: BrowserWindow): v
   });
   ipcMain.handle(IPC.openCabinet, async (_event, target: unknown) => {
     if (!isCabinetTarget(target)) throw new Error("Некорректная страница кабинета");
-    await openAllowedExternal(await controller.cabinetUrl(target));
+    await openCabinet(controller, target);
   });
   ipcMain.handle(IPC.refreshRemote, () => controller.refreshRemote());
   ipcMain.handle(IPC.sendRemoteCommand, (_event, deviceId: unknown, command: unknown) => {
@@ -105,6 +105,11 @@ export function registerIpc(controller: AppController, window: BrowserWindow): v
   controller.on("changed", (snapshot) => {
     if (!window.isDestroyed()) window.webContents.send(IPC.snapshotChanged, snapshot);
   });
+}
+
+/** A cabinet page in the browser, signed in when the app can: for the window and the tray. */
+export async function openCabinet(controller: AppController, target: CabinetTarget): Promise<void> {
+  await openAllowedExternal(await controller.cabinetUrl(target));
 }
 
 async function openAllowedExternal(rawUrl: string): Promise<void> {

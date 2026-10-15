@@ -48,6 +48,14 @@ export function decryptTunnelProfile(identity: DeviceIdentity, envelope: TunnelP
   }
 }
 
+/**
+ * What the account's rules change in a profile, docs/app-platform.md
+ * "Account rules": a running tunnel restarts only when this differs.
+ */
+export function ruleRoutingKey(profile: Pick<PreparedTunnelProfile, "directDomains" | "proxyDomains"> | null): string | null {
+  return profile ? JSON.stringify([profile.directDomains, profile.proxyDomains]) : null;
+}
+
 export function prepareTunnelProfile(plaintext: Uint8Array, expectedSubscriptionId: string): PreparedTunnelProfile {
   if (plaintext.byteLength < 2 || plaintext.byteLength > 4 * 1024 * 1024) throw new Error("Некорректный размер профиля");
   const raw = JSON.parse(Buffer.from(plaintext).toString("utf8")) as RawTunnelProfile;

@@ -44,6 +44,7 @@ export const CABINET_TARGETS: ReadonlyArray<CabinetTarget> = [
   "/dashboard/devices",
   "/dashboard/support",
   "/dashboard/account-security",
+  "/dashboard/rules",
 ];
 
 export function isCabinetTarget(value: unknown): value is CabinetTarget {

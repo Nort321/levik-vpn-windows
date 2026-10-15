@@ -28,7 +28,8 @@ export type CabinetTarget =
   | "/dashboard/orders"
   | "/dashboard/devices"
   | "/dashboard/support"
-  | "/dashboard/account-security";
+  | "/dashboard/account-security"
+  | "/dashboard/rules";
 
 export interface WindowsProcess {
   name: string;

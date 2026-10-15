@@ -2,7 +2,7 @@ import { app, BrowserWindow, dialog, Menu, nativeImage, Notification, powerMonit
 import { join } from "node:path";
 import type { AppSnapshot, AppTab, ConnectionStatus } from "../shared/contracts";
 import { AppController } from "./appController";
-import { registerIpc } from "./ipc";
+import { openCabinet, registerIpc } from "./ipc";
 import { DEEP_LINK_SCHEME, deepLinkFromArgv } from "./platform/links";
 import type { AppNotice } from "./platform/notices";
 
@@ -133,6 +133,8 @@ function updateTray(snapshot?: AppSnapshot): void {
     { type: "separator" },
     { label: "Подключить", enabled: !transitional && status !== "connected", click: () => runTrayAction(() => controller?.connect()) },
     { label: "Отключить", enabled: ["connecting", "connected", "reconnecting", "error"].includes(status), click: () => runTrayAction(() => controller?.disconnect()) },
+    { type: "separator" },
+    { label: "Мои правила…", click: () => runTrayAction(() => (controller ? openCabinet(controller, "/dashboard/rules") : undefined)) },
     { type: "separator" },
     { label: "Выход", click: requestQuit },
   ]));
