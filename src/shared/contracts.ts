@@ -84,6 +84,7 @@ export interface AppSettings {
   gameProcesses?: string[];
   /** null selects the best measured Game route. Local to this computer. */
   gameRouteId?: string | null;
+  gameMultipath?: boolean;
   routingMode: RoutingMode;
   automaticServer: boolean;
   autoReconnect: boolean;
@@ -221,4 +222,14 @@ export interface GameSnapshot {
   recommendedRouteId: string | null;
   phase: "idle" | "probing" | "ready" | "degraded";
   message: string | null;
+  history?: Record<string, GameRouteQuality[]>;
+  multipath?: GameMultipathStats | null;
+}
+
+export interface GameMultipathStats {
+  state: "protected" | "single" | "unavailable";
+  paths: Array<{ routeIndex: number; latencyMs: number | null; responding: boolean; firstReplies: number }>;
+  receivedPackets: number;
+  duplicateReplies: number;
+  uploadedPackets: number;
 }

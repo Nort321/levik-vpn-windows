@@ -85,6 +85,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   gameIds: [],
   gameProcesses: [],
   gameRouteId: null,
+  gameMultipath: false,
   routingMode: "global",
   automaticServer: true,
   autoReconnect: true,
@@ -520,7 +521,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
   async updateSettings(patch: Partial<AppSettings>, origin: "user" | "sync" = "user"): Promise<void> {
     const previous = this.state.settings;
     const next = validateSettings({ ...previous, ...patch });
-    if (next.gameEnabled && (patch.gameEnabled === true || patch.gameIds || patch.gameProcesses || patch.gameRouteId)) {
+    if (next.gameEnabled && (patch.gameEnabled === true || patch.gameMultipath === true || patch.gameIds || patch.gameProcesses || patch.gameRouteId)) {
       if (!this.profile?.game?.enabled || !this.state.game?.available) throw new Error("Game Squad недоступен для выбранной подписки");
       if (!gameProcesses(next).length) throw new Error("Сначала выберите игру");
       if (next.gameRouteId && !this.profile.game.servers.some((server) => server.id === next.gameRouteId)) throw new Error("Игровой маршрут недоступен");
@@ -618,7 +619,9 @@ export class AppController extends EventEmitter<AppControllerEvents> {
         await this.xray.selectGameRoute(servers.indexOf(selected));
         if (!current()) return;
       }
-      this.updateGame({ quality, recommendedRouteId: best?.id ?? null,
+      const history = Object.fromEntries(servers.map((server) => [server.id,
+        [...(this.state.game?.history?.[server.id] ?? []), quality[server.id]!].slice(-60)]));
+      this.updateGame({ quality, history, recommendedRouteId: best?.id ?? null,
         activeRouteId: activeId ?? (healthy ? selected?.id ?? null : null),
         phase: healthy ? "ready" : "degraded",
         message: healthy ? null : activeId
@@ -642,7 +645,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     this.gameProbeAbort?.abort();
     this.gameProbeAbort = null;
     this.gameProbePromise = null;
-    if (this.state.game) this.updateGame({ activeRouteId: null, phase: "idle", message: null });
+    if (this.state.game) this.updateGame({ activeRouteId: null, phase: "idle", message: null, history: {}, multipath: null });
   }
 
   async revokeDevice(subscriptionId: string, deviceId: string): Promise<void> {
@@ -1200,6 +1203,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
   }
 
   private handleTrafficStats(downloadBytes: number, uploadBytes: number): void {
+    if (this.state.settings.gameEnabled && this.state.settings.gameMultipath) this.updateGame({ multipath: this.xray.gameMultipathStats });
     if (downloadBytes < this.lastRawDownload) this.trafficDownloadOffset += this.lastRawDownload;
     if (uploadBytes < this.lastRawUpload) this.trafficUploadOffset += this.lastRawUpload;
     this.lastRawDownload = downloadBytes;
@@ -1224,6 +1228,17 @@ export class AppController extends EventEmitter<AppControllerEvents> {
         this.cancelGameProbes();
         await this.measureGameRoutes();
         this.assertCurrentConnection(generation);
+        if (this.state.settings.gameMultipath && this.gamePassword) {
+          const quality = this.state.game?.quality ?? {};
+          const candidates = (this.profile?.game?.servers ?? []).map((server, index) => ({ server, index }))
+            .filter(({ server }) => ["hysteria", "tuic"].includes(String(server.outbound.protocol)) && quality[server.id]?.latencyMs != null && quality[server.id]!.lossPercent <= 25)
+            .sort((a, b) => (quality[a.server.id]?.latencyMs ?? Infinity) - (quality[b.server.id]?.latencyMs ?? Infinity))
+            .map(({ index }) => ({ index, port: GAME_PROBE_PORT + index }));
+          try { await this.xray.connectGameMultipath(candidates, this.gamePassword); }
+          catch { this.updateGame({ phase: "degraded", message: "Multipath недоступен: игровые UDP-пакеты приостановлены. Выберите минимальную задержку и переподключитесь. Обычный VPN работает." }); }
+          this.assertCurrentConnection(generation);
+          this.updateGame({ multipath: this.xray.gameMultipathStats });
+        }
       }
     } catch (error) {
       await this.xray.stop();
@@ -1455,6 +1470,7 @@ function validateSettings(value: AppSettings): AppSettings {
     gameIds: normalizeGameIds(value.gameIds),
     gameProcesses: normalizeProcessSelection(value.gameProcesses).slice(0, 32),
     gameRouteId: typeof value.gameRouteId === "string" && /^[a-f0-9]{64}$/.test(value.gameRouteId) ? value.gameRouteId : null,
+    gameMultipath: value.gameMultipath === true,
     automaticServer: Boolean(value.automaticServer),
     autoReconnect: Boolean(value.autoReconnect),
     killSwitch: Boolean(value.killSwitch),
@@ -1479,7 +1495,7 @@ function validateSettings(value: AppSettings): AppSettings {
 }
 
 function affectsTunnel(before: AppSettings, after: AppSettings): boolean {
-  if (before.gameEnabled !== after.gameEnabled || (after.gameEnabled && gameProcesses(before).join("\0") !== gameProcesses(after).join("\0"))) return true;
+  if (before.gameEnabled !== after.gameEnabled || (after.gameEnabled && (before.gameMultipath !== after.gameMultipath || gameProcesses(before).join("\0") !== gameProcesses(after).join("\0")))) return true;
   return before.routingMode !== after.routingMode || before.killSwitch !== after.killSwitch || before.useDoh !== after.useDoh || before.dnsServer !== after.dnsServer || before.preventDnsLeaks !== after.preventDnsLeaks || before.antiDpiEnabled !== after.antiDpiEnabled || before.antiDpiPackets !== after.antiDpiPackets || before.antiDpiLength !== after.antiDpiLength || before.antiDpiInterval !== after.antiDpiInterval || before.splitTunnelMode !== after.splitTunnelMode || before.splitTunnelProcesses.join("\0") !== after.splitTunnelProcesses.join("\0");
 }
 

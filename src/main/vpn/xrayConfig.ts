@@ -6,6 +6,8 @@ import { resolveProcessCompanions } from "../../shared/processes";
 import { isIP } from "node:net";
 import { gameProcesses } from "../../shared/games";
 import { GAME_BALANCER, GAME_BLOCK, GAME_PROBE_PORT, GAME_PROBE_USER, gameTag, gameProbeTag } from "./gameRoutes";
+import { RELAY_PORT } from "./multipath/wire";
+export const GAME_MULTIPATH = "levik-game-multipath";
 
 const LOCAL_CIDRS = [
   "0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8", "169.254.0.0/16",
@@ -58,11 +60,13 @@ export function buildXrayConfig(
     { type: "field", inboundTag: ["levik-tun-in"], port: "53", outboundTag: "levik-dns-out" },
     { type: "field", inboundTag: ["levik-dns"], outboundTag: server.tag },
     ...games.flatMap((_game, index) => [
+      ...(settings.gameMultipath ? [{ type: "field", inboundTag: [gameProbeTag(index)], ip: ["127.0.0.1"], port: String(RELAY_PORT), network: "udp", outboundTag: gameTag(index) }] : []),
       { type: "field", inboundTag: [gameProbeTag(index)], ip: ["1.1.1.1", "8.8.8.8"], port: "53", network: "udp", outboundTag: gameTag(index) },
       { type: "field", inboundTag: [gameProbeTag(index)], outboundTag: "levik-block" },
     ]),
     ...(gameRules.length ? [{ type: "field", ip: LOCAL_CIDRS, outboundTag: "direct" }] : []),
     // Explicit Game selection wins over process bypass and regional direct rules.
+    ...(gaming && settings.gameMultipath && gameRules.length ? [{ type: "field", process: gameRules, ip: ["0.0.0.0/0"], network: "udp", outboundTag: GAME_MULTIPATH, ruleTag: "game-multipath" }] : []),
     ...(gameRules.length ? [{ type: "field", process: gameRules, network: "tcp,udp",
       ...(gaming ? { balancerTag: GAME_BALANCER } : { outboundTag: "levik-block" }), ruleTag: "game" }] : []),
     ...(processBypass
@@ -118,6 +122,7 @@ export function buildXrayConfig(
       ...gaming ? games.map((game, index) => game.tuic ? tuicLocalOutbound(gameTag(index))
         : ({ ...withBootstrapResolution(withAlternateXhttpMux(game.outbound)), tag: gameTag(index) })) : [],
       ...(gaming ? [{ tag: GAME_BLOCK, protocol: "blackhole", settings: {} }] : []),
+      ...(gaming && settings.gameMultipath ? [{ ...tuicLocalOutbound(GAME_MULTIPATH), mux: { enabled: false, xudpConcurrency: -1 } }] : []),
       // The pinned core answers non-address queries immediately with NODATA.
       { tag: "levik-dns-out", protocol: "dns", settings: {} },
       { tag: "direct", protocol: "freedom", settings: { domainStrategy: "UseIP" } },

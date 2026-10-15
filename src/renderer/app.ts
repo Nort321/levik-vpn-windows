@@ -172,10 +172,12 @@ function renderGame(): string {
   return `
     <header class="page-header"><div><div class="game-eyebrow">LEVIK GAME</div><h1>Твой маршрут к победе</h1><div class="subtitle">Отдельное соединение для игр. Привычный VPN для всего остального.</div></div><span class="game-access">${icon("check")} Game Squad</span></header>
     <section class="card game-hero" aria-label="Игровое соединение">
-      <div class="game-hero-top"><div><span class="game-status ${active && game.phase !== "degraded" ? "is-live" : ""}"><span class="status-dot ${active ? "connected" : "disconnected"}"></span>${!enabled ? "Режим выключен" : game.phase === "probing" ? "Проверяем UDP-маршруты" : active ? "Игровой маршрут активен" : state.status === "connected" ? "Ожидание рабочего маршрута" : "Готов к подключению"}</span><h2>${escapeHtml(active?.name ?? "Игра — по своему маршруту")}</h2><p>Выберите игры ниже и включите Game. При подключении Levik сравнит доступные маршруты по задержке, её разбросу и ответам UDP.</p></div><div class="game-hero-mark" aria-hidden="true">${icon("game")}</div></div>
-      <div class="game-metrics"><div><span>UDP задержка</span><strong>${metric(quality?.latencyMs, "мс")}</strong></div><div><span>Джиттер</span><strong>${metric(quality?.jitterMs, "мс")}</strong></div><div><span>Без ответа</span><strong>${metric(quality?.lossPercent, "%")}</strong></div></div>
+      <div class="game-hero-top"><div><span class="game-status ${active && game.phase !== "degraded" ? "is-live" : ""}"><span class="status-dot ${active ? "connected" : "disconnected"}"></span>${!enabled ? "Режим выключен" : game.phase === "probing" ? "Проверяем UDP-маршруты" : active ? "Игровой маршрут активен" : state.status === "connected" ? "Ожидание рабочего маршрута" : "Готов к подключению"}</span><h2>${state.settings.gameMultipath ? "Два пути. Одна игровая сессия." : "Каждая миллисекунда важна."}</h2><p>${state.settings.gameMultipath ? "UDP-пакеты идут по двум туннелям. Первую копию передаём игре, повторную удаляем. При отказе одного пути второй продолжает работать." : "При одинаковых потерях выбираем маршрут с меньшей измеренной задержкой. Без искусственного предпочтения протокола."}</p></div><div class="game-hero-mark" aria-hidden="true">${icon("game")}</div></div>
+      <label class="game-route-preference game-mode"><span>Приоритет соединения</span><select id="game-mode" aria-label="Приоритет соединения" ${busy ? "disabled" : ""}><option value="latency" ${!state.settings.gameMultipath ? "selected" : ""}>Минимальная задержка · один туннель</option><option value="multipath" ${state.settings.gameMultipath ? "selected" : ""}>Защита от потерь · Multipath</option></select></label>
+      <div class="game-metrics"><div><span>Контрольный RTT</span><strong>${metric(quality?.latencyMs, "мс")}</strong></div><div><span>Джиттер</span><strong>${metric(quality?.jitterMs, "мс")}</strong></div><div><span>Без ответа</span><strong>${metric(quality?.lossPercent, "%")}</strong></div></div>
       <div class="game-hero-bottom"><span class="muted">${enabled && state.status === "connected" ? "Маршрут закреплён до переподключения" : "Обычный сервер: " + escapeHtml(selectedServer()?.name ?? "автовыбор")}</span><button class="button ${enabled ? "" : "primary"}" id="game-toggle" ${busy || (!enabled && (!gameProcesses(state.settings).length || !game.routes.length)) ? "disabled" : ""}>${icon("power")} ${enabled ? "Выключить Game" : "Включить Game"}</button></div>
     </section>
+    ${renderGameInsights()}
     ${game.message ? `<div class="game-notice" role="status">${icon("pulse")}<span>${escapeHtml(game.message)}</span></div>` : ""}
     ${!game.routes.length ? `<div class="game-notice">В Game Squad пока нет совместимых маршрутов. Обновите подписку после добавления серверов.</div>` : ""}
     <section class="game-library"><div class="game-section-header"><div><h2>Мои игры</h2><p class="muted">Выберите одну или несколько. Лаунчеры остаются на обычном VPN.</p></div><button class="button compact" id="game-add" ${busy ? "disabled" : ""}>${icon("browse")} Добавить .exe</button></div>
@@ -184,14 +186,46 @@ function renderGame(): string {
       <p id="game-no-results" class="muted" hidden>Игра не найдена. Добавьте её исполняемый .exe-файл.</p>
       ${(state.settings.gameProcesses ?? []).length ? `<div class="game-custom">${(state.settings.gameProcesses ?? []).map((name) => `<button class="button compact" data-game-remove="${escapeAttribute(name)}" aria-label="Убрать ${escapeAttribute(name)}" ${busy ? "disabled" : ""}>${escapeHtml(name)} ${icon("close")}</button>`).join("")}</div>` : ""}
     </section>
-    <section class="card game-routes"><div class="game-section-header"><div><h2>Маршруты Game</h2><p class="muted">Автовыбор учитывает стабильность, а не только минимальную задержку.</p></div><button class="button compact" id="game-measure" ${!enabled || state.status !== "connected" || game.phase === "probing" || busy ? "disabled" : ""}>${icon("refresh")} Проверить</button></div>
-      <label class="game-route-preference"><span>Следующее подключение</span><select id="game-route-select" ${busy ? "disabled" : ""}><option value="" ${!state.settings.gameRouteId ? "selected" : ""}>Автоматически · лучший результат UDP-проверки</option>${game.routes.map((route) => `<option value="${escapeAttribute(route.id)}" ${state?.settings.gameRouteId === route.id ? "selected" : ""}>${escapeHtml(route.name)}</option>`).join("")}</select></label>
+    <section class="card game-routes"><div class="game-section-header"><div><h2>Сравнение маршрутов</h2><p class="muted">Меньше задержка — быстрее путь. Потери учитываются отдельно.</p></div><button class="button compact" id="game-measure" ${!enabled || state.status !== "connected" || game.phase === "probing" || busy ? "disabled" : ""}>${icon("refresh")} Проверить</button></div>
+      <label class="game-route-preference"><span>${state.settings.gameMultipath ? "Основной маршрут TCP · следующее подключение" : "Следующее подключение"}</span><select id="game-route-select" ${busy ? "disabled" : ""}><option value="" ${!state.settings.gameRouteId ? "selected" : ""}>Автоматически · лучший результат UDP-проверки</option>${game.routes.map((route) => `<option value="${escapeAttribute(route.id)}" ${state?.settings.gameRouteId === route.id ? "selected" : ""}>${escapeHtml(route.name)}</option>`).join("")}</select></label>
       <div class="game-route-list">${game.routes.map((route) => {
         const q = game.quality[route.id];
-        return `<div class="game-route-row"><div class="game-route-title">${icon("server")}<span><strong>${escapeHtml(route.name)}</strong><small>${route.id === game.activeRouteId ? "Используется сейчас" : route.id === game.recommendedRouteId ? "Лучший результат проверки" : "Доступный маршрут"}</small></span></div><span>${q?.latencyMs == null ? "—" : `${q.latencyMs} мс`}<small>${q ? `${q.lossPercent}% без ответа` : "Ещё не проверен"}</small></span></div>`;
+        const maximum = Math.max(1, ...Object.values(game.quality).map((item) => item.latencyMs ?? 0));
+        return `<div class="game-route-row"><div class="game-route-title">${icon("server")}<span><strong>${escapeHtml(route.name)}</strong><small>${route.id === game.activeRouteId ? state?.settings.gameMultipath ? "Основной путь TCP" : "Используется сейчас" : route.id === game.recommendedRouteId ? "Лучший результат проверки" : "Доступный маршрут"}</small><svg class="game-compare-track" viewBox="0 0 170 3" aria-hidden="true"><rect width="${Math.round((q?.latencyMs ?? 0) / maximum * 170)}" height="3" rx="1.5"/></svg></span></div><span>${q?.latencyMs == null ? "—" : `${q.latencyMs} мс`}<small>${q ? `${q.lossPercent}% без ответа` : "Ещё не проверен"}</small></span></div>`;
       }).join("")}</div>
       <p class="game-footnote">Замеры идут через игровые туннели до двух DNS-серверов и не равны пингу матча. Для смены маршрута завершите матч и переподключите VPN. Добавление игр и включение режима также переподключают VPN.</p>
     </section>`;
+}
+
+function renderGameInsights(): string {
+  const game = state?.game;
+  if (!game || !state) return "";
+  const multipath = state.settings.gameEnabled && state.settings.gameMultipath ? game.multipath : null;
+  const route = game.routes.find((candidate) => candidate.id === game.activeRouteId);
+  const samples = route ? (game.history?.[route.id] ?? []).slice(-30) : [];
+  const good = samples.filter((sample) => sample.latencyMs !== null && Number.isFinite(sample.latencyMs));
+  const maximum = Math.max(10, ...good.map((sample) => sample.latencyMs!)) * 1.15;
+  const started = samples[0]?.measuredAt ?? 0;
+  const span = Math.max(1, (samples.at(-1)?.measuredAt ?? started) - started);
+  let drawing = ""; let connected = false;
+  for (const sample of samples) {
+    if (sample.latencyMs === null || !Number.isFinite(sample.latencyMs)) { connected = false; continue; }
+    const x = 12 + (sample.measuredAt - started) / span * 576;
+    const y = 112 - sample.latencyMs / maximum * 94;
+    drawing += `${connected ? "L" : "M"}${x.toFixed(1)},${y.toFixed(1)} `; connected = true;
+  }
+  const status = multipath?.state === "protected" ? "Оба туннеля отвечают" : multipath?.state === "single" ? "Один туннель отвечает" : "Ожидание измерений";
+  return `<section class="card game-insights" aria-label="Диагностика игрового соединения">
+    <div class="game-section-header"><div><div class="game-eyebrow">ТВОЁ СОЕДИНЕНИЕ</div><h2>${multipath ? "Два туннеля → один выход к игре" : "Игра и обычный VPN — своими путями"}</h2></div><span class="game-live-label">${multipath ? status : route ? "Маршрут выбран" : "Нет активного маршрута"}</span></div>
+    <div class="game-flow"><div class="game-flow-origin">${icon("devices")}<strong>Твой ПК</strong></div><div class="game-flow-paths">
+      ${multipath ? multipath.paths.map((path, slot) => `<div class="game-path ${path.responding ? "responding" : "silent"}"><span class="game-path-number">0${slot + 1}</span><div><strong>${escapeHtml(game.routes[path.routeIndex]?.name ?? "Игровой туннель")}</strong><small>${path.responding ? "Отвечает" : "Нет свежего ответа"} · первым доставлено ${path.firstReplies}</small></div><b>${path.latencyMs === null ? "—" : path.latencyMs + " мс"}</b></div>`).join("") : `<div class="game-path ${route ? "responding" : "silent"}"><span class="game-path-number">01</span><div><strong>${escapeHtml(route?.name ?? "Игровой маршрут")}</strong><small>Выбранные игры</small></div>${icon("game")}</div>`}
+      <div class="game-path game-path-ordinary"><span class="game-path-number">VPN</span><div><strong>${escapeHtml(selectedServer()?.name ?? "Обычный VPN")}</strong><small>Остальные приложения · по настройкам маршрутизации</small></div></div>
+    </div></div>
+    ${multipath ? `<div class="game-proof"><div><strong>${multipath.receivedPackets.toLocaleString("ru-RU")}</strong><span>Ответов передано игре</span></div><div><strong>${multipath.duplicateReplies.toLocaleString("ru-RU")}</strong><span>Повторных ответов удалено</span></div><div><strong>×2</strong><span>Копии игрового UDP</span></div></div><p class="game-footnote">Задержка каждого туннеля измеряется до Game-узла, не до сервера матча. Два туннеля к одному узлу могут использовать один физический маршрут. Дублирование увеличивает игровой трафик и не гарантирует меньший средний пинг. TCP и IPv6 используют основной игровой путь.</p>` : ""}
+    <div class="game-chart-heading"><strong>История UDP-проверок</strong><span>${good.length ? `Последних замеров: ${samples.length}` : "График появится после проверок"}</span></div>
+    ${good.length > 1 ? `<svg class="game-chart" viewBox="0 0 600 132" role="img" aria-label="История задержки до контрольных DNS-серверов, не пинг матча"><path class="game-chart-grid" d="M12 18H588 M12 65H588 M12 112H588"/><path class="game-chart-line" d="${drawing}"/><text x="12" y="130">${Math.ceil(maximum)} мс · верх шкалы</text><text x="588" y="130" text-anchor="end">сейчас</text></svg>` : `<div class="game-chart-empty">${icon("pulse")}<span>Нужны два замера для графика.<br>Проверяем маршруты раз в минуту во время подключения.</span></div>`}
+    <p class="game-footnote">История — ответы двух контрольных DNS-серверов через основной игровой маршрут. Пинг Valorant Stockholm смотрите в статистике самого матча.</p>
+  </section>`;
 }
 
 function applyGameFilter(): void {
@@ -447,6 +481,7 @@ function bindPageEvents(): void {
     await window.levik.updateSettings({ gameProcesses: processes, ...(!processes.length && !state?.settings.gameIds?.length ? { gameEnabled: false } : {}) });
   })));
   document.getElementById("game-route-select")?.addEventListener("change", (event) => void run(() => window.levik.updateSettings({ gameRouteId: (event.target as HTMLSelectElement).value || null })));
+  document.getElementById("game-mode")?.addEventListener("change", (event) => void run(() => window.levik.updateSettings({ gameMultipath: (event.target as HTMLSelectElement).value === "multipath" })));
   document.getElementById("game-measure")?.addEventListener("click", () => void run(() => window.levik.measureGameRoutes()));
   document.getElementById("power-button")?.addEventListener("click", () => run(() => state && (["connected", "connecting", "reconnecting"].includes(state.status) || (state.status === "error" && state.settings.killSwitch)) ? window.levik.disconnect() : window.levik.connect()));
   document.getElementById("home-server-select")?.addEventListener("change", (event) => {

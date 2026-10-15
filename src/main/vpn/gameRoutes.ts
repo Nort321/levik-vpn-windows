@@ -27,16 +27,15 @@ export function summarizeGameSamples(samples: Array<number | null>, now = Date.n
   };
 }
 
-/** Failures dominate a fast handshake; small timing differences do not favour TCP over native UDP. */
+/** Packet loss is penalized; equal-loss routes compete on measured RTT without protocol bias. */
 export function bestGameRoute(servers: TunnelServer[], quality: Record<string, GameRouteQuality>): TunnelServer | null {
   const score = (server: TunnelServer): number => {
     const q = quality[server.id];
     if (!q || q.latencyMs === null || q.lossPercent > 25 || q.samples < SAMPLE_COUNT) return Infinity;
-    const tcpPenalty = ["hysteria", "tuic"].includes(String(server.outbound.protocol)) ? 0 : 5;
-    return q.latencyMs + 2 * (q.jitterMs ?? 0) + 20 * q.lossPercent + tcpPenalty;
+    return q.latencyMs + 20 * q.lossPercent;
   };
   return servers.filter((server) => Number.isFinite(score(server)))
-    .sort((a, b) => score(a) - score(b))[0] ?? null;
+    .sort((a, b) => score(a) - score(b) || (quality[a.id]?.jitterMs ?? Infinity) - (quality[b.id]?.jitterMs ?? Infinity))[0] ?? null;
 }
 
 /** Measures real UDP DNS round trips through one authenticated, loopback SOCKS inbound.

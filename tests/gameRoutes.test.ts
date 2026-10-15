@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { bestGameRoute, summarizeGameSamples, GAME_BALANCER, GAME_BLOCK } from "../src/main/vpn/gameRoutes";
 import { gameProcesses, normalizeGameIds } from "../src/shared/games";
 import { prepareTunnelProfile } from "../src/main/vpn/tunnelProfile";
-import { buildXrayConfig } from "../src/main/vpn/xrayConfig";
+import { buildXrayConfig, GAME_MULTIPATH } from "../src/main/vpn/xrayConfig";
 import type { AppSettings, TunnelServer } from "../src/shared/contracts";
 
 const settings: AppSettings = {
@@ -58,6 +58,19 @@ describe("Game access and routing", () => {
     expect(config).not.toHaveProperty("routing.balancers");
     expect(config.inbounds).toHaveLength(2);
   });
+  it("limits redundancy to entitled game IPv4 UDP and its exact authenticated relay destination", () => {
+    const p = profile({ enabled: true, endpoints: [endpoint] });
+    const config = buildXrayConfig(p, p.servers[0]!, { ...settings, gameMultipath: true }, "session-password");
+    const rules = (config.routing as { rules: Record<string, unknown>[] }).rules;
+    const redundant = rules.find((rule) => rule.ruleTag === "game-multipath")!;
+    expect(redundant).toMatchObject({ network: "udp", ip: ["0.0.0.0/0"], outboundTag: GAME_MULTIPATH, process: ["VALORANT.exe", "VALORANT-Win64-Shipping.exe"] });
+    expect(rules.indexOf(redundant)).toBeLessThan(rules.findIndex((rule) => rule.ruleTag === "game"));
+    expect(rules.find((rule) => rule.port === "37079")).toMatchObject({ ip: ["127.0.0.1"], network: "udp", inboundTag: ["levik-game-probe-0"] });
+    const revoked = profile({ enabled: false, endpoints: [endpoint] });
+    const denied = buildXrayConfig(revoked, revoked.servers[0]!, { ...settings, gameMultipath: true }, "session-password");
+    expect((denied.outbounds as Array<{ tag: string }>).some((outbound) => outbound.tag === GAME_MULTIPATH)).toBe(false);
+    expect((denied.routing as { rules: Record<string, unknown>[] }).rules.some((rule) => rule.port === "37079")).toBe(false);
+  });
   it("does not route launchers or anti-cheat services for selected games", () => {
     expect(gameProcesses(settings)).toEqual(["VALORANT.exe", "VALORANT-Win64-Shipping.exe"]);
     expect(normalizeGameIds(["valorant", "valorant", "unknown", 123])).toEqual(["valorant"]);
@@ -77,11 +90,11 @@ describe("Game quality selection", () => {
     expect(bestGameRoute(servers, quality)?.id).toBe("steady");
     expect(bestGameRoute([server("down")], quality)).toBeNull();
   });
-  it("uses repeated samples, reports no fake zero latency, and favours native UDP within 5ms", () => {
+  it("uses repeated samples, reports no fake zero latency, and selects lower RTT without a protocol penalty", () => {
     expect(summarizeGameSamples([null, null])).toMatchObject({ latencyMs: null, jitterMs: null, lossPercent: 100 });
     expect(summarizeGameSamples([10, 20, 10, 20])).toMatchObject({ latencyMs: 20, jitterMs: 10, lossPercent: 0 });
     expect(bestGameRoute([server("tcp", "vless"), server("udp")], {
       tcp: summarizeGameSamples(Array(8).fill(39)), udp: summarizeGameSamples(Array(8).fill(40)),
-    })?.id).toBe("udp");
+    })?.id).toBe("tcp");
   });
 });

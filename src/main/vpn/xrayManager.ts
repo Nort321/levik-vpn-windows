@@ -5,7 +5,8 @@ import { join } from "node:path";
 import { EventEmitter } from "node:events";
 import { promisify } from "node:util";
 import { parseXrayStats, XRAY_STATS_ENDPOINT } from "./xrayStats";
-import { bindXrayOutboundInterface } from "./xrayConfig";
+import { bindXrayOutboundInterface, GAME_MULTIPATH } from "./xrayConfig";
+import { GameMultipath } from "./multipath/client";
 import { findWindowsOutboundInterface } from "../windows/outboundInterface";
 import { TuicSidecar, withTuicProxy } from "./tuicSidecar";
 import type { TuicEndpoint } from "../../shared/contracts";
@@ -28,6 +29,13 @@ export class XrayManager extends EventEmitter<XrayEvents> {
   private readonly tuic = new TuicSidecar(stopChild);
   private readonly gameTuic = new TuicSidecar(stopChild);
   private outboundName: string | null = null;
+  private multipath: GameMultipath | null = null;
+
+  get gameMultipathStats() { return this.multipath?.snapshot() ?? null; }
+
+  async connectGameMultipath(candidates: Array<{ index: number; port: number }>, password: string): Promise<void> {
+    await this.multipath?.connect(candidates.slice(0, 4), password);
+  }
 
   constructor() {
     super();
@@ -87,6 +95,12 @@ export class XrayManager extends EventEmitter<XrayEvents> {
         this.emit("log", "Game: TUIC недоступен; проверяем остальные игровые маршруты");
       }
     }
+    if (Array.isArray(launchConfig.outbounds) && launchConfig.outbounds.some((outbound: unknown) =>
+      typeof outbound === "object" && outbound !== null && "tag" in outbound && outbound.tag === GAME_MULTIPATH)) {
+      this.multipath = new GameMultipath();
+      const local = await this.multipath.listen();
+      launchConfig = withTuicProxy(launchConfig, { port: local.port, id: local.uuid }, GAME_MULTIPATH);
+    }
     const configInput = Buffer.from(JSON.stringify(bindXrayOutboundInterface(launchConfig, interfaceName, outbound.ipv6)), "utf8");
     this.emit("log", `Xray: outbound interface [${interfaceName}] (TCP/UDP, direct, IPv6 ${outbound.ipv6 ? "on" : "off"})`);
     try {
@@ -121,6 +135,8 @@ export class XrayManager extends EventEmitter<XrayEvents> {
   }
 
   async stop(): Promise<void> {
+    const multipath = this.multipath; this.multipath = null;
+    await multipath?.stop();
     this.stopStatsPolling();
     const child = this.process;
     if (child) {
