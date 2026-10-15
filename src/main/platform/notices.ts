@@ -1,13 +1,15 @@
 import { randomBytes } from "node:crypto";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
-import type { AppTab, SubscriptionSummary } from "../../shared/contracts";
+import type { AppTab, CabinetTarget, SubscriptionSummary } from "../../shared/contracts";
 
 /** A system notification the app wants to show. */
 export interface AppNotice {
   title: string;
   body: string;
   tab: AppTab;
+  /** Opens this cabinet page signed in instead of a tab of the app. */
+  cabinet?: CabinetTarget | undefined;
 }
 
 const DAY_MS = 24 * 60 * 60 * 1_000;
@@ -29,8 +31,8 @@ export function expiryNotices(
   subscriptions: readonly SubscriptionSummary[],
   remembered: ReadonlySet<string>,
   now: number,
-): Array<{ key: string; notice: AppNotice }> {
-  const result: Array<{ key: string; notice: AppNotice }> = [];
+): Array<{ key: string; milestone: ExpiryMilestone; notice: AppNotice }> {
+  const result: Array<{ key: string; milestone: ExpiryMilestone; notice: AppNotice }> = [];
   for (const subscription of subscriptions) {
     const status = subscription.status.toLowerCase();
     if (!subscription.expireAt || (status !== "active" && status !== "expired")) continue;
@@ -44,7 +46,7 @@ export function expiryNotices(
     const body = milestone === "expired"
       ? `«${subscription.title}» больше не действует. Продлите её, чтобы снова подключаться.`
       : `«${subscription.title}» действует ${milestone === "1d" ? "меньше суток" : "меньше 3 дней"}. Продлите её в личном кабинете.`;
-    result.push({ key, notice: { title, body, tab: "profile" } });
+    result.push({ key, milestone, notice: { title, body, tab: "profile" } });
   }
   return result;
 }

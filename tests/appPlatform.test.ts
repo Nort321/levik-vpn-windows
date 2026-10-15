@@ -231,6 +231,8 @@ describe("subscription reminders", () => {
     const expiresSoon = subscription(new Date(NOW + 2 * 24 * 60 * 60 * 1_000).toISOString());
     const [first] = expiryNotices([expiresSoon], new Set(), NOW);
     expect(first?.notice.title).toBe("Подписка скоро закончится");
+    // Signed in, only this kind of reminder is left to the notification center.
+    expect(first?.milestone).toBe("3d");
     expect(expiryNotices([expiresSoon], new Set([first!.key]), NOW)).toEqual([]);
     const renewed = subscription(new Date(NOW + 2.5 * 24 * 60 * 60 * 1_000).toISOString());
     expect(expiryNotices([renewed], new Set([first!.key]), NOW)).toHaveLength(1);

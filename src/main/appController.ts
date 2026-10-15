@@ -45,6 +45,7 @@ import type { AttemptCause, AttemptStage, EndBy, PowerState, SessionSettings, Se
 import { cabinetFallbackUrl, isAllowedExternalUrl, isHandoffUrl } from "./platform/links";
 import { ServiceEndpointsStore } from "./platform/serviceEndpoints";
 import { DEFAULT_API_ORIGIN } from "./api/apiEndpoints";
+import { parseAccountNotices } from "./platform/accountNotices";
 import { expiryNotices, NoticeState } from "./platform/notices";
 import type { AppNotice } from "./platform/notices";
 import {
@@ -221,6 +222,8 @@ export class AppController extends EventEmitter<AppControllerEvents> {
   private maintenanceMoving = false;
   private commandChain: Promise<void> = Promise.resolve();
   private readonly handledCommands = new Set<string>();
+  private noticeChain: Promise<void> = Promise.resolve();
+  private readonly shownNotices = new Set<string>();
   /** Private keys of diagnostics requests sent from here, by command id. */
   private readonly replyKeys = new Map<string, KeyObject>();
   private remoteWatchedUntil = 0;
@@ -983,6 +986,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
       case "ready":
       case "resync":
         this.runCommands();
+        this.refreshNotices();
         this.refreshRemoteIfWatched();
         void this.refreshApprovals();
         void this.syncSettingsNow();
@@ -1012,6 +1016,9 @@ export class AppController extends EventEmitter<AppControllerEvents> {
         break;
       case "rules":
         void this.applyAccountRules();
+        break;
+      case "notifications":
+        this.refreshNotices();
         break;
     }
   }
@@ -1076,6 +1083,30 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     const link = this.state.remote.notes[commandId];
     if (!link) throw new Error("Диагностика недоступна");
     return link;
+  }
+
+  /**
+   * Takes the account's due notices, docs/app-platform.md "Notifications",
+   * and shows each once. Taking them is what keeps Telegram from repeating them.
+   */
+  private refreshNotices(): void {
+    this.noticeChain = this.noticeChain
+      .then(() => this.takeNotices())
+      .catch((error: unknown) => this.addLog(`Уведомления: ${messageOf(error)}`));
+  }
+
+  private async takeNotices(): Promise<void> {
+    if (!this.accessToken) return;
+    const response = await this.withSession((token) => this.api.takeNotifications(token));
+    for (const notice of parseAccountNotices(response.notifications)) {
+      if (this.shownNotices.has(notice.id)) continue;
+      this.shownNotices.add(notice.id);
+      if (this.shownNotices.size > MAX_HANDLED_COMMANDS) {
+        const oldest = this.shownNotices.values().next().value;
+        if (oldest !== undefined) this.shownNotices.delete(oldest);
+      }
+      this.emit("notify", { title: notice.title, body: notice.body, tab: "profile", cabinet: notice.cabinet });
+    }
   }
 
   /** Runs the commands sent to this компьютер, one at a time, docs/app-platform.md "Remote". */
@@ -1283,7 +1314,9 @@ export class AppController extends EventEmitter<AppControllerEvents> {
   }
 
   private async checkExpiry(): Promise<void> {
-    const due = expiryNotices(this.state.account?.subscriptions ?? [], this.notices.notified(), Date.now());
+    // Signed in, the account's reminders before the end come from the notification center.
+    const due = expiryNotices(this.state.account?.subscriptions ?? [], this.notices.notified(), Date.now())
+      .filter((item) => !this.accessToken || item.milestone === "expired");
     if (!due.length) return;
     await this.notices.remember(due.map((item) => item.key));
     for (const item of due) this.emit("notify", item.notice);

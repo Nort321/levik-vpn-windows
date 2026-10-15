@@ -6,6 +6,7 @@ import type {
   IssueCommandResponse,
   MobileAccountResponse,
   RemoteCommandsResponse,
+  AccountNotificationsResponse,
   RemoteDevicesResponse,
   SettingsDocumentResponse,
   TunnelProfileResponse,
@@ -68,6 +69,11 @@ export class MobileApiClient {
   /** Commands waiting for this computer; asking also makes it reachable by the remote. */
   takeCommands(accessToken: string): Promise<RemoteCommandsResponse> {
     return this.request("GET", "/api/mobile/v1/commands", null, accessToken);
+  }
+
+  /** Notices due for the account; taking them delivers them (docs/app-platform.md "Notifications"). */
+  takeNotifications(accessToken: string): Promise<AccountNotificationsResponse> {
+    return this.request("GET", "/api/mobile/v1/notifications", null, accessToken);
   }
 
   async commandResult(accessToken: string, id: string, result: "done" | "failed" | "unsupported", detail: string | null): Promise<void> {

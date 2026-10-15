@@ -39,6 +39,11 @@ export interface RemoteCommandsResponse {
   commands: unknown;
 }
 
+export interface AccountNotificationsResponse {
+  ok: boolean;
+  notifications: unknown;
+}
+
 export interface IssueCommandResponse {
   ok: boolean;
   command: unknown;
