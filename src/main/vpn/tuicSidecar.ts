@@ -44,9 +44,10 @@ export function buildTuicSidecarConfig(tuic: TuicEndpoint, proxy: TuicLocalProxy
 }
 
 /** Points the TUIC placeholder outbound at the running sidecar. */
-export function withTuicProxy(config: Record<string, unknown>, proxy: TuicLocalProxy): Record<string, unknown> {
+export function withTuicProxy(config: Record<string, unknown>, proxy: TuicLocalProxy, tag?: string): Record<string, unknown> {
   const outbounds = Array.isArray(config.outbounds) ? [...config.outbounds] : [];
-  const first: unknown = outbounds[0];
+  const index = tag === undefined ? 0 : outbounds.findIndex((outbound: unknown) => isRecord(outbound) && outbound.tag === tag);
+  const first: unknown = outbounds[index];
   const vnext = isRecord(first) && isRecord(first.settings) && Array.isArray(first.settings.vnext) ? first.settings.vnext : [];
   const [placeholder]: unknown[] = vnext;
   if (!isRecord(first) || first.protocol !== "vless" || vnext.length !== 1 || !isRecord(placeholder)
@@ -54,7 +55,7 @@ export function withTuicProxy(config: Record<string, unknown>, proxy: TuicLocalP
     || !Array.isArray(placeholder.users) || !isRecord(placeholder.users[0]) || placeholder.users[0].id !== TUIC_PLACEHOLDER_ID) {
     throw new Error("Некорректный VPN-профиль TUIC");
   }
-  outbounds[0] = {
+  outbounds[index] = {
     ...first,
     settings: { vnext: [{ address: "127.0.0.1", port: proxy.port, users: [{ id: proxy.id, encryption: "none" }] }] },
   };
@@ -82,7 +83,32 @@ export class TuicSidecar extends EventEmitter<TuicSidecarEvents> {
   async start(tuic: TuicEndpoint, interfaceName: string): Promise<TuicLocalProxy> {
     await this.stop();
     const proxy: TuicLocalProxy = { port: await freeLoopbackPort(), id: randomUUID() };
-    const config = Buffer.from(JSON.stringify(buildTuicSidecarConfig(tuic, proxy, interfaceName)), "utf8");
+    await this.startConfig(buildTuicSidecarConfig(tuic, proxy, interfaceName), [proxy.port]);
+    return proxy;
+  }
+
+  async startRoutes(routes: Array<{ tag: string; endpoint: TuicEndpoint }>, interfaceName: string): Promise<Map<string, TuicLocalProxy>> {
+    await this.stop();
+    const proxies = new Map<string, TuicLocalProxy>();
+    const inbounds: unknown[] = [];
+    const outbounds: unknown[] = [];
+    const rules: unknown[] = [];
+    for (const { tag, endpoint } of routes) {
+      const proxy = { port: await freeLoopbackPort(), id: randomUUID() };
+      const config = buildTuicSidecarConfig(endpoint, proxy, interfaceName);
+      const inbound = (config.inbounds as Record<string, unknown>[])[0]!;
+      const outbound = (config.outbounds as Record<string, unknown>[])[0]!;
+      inbounds.push({ ...inbound, tag: `${tag}-in` });
+      outbounds.push({ ...outbound, tag });
+      rules.push({ inbound: [`${tag}-in`], action: "route", outbound: tag });
+      proxies.set(tag, proxy);
+    }
+    await this.startConfig({ log: { level: "warn", timestamp: false }, inbounds, outbounds, route: { rules } }, [...proxies.values()].map((proxy) => proxy.port));
+    return proxies;
+  }
+
+  private async startConfig(value: Record<string, unknown>, ports: number[]): Promise<void> {
+    const config = Buffer.from(JSON.stringify(value), "utf8");
     // The configuration carries credentials; pass it on stdin, never through a file.
     const child = spawn(this.executablePath(), ["run", "-c", "stdin", "--disable-color"], {
       windowsHide: true,
@@ -102,8 +128,7 @@ export class TuicSidecar extends EventEmitter<TuicSidecarEvents> {
     });
     try {
       child.stdin.end(config);
-      await waitForLoopbackPort(proxy.port, child);
-      return proxy;
+      await Promise.all(ports.map((port) => waitForLoopbackPort(port, child)));
     } catch (error) {
       await this.stop();
       throw error;

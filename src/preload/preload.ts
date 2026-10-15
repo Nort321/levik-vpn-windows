@@ -17,6 +17,7 @@ const api: LevikDesktopApi = {
   listProcesses: () => ipcRenderer.invoke(IPC.listProcesses),
   selectExecutable: () => ipcRenderer.invoke(IPC.selectExecutable),
   pingServers: () => ipcRenderer.invoke(IPC.pingServers),
+  measureGameRoutes: () => ipcRenderer.invoke(IPC.measureGameRoutes),
   revokeDevice: (subscriptionId, deviceId) => ipcRenderer.invoke(IPC.revokeDevice, subscriptionId, deviceId),
   setSubscriptionShield: (subscriptionId, enabled) => ipcRenderer.invoke(IPC.setSubscriptionShield, subscriptionId, enabled),
   authorizeActivation: (code) => ipcRenderer.invoke(IPC.authorizeActivation, code),

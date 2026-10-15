@@ -9,6 +9,7 @@ import { bindXrayOutboundInterface } from "./xrayConfig";
 import { findWindowsOutboundInterface } from "../windows/outboundInterface";
 import { TuicSidecar, withTuicProxy } from "./tuicSidecar";
 import type { TuicEndpoint } from "../../shared/contracts";
+import { GAME_BALANCER, GAME_BLOCK, gameTag } from "./gameRoutes";
 
 const execFileAsync = promisify(execFile);
 
@@ -25,11 +26,14 @@ export class XrayManager extends EventEmitter<XrayEvents> {
   private statsQueryRunning: ChildProcess | null = null;
   private statsErrorReported = false;
   private readonly tuic = new TuicSidecar(stopChild);
+  private readonly gameTuic = new TuicSidecar(stopChild);
   private outboundName: string | null = null;
 
   constructor() {
     super();
     this.tuic.on("log", (line) => this.emit("log", line));
+    this.gameTuic.on("log", (line) => this.emit("log", `Game ${line}`));
+    this.gameTuic.on("exit", () => this.emit("log", "Game: TUIC остановлен; переподключите VPN для восстановления"));
     // Without its sidecar a TUIC session blackholes traffic. Ending the core
     // surfaces an unexpected exit, so the controller reconnects.
     this.tuic.on("exit", (code) => {
@@ -45,7 +49,7 @@ export class XrayManager extends EventEmitter<XrayEvents> {
     return this.outboundName;
   }
 
-  async start(config: Record<string, unknown>, tuic?: TuicEndpoint): Promise<void> {
+  async start(config: Record<string, unknown>, tuic?: TuicEndpoint, gameTuic: Array<{ tag: string; endpoint: TuicEndpoint }> = []): Promise<void> {
     if (process.platform !== "win32") throw new Error("VPN-туннель запускается только в Windows-сборке");
     const { stdout: version } = await execFileAsync(this.executablePath(), ["version"], {
       windowsHide: true, timeout: 5_000, maxBuffer: 64 * 1024,
@@ -65,6 +69,15 @@ export class XrayManager extends EventEmitter<XrayEvents> {
         throw error;
       }
       this.emit("log", `TUIC: sing-box bound to [${interfaceName}]`);
+    }
+    if (gameTuic.length) {
+      try {
+        const proxies = await this.gameTuic.startRoutes(gameTuic, interfaceName);
+        for (const [tag, proxy] of proxies) launchConfig = withTuicProxy(launchConfig, proxy, tag);
+      } catch (error) {
+        await this.stop();
+        throw error;
+      }
     }
     const configInput = Buffer.from(JSON.stringify(bindXrayOutboundInterface(launchConfig, interfaceName, outbound.ipv6)), "utf8");
     this.emit("log", `Xray: outbound interface [${interfaceName}] (TCP/UDP, direct, IPv6 ${outbound.ipv6 ? "on" : "off"})`);
@@ -108,6 +121,7 @@ export class XrayManager extends EventEmitter<XrayEvents> {
       if (this.process === child) this.process = null;
     }
     await this.tuic.stop();
+    await this.gameTuic.stop();
   }
 
   tuicExecutablePath(): string {
@@ -116,6 +130,15 @@ export class XrayManager extends EventEmitter<XrayEvents> {
 
   isRunning(): boolean {
     return this.process !== null;
+  }
+
+  async selectGameRoute(index: number | null): Promise<void> {
+    if (index !== null && (!Number.isInteger(index) || index < 0 || index >= 32)) throw new Error("Некорректный игровой маршрут");
+    const child = this.process;
+    if (!child) throw new Error("Подключите VPN для выбора игрового маршрута");
+    await execFileAsync(this.executablePath(), ["api", "bo", `--server=${XRAY_STATS_ENDPOINT}`, "-b", GAME_BALANCER,
+      index === null ? GAME_BLOCK : gameTag(index)], { windowsHide: true, timeout: 4_000, maxBuffer: 16 * 1024 });
+    if (this.process !== child) throw new Error("Подключение изменилось");
   }
 
   async isHealthy(): Promise<boolean> {

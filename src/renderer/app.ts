@@ -3,6 +3,7 @@ import { activeVariant, groupServers, serverProtocolShortLabel, type ServerGroup
 import { shouldShowLogin } from "../shared/sessionState";
 import { mergeProcessList, normalizeProcessSelection, processStatusLabel, resolveProcessCompanions, sortProcessList } from "../shared/processes";
 import QRCode from "qrcode";
+import { GAMES, gameProcesses } from "../shared/games";
 
 const SUPPORT_CHAT_URL = "https://t.me/leviksupportbot";
 
@@ -21,6 +22,7 @@ let processList: WindowsProcess[] = [];
 let pendingProcesses = new Set<string>();
 let processSearchQuery = "";
 let serverSearchQuery = "";
+let gameSearchQuery = "";
 let favoritesOnly = false;
 let devicesSubscriptionId: string | null = null;
 let supportDialog: { creating: boolean; url: string | null } | null = null;
@@ -69,6 +71,7 @@ function render(preserveScroll = true): void {
     return;
   }
   document.documentElement.dataset.theme = state.settings.theme;
+  if (activeTab === "game" && !state.game?.available) activeTab = "home";
   renderedSnapshotKey = snapshotRenderKey(state);
   if (shouldShowLogin(state)) {
     renderLogin();
@@ -85,6 +88,7 @@ function render(preserveScroll = true): void {
         <nav class="nav" aria-label="Основная навигация">
           ${navButton("home", "Главная", "home")}
           ${navButton("servers", "Серверы", "servers")}
+          ${state.game?.available ? navButton("game", "Game", "game") : ""}
           ${navButton("stats", "Статистика", "stats")}
           ${navButton("profile", "Профиль", "profile")}
         </nav>
@@ -103,6 +107,7 @@ function render(preserveScroll = true): void {
   applyProgressWidths();
   applyProcessFilter();
   applyServerFilter();
+  applyGameFilter();
   const content = document.querySelector<HTMLElement>(".content");
   if (content) content.scrollTop = contentScrollTop;
   const logView = document.querySelector<HTMLElement>(".log-view");
@@ -149,9 +154,55 @@ function renderPage(): string {
   switch (activeTab) {
     case "home": return renderHome();
     case "servers": return renderServers();
+    case "game": return renderGame();
     case "stats": return renderStats();
     case "profile": return renderProfile();
   }
+}
+
+function renderGame(): string {
+  if (!state?.game?.available) return "";
+  const game = state.game;
+  const enabled = state.settings.gameEnabled === true;
+  const active = game.routes.find((route) => route.id === game.activeRouteId);
+  const quality = active ? game.quality[active.id] : null;
+  const selectedIds = state.settings.gameIds ?? [];
+  const busy = state.busy || ["connecting", "disconnecting", "reconnecting"].includes(state.status);
+  const metric = (value: number | null | undefined, unit: string): string => value == null ? "—" : `${value}<small>${unit}</small>`;
+  return `
+    <header class="page-header"><div><div class="game-eyebrow">LEVIK GAME</div><h1>Твой маршрут к победе</h1><div class="subtitle">Отдельное соединение для игр. Привычный VPN для всего остального.</div></div><span class="game-access">${icon("check")} Game Squad</span></header>
+    <section class="card game-hero" aria-label="Игровое соединение">
+      <div class="game-hero-top"><div><span class="game-status ${active && game.phase !== "degraded" ? "is-live" : ""}"><span class="status-dot ${active ? "connected" : "disconnected"}"></span>${!enabled ? "Режим выключен" : game.phase === "probing" ? "Проверяем UDP-маршруты" : active ? "Игровой маршрут активен" : state.status === "connected" ? "Ожидание рабочего маршрута" : "Готов к подключению"}</span><h2>${escapeHtml(active?.name ?? "Игра — по своему маршруту")}</h2><p>Выберите игры ниже и включите Game. При подключении Levik сравнит доступные маршруты по задержке, её разбросу и ответам UDP.</p></div><div class="game-hero-mark" aria-hidden="true">${icon("game")}</div></div>
+      <div class="game-metrics"><div><span>UDP задержка</span><strong>${metric(quality?.latencyMs, "мс")}</strong></div><div><span>Джиттер</span><strong>${metric(quality?.jitterMs, "мс")}</strong></div><div><span>Без ответа</span><strong>${metric(quality?.lossPercent, "%")}</strong></div></div>
+      <div class="game-hero-bottom"><span class="muted">${enabled && state.status === "connected" ? "Маршрут закреплён до переподключения" : "Обычный сервер: " + escapeHtml(selectedServer()?.name ?? "автовыбор")}</span><button class="button ${enabled ? "" : "primary"}" id="game-toggle" ${busy || (!enabled && (!gameProcesses(state.settings).length || !game.routes.length)) ? "disabled" : ""}>${icon("power")} ${enabled ? "Выключить Game" : "Включить Game"}</button></div>
+    </section>
+    ${game.message ? `<div class="game-notice" role="status">${icon("pulse")}<span>${escapeHtml(game.message)}</span></div>` : ""}
+    ${!game.routes.length ? `<div class="game-notice">В Game Squad пока нет совместимых маршрутов. Обновите подписку после добавления серверов.</div>` : ""}
+    <section class="game-library"><div class="game-section-header"><div><h2>Мои игры</h2><p class="muted">Выберите одну или несколько. Лаунчеры остаются на обычном VPN.</p></div><button class="button compact" id="game-add" ${busy ? "disabled" : ""}>${icon("browse")} Добавить .exe</button></div>
+      <label class="search-field game-search">${icon("search")}<input id="game-search" type="search" placeholder="Найти игру" aria-label="Найти игру" value="${escapeAttribute(gameSearchQuery)}" /></label>
+      <div class="game-grid">${GAMES.map((item) => `<button class="game-tile ${selectedIds.includes(item.id) ? "selected" : ""}" data-game-id="${item.id}" data-game-name="${escapeAttribute(item.name.toLowerCase())}" aria-pressed="${selectedIds.includes(item.id)}" ${busy ? "disabled" : ""}><span class="game-monogram game-art-${item.id}">${escapeHtml(item.initials)}</span><span class="game-tile-copy"><strong>${escapeHtml(item.name)}</strong><small>${escapeHtml(item.genre)}</small></span><span class="game-tile-check">${selectedIds.includes(item.id) ? icon("check") : "+"}</span></button>`).join("")}</div>
+      <p id="game-no-results" class="muted" hidden>Игра не найдена. Добавьте её исполняемый .exe-файл.</p>
+      ${(state.settings.gameProcesses ?? []).length ? `<div class="game-custom">${(state.settings.gameProcesses ?? []).map((name) => `<button class="button compact" data-game-remove="${escapeAttribute(name)}" aria-label="Убрать ${escapeAttribute(name)}" ${busy ? "disabled" : ""}>${escapeHtml(name)} ${icon("close")}</button>`).join("")}</div>` : ""}
+    </section>
+    <section class="card game-routes"><div class="game-section-header"><div><h2>Маршруты Game</h2><p class="muted">Автовыбор учитывает стабильность, а не только минимальную задержку.</p></div><button class="button compact" id="game-measure" ${!enabled || state.status !== "connected" || game.phase === "probing" || busy ? "disabled" : ""}>${icon("refresh")} Проверить</button></div>
+      <label class="game-route-preference"><span>Следующее подключение</span><select id="game-route-select" ${busy ? "disabled" : ""}><option value="" ${!state.settings.gameRouteId ? "selected" : ""}>Автоматически · лучший результат UDP-проверки</option>${game.routes.map((route) => `<option value="${escapeAttribute(route.id)}" ${state?.settings.gameRouteId === route.id ? "selected" : ""}>${escapeHtml(route.name)}</option>`).join("")}</select></label>
+      <div class="game-route-list">${game.routes.map((route) => {
+        const q = game.quality[route.id];
+        return `<div class="game-route-row"><div class="game-route-title">${icon("server")}<span><strong>${escapeHtml(route.name)}</strong><small>${route.id === game.activeRouteId ? "Используется сейчас" : route.id === game.recommendedRouteId ? "Лучший результат проверки" : "Доступный маршрут"}</small></span></div><span>${q?.latencyMs == null ? "—" : `${q.latencyMs} мс`}<small>${q ? `${q.lossPercent}% без ответа` : "Ещё не проверен"}</small></span></div>`;
+      }).join("")}</div>
+      <p class="game-footnote">Замеры идут через игровые туннели до двух DNS-серверов и не равны пингу матча. Для смены маршрута завершите матч и переподключите VPN. Добавление игр и включение режима также переподключают VPN.</p>
+    </section>`;
+}
+
+function applyGameFilter(): void {
+  const query = gameSearchQuery.trim().toLowerCase();
+  let visible = 0;
+  document.querySelectorAll<HTMLElement>("[data-game-name]").forEach((tile) => {
+    tile.hidden = !(tile.dataset.gameName ?? "").includes(query);
+    if (!tile.hidden) visible++;
+  });
+  const empty = document.getElementById("game-no-results");
+  if (empty) empty.hidden = visible !== 0;
 }
 
 function renderHome(): string {
@@ -366,7 +417,7 @@ function navButton(tab: AppTab, label: string, iconName: IconName): string {
 function bindCommonEvents(): void {
   document.querySelectorAll<HTMLElement>("[data-tab]").forEach((button) => button.addEventListener("click", () => {
     const tab = button.dataset.tab;
-    if (tab === "home" || tab === "servers" || tab === "stats" || tab === "profile") {
+    if (tab === "home" || tab === "servers" || tab === "stats" || tab === "profile" || (tab === "game" && state?.game?.available)) {
       activeTab = tab;
       render(false);
     }
@@ -374,6 +425,29 @@ function bindCommonEvents(): void {
 }
 
 function bindPageEvents(): void {
+  document.getElementById("game-search")?.addEventListener("input", (event) => { gameSearchQuery = (event.target as HTMLInputElement).value; applyGameFilter(); });
+  document.getElementById("game-toggle")?.addEventListener("click", () => void run(async () => {
+    const enabled = state?.settings.gameEnabled !== true;
+    await window.levik.updateSettings({ gameEnabled: enabled });
+    if (enabled && state?.status === "disconnected") await window.levik.connect();
+  }));
+  document.querySelectorAll<HTMLElement>("[data-game-id]").forEach((button) => button.addEventListener("click", () => void run(async () => {
+    const id = button.dataset.gameId!;
+    const ids = new Set(state?.settings.gameIds ?? []);
+    if (ids.has(id)) ids.delete(id); else ids.add(id);
+    const gameIds = [...ids];
+    await window.levik.updateSettings({ gameIds, ...(!gameIds.length && !state?.settings.gameProcesses?.length ? { gameEnabled: false } : {}) });
+  })));
+  document.getElementById("game-add")?.addEventListener("click", () => void run(async () => {
+    const executable = await window.levik.selectExecutable();
+    if (executable) await window.levik.updateSettings({ gameProcesses: [...(state?.settings.gameProcesses ?? []), executable.name] });
+  }));
+  document.querySelectorAll<HTMLElement>("[data-game-remove]").forEach((button) => button.addEventListener("click", () => void run(async () => {
+    const processes = (state?.settings.gameProcesses ?? []).filter((name) => name !== button.dataset.gameRemove);
+    await window.levik.updateSettings({ gameProcesses: processes, ...(!processes.length && !state?.settings.gameIds?.length ? { gameEnabled: false } : {}) });
+  })));
+  document.getElementById("game-route-select")?.addEventListener("change", (event) => void run(() => window.levik.updateSettings({ gameRouteId: (event.target as HTMLSelectElement).value || null })));
+  document.getElementById("game-measure")?.addEventListener("click", () => void run(() => window.levik.measureGameRoutes()));
   document.getElementById("power-button")?.addEventListener("click", () => run(() => state && (["connected", "connecting", "reconnecting"].includes(state.status) || (state.status === "error" && state.settings.killSwitch)) ? window.levik.disconnect() : window.levik.connect()));
   document.getElementById("home-server-select")?.addEventListener("change", (event) => {
     const serverId = (event.target as HTMLSelectElement).value;
@@ -791,10 +865,11 @@ function escapeAttribute(value: string): string {
   return escapeHtml(value.replace(/[\r\n]/g, ""));
 }
 
-type IconName = "shield" | "home" | "servers" | "stats" | "profile" | "power" | "refresh" | "server" | "clock" | "download" | "upload" | "support" | "logout" | "login" | "external" | "process" | "close" | "check" | "search" | "star" | "pulse" | "browse" | "save" | "devices" | "unlink" | "renew" | "update" | "install" | "qr" | "link";
+type IconName = "game" | "shield" | "home" | "servers" | "stats" | "profile" | "power" | "refresh" | "server" | "clock" | "download" | "upload" | "support" | "logout" | "login" | "external" | "process" | "close" | "check" | "search" | "star" | "pulse" | "browse" | "save" | "devices" | "unlink" | "renew" | "update" | "install" | "qr" | "link";
 
 function icon(name: IconName): string {
   const paths: Record<IconName, string> = {
+    game: '<path d="M7 7h10c2 0 3 2 3.5 4l1 6c.4 2-1.5 3-3 1l-2-2h-9l-2 2c-1.5 2-3.4 1-3-1l1-6C4 9 5 7 7 7Z"/><path d="M7 10v5M4.5 12.5h5M16 11h.01M18 14h.01"/>',
     shield: '<path d="M12 3 4.8 6v4.8c0 4.5 2.9 7.5 7.2 9.3 4.3-1.8 7.2-4.8 7.2-9.3V6z"/><path d="m8.4 12 2.2 2.2 5-5"/>',
     home: '<path d="m3 11 9-8 9 8"/><path d="M5 10v10h14V10M9 20v-6h6v6"/>',
     servers: '<rect x="4" y="4" width="16" height="6" rx="2"/><rect x="4" y="14" width="16" height="6" rx="2"/><path d="M8 7h.01M8 17h.01M12 7h5M12 17h5"/>',
