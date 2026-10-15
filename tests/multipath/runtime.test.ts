@@ -14,12 +14,12 @@ async function port(): Promise<number> {
   server.close(); await once(server, "close"); return address.port;
 }
 
-it("duplicates through authenticated Xray paths, deduplicates both ways and keeps one game source port after a path fails", async () => {
+it.each([2, 4])("duplicates through %i authenticated Xray paths and keeps one game source port with only one surviving path", async (pathCount) => {
   const relay = await startRelay({ port: 0, allowTestLoopback: true });
-  const game = createSocket("udp4"); const links = [createSocket("udp4"), createSocket("udp4")];
+  const game = createSocket("udp4"); const links = Array.from({ length: pathCount }, () => createSocket("udp4"));
   const client = new GameMultipath(); const application = new Socket();
   const sourcePorts = new Set<number>(); const requests: string[] = [];
-  const enabled = [true, true]; const received: string[] = []; let core: ChildProcessWithoutNullStreams | undefined;
+  const enabled = Array.from({ length: pathCount }, () => true); const received: string[] = []; let core: ChildProcessWithoutNullStreams | undefined;
   const timers = new Set<ReturnType<typeof setTimeout>>();
   try {
     game.bind(0, "127.0.0.1"); await once(game, "listening");
@@ -35,7 +35,7 @@ it("duplicates through authenticated Xray paths, deduplicates both ways and keep
         } else { source = peer.port; link.send(data, relay.port, "127.0.0.1"); }
       });
     }
-    const ports = await Promise.all([port(), port()]);
+    const ports = await Promise.all(links.map(() => port()));
     const executable = process.env.LEVIK_TEST_XRAY ?? resolve("vendor/xray/windows-x64/xray.exe");
     const config = { log: { loglevel: "warning" }, inbounds: ports.map((p, index) => ({ tag: `in${index}`, listen: "127.0.0.1", port: p, protocol: "socks",
       settings: { auth: "password", accounts: [{ user: GAME_PROBE_USER, pass: "test-only" }], udp: true, ip: "127.0.0.1" } })),
@@ -71,7 +71,7 @@ it("duplicates through authenticated Xray paths, deduplicates both ways and keep
     await send("before-loss");
     await new Promise<void>((done) => setTimeout(done, 50));
     expect(client.snapshot().duplicateReplies).toBeGreaterThan(0);
-    enabled[0] = false;
+    enabled.fill(false, 0, pathCount - 1);
     await send("after-loss"); await send("still-same-flow");
     expect(requests).toEqual(["before-loss", "after-loss", "still-same-flow"]);
     expect(received).toEqual(requests); expect(sourcePorts.size).toBe(1);
