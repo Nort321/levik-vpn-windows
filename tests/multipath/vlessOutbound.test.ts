@@ -96,6 +96,7 @@ it.skipIf(process.platform !== "win32" || process.env.LEVIK_TEST_NATIVE_TUN !== 
   expect(physical).toBeTruthy(); expect(loopback).toBeTruthy();
   const client = new GameMultipath(); const application = createSocket("udp4");
   let core: ChildProcessWithoutNullStreams | undefined;
+  let coreOutput = "";
   try {
     const local = await client.listen(); await client.connect([{ index: 0, port: 1 }, { index: 1, port: 2 }], "test-only");
     const config = bindXrayOutboundInterface({ log: { loglevel: "warning" },
@@ -114,7 +115,9 @@ it.skipIf(process.platform !== "win32" || process.env.LEVIK_TEST_NATIVE_TUN !== 
       core!.once("error", (error) => { clearTimeout(timer); reject(error); });
       core!.once("exit", () => { clearTimeout(timer); reject(new Error("Windows test TUN exited")); });
     });
-    core.stderr.resume(); core.stdin.end(JSON.stringify(config)); await ready;
+    core.stdout.on("data", (data: Buffer) => { coreOutput = (coreOutput + data.toString()).slice(-4000); });
+    core.stderr.on("data", (data: Buffer) => { coreOutput = (coreOutput + data.toString()).slice(-4000); });
+    core.stdin.end(JSON.stringify(config)); await ready;
     application.bind(0); await once(application, "listening");
     for (const destination of [7000, 443]) for (const length of [64, 1200, 1472]) {
       const packet = randomBytes(length);
@@ -125,11 +128,13 @@ it.skipIf(process.platform !== "win32" || process.env.LEVIK_TEST_NATIVE_TUN !== 
       });
       application.send(packet, destination, "198.18.0.1"); expect(await reply).toEqual(packet);
     }
+  } catch (error) {
+    throw new Error(`Windows TUN check failed: ${error instanceof Error ? error.message : "unknown"}; test core: ${coreOutput}`);
   } finally {
     try { application.close(); } catch { /* Never bound on startup failure. */ }
     await client.stop();
     if (core && core.exitCode === null) { const ended = once(core, "exit"); core.kill(); await ended; }
     await promisify(execFile)("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command",
-      "Get-NetRoute -DestinationPrefix '198.18.0.1/32' -InterfaceAlias 'LevikGameCi' -ErrorAction SilentlyContinue | Remove-NetRoute -Confirm:$false -ErrorAction SilentlyContinue"], { windowsHide: true, timeout: 10_000 });
+      "Get-NetRoute -ErrorAction Stop | Where-Object { $_.DestinationPrefix -eq '198.18.0.1/32' -and $_.InterfaceAlias -eq 'LevikGameCi' } | Remove-NetRoute -Confirm:$false -ErrorAction Stop"], { windowsHide: true, timeout: 10_000 });
   }
 }, 35_000);
