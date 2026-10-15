@@ -57,6 +57,7 @@ export function registerIpc(controller: AppController, window: BrowserWindow): v
     return selected;
   });
   ipcMain.handle(IPC.pingServers, () => controller.pingServers());
+  ipcMain.handle(IPC.measureGameRoutes, () => controller.measureGameRoutes());
   ipcMain.handle(IPC.revokeDevice, (_event, subscriptionId: unknown, deviceId: unknown) => {
     if (typeof subscriptionId !== "string" || typeof deviceId !== "string") throw new Error("Некорректное устройство");
     return controller.revokeDevice(subscriptionId, deviceId);

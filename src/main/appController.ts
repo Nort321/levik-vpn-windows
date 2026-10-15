@@ -1,4 +1,5 @@
 import { app } from "electron";
+import { randomBytes } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { platform, release } from "node:os";
 import { isIPv4 } from "node:net";
@@ -15,6 +16,7 @@ import type {
   PendingApproval,
   TunnelServer,
   TuicEndpoint,
+  GameSnapshot,
 } from "../shared/contracts";
 import { isAuthenticationRejected, MobileApiClient, MobileApiError } from "./api/mobileApiClient";
 import type { AuthChallengeResponse, MobileAccountResponse } from "./api/models";
@@ -74,6 +76,8 @@ import {
   unionNodeLists,
 } from "./platform/favoriteNodes";
 import { avoidMaintenance, IdleMeter, maintenanceFor, maintenanceMove } from "./platform/maintenance";
+import { gameProcesses, normalizeGameIds } from "../shared/games";
+import { bestGameRoute, measureGameRoute, GAME_PROBE_PORT, GAME_DATA_PROBE_PORT, gameTag } from "./vpn/gameRoutes";
 
 interface AppControllerEvents {
   changed: [snapshot: AppSnapshot];
@@ -97,6 +101,11 @@ const ENDPOINTS_REFRESH_MS = 12 * 60 * 60_000;
 const ENDPOINTS_RETRY_MS = 60_000;
 
 const DEFAULT_SETTINGS: AppSettings = {
+  gameEnabled: false,
+  gameIds: [],
+  gameProcesses: [],
+  gameRouteId: null,
+  gameMultipath: false,
   routingMode: "global",
   automaticServer: true,
   autoReconnect: true,
@@ -129,6 +138,11 @@ type PersistedSettings = Partial<AppSettings> & {
 };
 
 export class AppController extends EventEmitter<AppControllerEvents> {
+  private gamePassword: string | undefined;
+  private gameProbeAbort: AbortController | null = null;
+  private gameProbePromise: Promise<void> | null = null;
+  private gameMonitor: ReturnType<typeof setInterval> | null = null;
+  private gameValidatedAt = 0;
   private readonly secureStore = new SecureStore();
   private readonly xray = new XrayManager();
   private readonly dnsLeakProtection = new DnsLeakProtection(this.secureStore);
@@ -277,8 +291,21 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     }
     this.startKillSwitchHealthMonitor();
     this.tunnelHealthTimer = setInterval(() => void this.verifyTunnelHealth(), 15_000);
+    this.gameMonitor = setInterval(() => {
+      if (this.state.status === "connected" && this.state.settings.gameEnabled) {
+        void this.measureGameRoutes().catch(() => {});
+      }
+    }, 60_000);
     this.profile = await this.loadProfile();
     if (this.profile) {
+      // Keep the Game switch reachable during an API outage so the user can
+      // disable it and connect with the ordinary cached profile. Connecting
+      // with Game still requires a fresh server-side profile below.
+      const cachedGame = this.profile.game;
+      this.updateGame({ available: cachedGame?.enabled === true && this.state.sessionAvailable
+        && (!this.profile.subscriptionExpiresAt || Date.parse(this.profile.subscriptionExpiresAt) > Date.now()),
+        routes: (cachedGame?.servers ?? []).map(({ id, name, countryCode }) => ({ id, name, countryCode })),
+      });
       this.state.servers = this.profile.servers;
       this.state.selectedSubscriptionId = this.profile.subscriptionId;
       this.state.selectedServerId = await this.loadString("selected_server")
@@ -439,6 +466,9 @@ export class AppController extends EventEmitter<AppControllerEvents> {
   async connect(trigger: SessionTrigger = "user"): Promise<void> {
     if (this.xray.isRunning() || this.state.status === "connecting") return;
     const generation = this.connectionGeneration;
+    if (this.state.settings.gameEnabled && Date.now() - this.gameValidatedAt > 5 * 60_000 && this.state.selectedSubscriptionId) {
+      await this.loadTunnelProfile(this.state.selectedSubscriptionId);
+    }
     // Profile refresh can expire the session and call disconnect(), so perform
     // it outside the serialized process lifecycle to avoid waiting on ourselves.
     if (!this.profile) {
@@ -473,7 +503,8 @@ export class AppController extends EventEmitter<AppControllerEvents> {
       if (this.state.settings.killSwitch) await this.killSwitch.enable();
       if (this.state.settings.preventDnsLeaks) await this.dnsLeakProtection.enable();
       progress.reach("profile", "config_invalid");
-      const config = buildXrayConfig(this.profile, server, this.state.settings);
+      this.gamePassword = randomBytes(24).toString("hex");
+      const config = buildXrayConfig(this.profile, server, this.state.settings, this.gamePassword);
       this.lastConfig = config;
       this.lastTuic = server.tuic;
       progress.reach("core", "core_start_failed");
@@ -549,6 +580,11 @@ export class AppController extends EventEmitter<AppControllerEvents> {
   async updateSettings(patch: Partial<AppSettings>, origin: "user" | "sync" = "user"): Promise<void> {
     const previous = this.state.settings;
     const next = validateSettings({ ...previous, ...patch });
+    if (next.gameEnabled && (patch.gameEnabled === true || patch.gameMultipath === true || patch.gameIds || patch.gameProcesses || patch.gameRouteId)) {
+      if (!this.profile?.game?.enabled || !this.state.game?.available) throw new Error("Game Squad недоступен для выбранной подписки");
+      if (!gameProcesses(next).length) throw new Error("Сначала выберите игру");
+      if (next.gameRouteId && !this.profile.game.servers.some((server) => server.id === next.gameRouteId)) throw new Error("Игровой маршрут недоступен");
+    }
     const reconnect = this.connectionRequested() && affectsTunnel(previous, next);
     const generation = this.connectionGeneration;
     this.state.settings = next;
@@ -578,6 +614,8 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     this.stopKillSwitchHealthMonitor();
     if (this.tunnelHealthTimer) clearInterval(this.tunnelHealthTimer);
     this.tunnelHealthTimer = null;
+    if (this.gameMonitor) clearInterval(this.gameMonitor);
+    this.gameMonitor = null;
     if (this.backgroundTimer) clearInterval(this.backgroundTimer);
     this.backgroundTimer = null;
     if (this.maintenanceTimer) clearInterval(this.maintenanceTimer);
@@ -610,6 +648,72 @@ export class AppController extends EventEmitter<AppControllerEvents> {
       }
     })().finally(() => { this.pingPromise = null; });
     return this.pingPromise;
+  }
+
+  async measureGameRoutes(): Promise<void> {
+    if (this.gameProbePromise) return this.gameProbePromise;
+    const profile = this.profile;
+    const game = this.state.game;
+    const password = this.gamePassword;
+    if (!profile?.game?.enabled || !game?.available || !password || !this.state.settings.gameEnabled || !this.xray.isRunning()) return;
+    const servers = profile.game.servers;
+    const generation = this.connectionGeneration;
+    const abort = new AbortController();
+    this.gameProbeAbort = abort;
+    const current = (): boolean => !abort.signal.aborted && generation === this.connectionGeneration
+      && profile.subscriptionId === this.profile?.subscriptionId && sameServers(servers, this.profile?.game?.servers ?? []);
+    this.updateGame({ phase: "probing", message: null });
+    this.gameProbePromise = (async () => {
+      const quality: NonNullable<AppSnapshot["game"]>["quality"] = {};
+      // Bound CPU/socket load even if the squad grows.
+      let next = 0;
+      await Promise.all(Array.from({ length: Math.min(4, servers.length) }, async () => {
+        while (next < servers.length && current()) {
+          const index = next++;
+          const server = servers[index]!;
+          quality[server.id] = await measureGameRoute(GAME_PROBE_PORT + index, password, abort.signal);
+        }
+      }));
+      if (!current()) return;
+      const best = bestGameRoute(servers, quality);
+      const activeId = this.state.game?.activeRouteId;
+      // Keep the current game route for the whole connection. A scan is never a
+      // reason to change the public address of an ongoing match.
+      const selected = activeId ? servers.find((server) => server.id === activeId)
+        : this.state.settings.gameRouteId ? servers.find((server) => server.id === this.state.settings.gameRouteId) : best;
+      const measured = selected ? quality[selected.id] : null;
+      const healthy = measured?.latencyMs !== null && measured?.latencyMs !== undefined && measured.lossPercent <= 25;
+      if (!activeId && selected && healthy) {
+        await this.xray.selectGameRoute(servers.indexOf(selected));
+        if (!current()) return;
+      }
+      const history = Object.fromEntries(servers.map((server) => [server.id,
+        [...(this.state.game?.history?.[server.id] ?? []), quality[server.id]!].slice(-60)]));
+      this.updateGame({ quality, history, recommendedRouteId: best?.id ?? null,
+        activeRouteId: activeId ?? (healthy ? selected?.id ?? null : null),
+        phase: healthy ? "ready" : "degraded",
+        message: healthy ? null : activeId
+          ? "Игровой маршрут нестабилен. Завершите матч и переподключите VPN для повторного выбора."
+          : "Рабочий UDP-маршрут не найден. Игровой трафик приостановлен; обычный VPN работает.",
+      });
+    })().catch(() => {
+      if (current()) this.updateGame({ phase: "degraded", message: "Не удалось проверить игровой маршрут. Повторите проверку." });
+    }).finally(() => {
+      if (this.gameProbeAbort === abort) { this.gameProbePromise = null; this.gameProbeAbort = null; }
+    });
+    return this.gameProbePromise;
+  }
+
+  private updateGame(patch: Partial<GameSnapshot>): void {
+    this.patch({ game: { available: false, routes: [], quality: {}, activeRouteId: null,
+      recommendedRouteId: null, phase: "idle", message: null, ...this.state.game, ...patch } });
+  }
+
+  private cancelGameProbes(): void {
+    this.gameProbeAbort?.abort();
+    this.gameProbeAbort = null;
+    this.gameProbePromise = null;
+    if (this.state.game) this.updateGame({ activeRouteId: null, phase: "idle", message: null, history: {}, multipath: null });
   }
 
   async revokeDevice(subscriptionId: string, deviceId: string): Promise<void> {
@@ -756,7 +860,21 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     const plaintext = decryptTunnelProfile(this.identity, response.profile);
     try {
       const profile = prepareTunnelProfile(plaintext, subscriptionId);
+      const oldGame = JSON.stringify(this.profile?.game ?? null);
+      const replacingGame = this.connectionRequested() && this.state.settings.gameEnabled
+        && oldGame !== JSON.stringify(profile.game ?? null);
+      if (replacingGame) await this.stopTunnelForReplacement();
       this.profile = profile;
+      this.gameValidatedAt = Date.now();
+      const routeRemoved = this.state.settings.gameRouteId && !profile.game?.servers.some((server) => server.id === this.state.settings.gameRouteId);
+      if ((!profile.game?.enabled && this.state.settings.gameEnabled) || routeRemoved) {
+        this.state.settings = { ...this.state.settings, gameEnabled: profile.game?.enabled === true && this.state.settings.gameEnabled === true, gameRouteId: null };
+        await this.secureStore.put("settings", Buffer.from(JSON.stringify(serializeSettings(this.state.settings))));
+      }
+      this.updateGame({ available: profile.game?.enabled === true,
+        routes: (profile.game?.servers ?? []).map(({ id, name, countryCode }) => ({ id, name, countryCode })),
+        ...(oldGame !== JSON.stringify(profile.game ?? null) ? { quality: {}, activeRouteId: null, recommendedRouteId: null, phase: "idle" as const } : {}),
+      });
       const selected = this.state.selectedServerId;
       const serverId = profile.servers.some((item) => item.id === selected)
         ? selected
@@ -766,6 +884,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
       this.patch({ servers: profile.servers, serverLatencies: {}, selectedServerId: serverId, selectedSubscriptionId: subscriptionId });
       await this.reconcileFavorites();
       void this.pingServers();
+      if (replacingGame) await this.connect();
     } finally {
       plaintext.fill(0);
     }
@@ -778,6 +897,9 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     if (!stored || now - stored.fetchedAt >= stored.config.refreshAfterSeconds * 1_000) await this.refreshRemoteConfig();
     else await this.updateAnnouncements();
     if (!this.accessToken) return;
+    if (this.state.settings.gameEnabled && this.state.selectedSubscriptionId && !this.state.busy) {
+      await this.loadTunnelProfile(this.state.selectedSubscriptionId).catch(() => {});
+    }
     if (now - this.lastAccountCheckAt >= ACCOUNT_CHECK_INTERVAL_MS) await this.checkAccount();
     if (!this.liveEvents?.active) this.startLiveEvents();
     if (Object.keys(this.pendingSync).length || now - this.lastSettingsSyncAt >= SETTINGS_SYNC_INTERVAL_MS) {
@@ -1154,6 +1276,9 @@ export class AppController extends EventEmitter<AppControllerEvents> {
   }
 
   private async clearLocalSession(statusDetail: string | null): Promise<void> {
+    this.cancelGameProbes();
+    this.gameValidatedAt = 0;
+    this.updateGame({ available: false, routes: [], quality: {}, activeRouteId: null, recommendedRouteId: null });
     this.liveEvents?.stop();
     if (this.approvalsTimer) clearTimeout(this.approvalsTimer);
     this.approvalsTimer = null;
@@ -1224,6 +1349,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
   }
 
   private beginTunnelRecovery(detail: string, cause: AttemptCause | null = null): void {
+    this.cancelGameProbes();
     this.recoveryCause = cause;
     // In-flight probes belong to the failed tunnel, not its replacement.
     this.connectionGeneration += 1;
@@ -1265,7 +1391,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
             if (server) {
               this.patch({ selectedServerId: server.id });
               await this.secureStore.put("selected_server", Buffer.from(server.id));
-              this.lastConfig = buildXrayConfig(this.profile, server, this.state.settings);
+              this.lastConfig = buildXrayConfig(this.profile, server, this.state.settings, this.gamePassword);
               this.lastTuic = server.tuic;
             }
           }
@@ -1346,6 +1472,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
   }
 
   private cancelTunnelRecovery(): void {
+    this.cancelGameProbes();
     this.recoveryCause = null;
     this.connectionGeneration += 1;
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
@@ -1360,6 +1487,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
   }
 
   private handleTrafficStats(downloadBytes: number, uploadBytes: number): void {
+    if (this.state.settings.gameEnabled && this.state.settings.gameMultipath) this.updateGame({ multipath: this.xray.gameMultipathStats });
     if (downloadBytes < this.lastRawDownload) this.trafficDownloadOffset += this.lastRawDownload;
     if (uploadBytes < this.lastRawUpload) this.trafficUploadOffset += this.lastRawUpload;
     this.lastRawDownload = downloadBytes;
@@ -1374,11 +1502,52 @@ export class AppController extends EventEmitter<AppControllerEvents> {
 
   private async startXray(config: Record<string, unknown>, generation: number): Promise<void> {
     this.assertCurrentConnection(generation);
-    await this.xray.start(config, this.lastTuic);
+    const gameTuic = this.state.settings.gameEnabled && this.profile?.game?.enabled
+      ? this.profile.game.servers.flatMap((server, index) => server.tuic ? [{ tag: gameTag(index), endpoint: server.tuic }] : []) : [];
+    await this.xray.start(config, this.lastTuic, gameTuic);
     try {
       this.assertCurrentConnection(generation);
       await this.killSwitch.allowTunnel();
       this.assertCurrentConnection(generation);
+      if (this.state.settings.gameEnabled) {
+        this.cancelGameProbes();
+        await this.measureGameRoutes();
+        this.assertCurrentConnection(generation);
+        if (this.state.settings.gameMultipath && this.gamePassword) {
+          const quality = this.state.game?.quality ?? {};
+          const candidates = (this.profile?.game?.servers ?? []).map((server, index) => ({ server, index }))
+            .filter(({ server }) => ["hysteria", "tuic", "vless"].includes(String(server.outbound.protocol)))
+            .sort((a, b) => (quality[a.server.id]?.latencyMs ?? Infinity) - (quality[b.server.id]?.latencyMs ?? Infinity))
+            .map(({ index }) => ({ index, port: GAME_PROBE_PORT + index }));
+          try {
+            await this.xray.connectGameMultipath(candidates, this.gamePassword);
+            this.assertCurrentConnection(generation);
+            const dataAbort = new AbortController();
+            this.gameProbeAbort = dataAbort;
+            const dataCheck = await measureGameRoute(GAME_DATA_PROBE_PORT, this.gamePassword,
+              AbortSignal.any([dataAbort.signal, AbortSignal.timeout(12_000)]), 1200).finally(() => {
+                if (this.gameProbeAbort === dataAbort) this.gameProbeAbort = null;
+              });
+            this.assertCurrentConnection(generation);
+            if (dataCheck.latencyMs === null || dataCheck.lossPercent > 25) throw new Error("Game UDP validation failed");
+            const primary = this.xray.gameMultipathStats?.paths.filter((path) => path.responding)
+              .sort((a, b) => (a.latencyMs ?? Infinity) - (b.latencyMs ?? Infinity))[0];
+            if (!primary) throw new Error("No Game path");
+            await this.xray.selectGameRoute(primary.routeIndex);
+            await this.xray.selectGameUdpRoute(null);
+            this.updateGame({ activeRouteId: this.profile?.game?.servers[primary.routeIndex]?.id ?? null, phase: "ready", message: null });
+          } catch {
+            this.assertCurrentConnection(generation);
+            const fallback = this.profile?.game?.servers.findIndex((server) => server.id === this.state.game?.activeRouteId) ?? -1;
+            if (fallback >= 0) {
+              await this.xray.selectGameUdpRoute(fallback);
+              this.updateGame({ message: "Multipath не запустился. Игра работает через основной игровой туннель; повторная попытка — при следующем подключении." });
+            } else this.updateGame({ phase: "degraded", message: "Игровые маршруты недоступны. Переподключите VPN." });
+          }
+          this.assertCurrentConnection(generation);
+          this.updateGame({ multipath: this.xray.gameMultipathStats });
+        }
+      }
     } catch (error) {
       await this.xray.stop();
       throw error;
@@ -1654,6 +1823,11 @@ function validateSettings(value: AppSettings): AppSettings {
   if (!isIPv4(value.dnsServer)) throw new Error("Некорректный DNS-сервер");
   return {
     routingMode: value.routingMode,
+    gameEnabled: value.gameEnabled === true,
+    gameIds: normalizeGameIds(value.gameIds),
+    gameProcesses: normalizeProcessSelection(value.gameProcesses).slice(0, 32),
+    gameRouteId: typeof value.gameRouteId === "string" && /^[a-f0-9]{64}$/.test(value.gameRouteId) ? value.gameRouteId : null,
+    gameMultipath: value.gameMultipath === true,
     automaticServer: Boolean(value.automaticServer),
     autoReconnect: Boolean(value.autoReconnect),
     killSwitch: Boolean(value.killSwitch),
@@ -1681,6 +1855,7 @@ function validateSettings(value: AppSettings): AppSettings {
 }
 
 function affectsTunnel(before: AppSettings, after: AppSettings): boolean {
+  if (before.gameEnabled !== after.gameEnabled || (after.gameEnabled && (before.gameMultipath !== after.gameMultipath || gameProcesses(before).join("\0") !== gameProcesses(after).join("\0")))) return true;
   return before.routingMode !== after.routingMode || before.killSwitch !== after.killSwitch || before.useDoh !== after.useDoh || before.dnsServer !== after.dnsServer || before.preventDnsLeaks !== after.preventDnsLeaks || before.antiDpiEnabled !== after.antiDpiEnabled || before.antiDpiPackets !== after.antiDpiPackets || before.antiDpiLength !== after.antiDpiLength || before.antiDpiInterval !== after.antiDpiInterval || before.splitTunnelMode !== after.splitTunnelMode || before.splitTunnelProcesses.join("\0") !== after.splitTunnelProcesses.join("\0");
 }
 

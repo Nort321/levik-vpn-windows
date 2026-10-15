@@ -1,4 +1,4 @@
-export type AppTab = "home" | "servers" | "stats" | "profile";
+export type AppTab = "home" | "servers" | "game" | "stats" | "profile";
 export type ConnectionStatus = "disconnected" | "connecting" | "connected" | "reconnecting" | "disconnecting" | "error";
 export type RoutingMode = "global" | "bypassRu" | "blockedOnly";
 export type ThemeMode = "system" | "dark" | "light" | "amoled";
@@ -79,6 +79,12 @@ export interface TunnelServer {
 }
 
 export interface AppSettings {
+  gameEnabled?: boolean;
+  gameIds?: string[];
+  gameProcesses?: string[];
+  /** null selects the best measured Game route. Local to this computer. */
+  gameRouteId?: string | null;
+  gameMultipath?: boolean;
   routingMode: RoutingMode;
   automaticServer: boolean;
   autoReconnect: boolean;
@@ -109,6 +115,7 @@ export interface AppSettings {
 }
 
 export interface AppSnapshot {
+  game?: GameSnapshot;
   appVersion: string;
   tab: AppTab;
   status: ConnectionStatus;
@@ -166,6 +173,7 @@ export interface PendingApproval {
 export type ApprovalAnswerResult = "approved" | "declined";
 
 export interface LevikDesktopApi {
+  measureGameRoutes(): Promise<void>;
   snapshot(): Promise<AppSnapshot>;
   login(openExternal?: boolean): Promise<LoginChallenge>;
   cancelLogin(): Promise<void>;
@@ -199,6 +207,7 @@ export interface LevikDesktopApi {
 }
 
 export const IPC = {
+  measureGameRoutes: "levik:measure-game-routes",
   snapshot: "levik:snapshot",
   login: "levik:login",
   cancelLogin: "levik:cancel-login",
@@ -226,3 +235,31 @@ export const IPC = {
   snapshotChanged: "levik:snapshot-changed",
   navigate: "levik:navigate",
 } as const;
+
+export interface GameRouteQuality {
+  latencyMs: number | null;
+  jitterMs: number | null;
+  lossPercent: number;
+  samples: number;
+  measuredAt: number;
+}
+
+export interface GameSnapshot {
+  available: boolean;
+  routes: Array<Pick<TunnelServer, "id" | "name" | "countryCode">>;
+  quality: Record<string, GameRouteQuality>;
+  activeRouteId: string | null;
+  recommendedRouteId: string | null;
+  phase: "idle" | "probing" | "ready" | "degraded";
+  message: string | null;
+  history?: Record<string, GameRouteQuality[]>;
+  multipath?: GameMultipathStats | null;
+}
+
+export interface GameMultipathStats {
+  state: "protected" | "single" | "unavailable" | "fallback";
+  paths: Array<{ routeIndex: number; latencyMs: number | null; responding: boolean; active?: boolean; firstReplies: number }>;
+  receivedPackets: number;
+  duplicateReplies: number;
+  uploadedPackets: number;
+}

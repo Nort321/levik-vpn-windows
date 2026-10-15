@@ -58,6 +58,11 @@ jobs:
       - run: npm run build
       - run: npm test
 
+      - name: Verify isolated Windows TUN Game datapath
+        run: npm test -- tests/multipath/vlessOutbound.test.ts
+        env:
+          LEVIK_TEST_NATIVE_TUN: '1'
+
       - name: Build signed NSIS installer
         if: ${{ env.WINDOWS_CSC_LINK != '' }}
         run: npm run package:win

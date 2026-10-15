@@ -3,8 +3,10 @@ import type { TunnelProfileEnvelope } from "../api/models";
 import { decodeBase64Url } from "../../shared/base64";
 import type { TunnelServer } from "../../shared/contracts";
 import { DeviceIdentity } from "../security/deviceIdentity";
+import { extractServerEndpoint } from "./serverPinger";
 
 export interface PreparedTunnelProfile {
+  game?: { enabled: boolean; servers: TunnelServer[] };
   profileId: string;
   subscriptionId: string;
   subscriptionExpiresAt: string | null;
@@ -15,6 +17,7 @@ export interface PreparedTunnelProfile {
 }
 
 interface RawTunnelProfile {
+  game?: unknown;
   version: number;
   profileId: string;
   subscriptionId: string;
@@ -53,15 +56,33 @@ export function prepareTunnelProfile(plaintext: Uint8Array, expectedSubscription
   if (!raw.source || typeof raw.source.content !== "string") throw new Error("Профиль не содержит конфигурацию");
   const servers = parseSource(raw.source.content);
   if (servers.length === 0 || servers.length > 200) throw new Error("В профиле нет совместимых серверов");
+  const game = parseGameAccess(raw.game, servers);
   return {
     profileId: raw.profileId,
     subscriptionId: raw.subscriptionId,
     subscriptionExpiresAt: raw.subscriptionExpiresAt ?? null,
-    servers,
+    servers: servers.filter((server) => !game.servers.includes(server)),
+    game,
     directCidrs: validateCidrs(raw.routing?.directCidrs ?? []),
     directDomains: validateDomains(raw.routing?.directDomains ?? []),
     proxyDomains: validateDomains(raw.routing?.proxyDomains ?? []),
   };
+}
+
+function parseGameAccess(value: unknown, servers: TunnelServer[]): { enabled: boolean; servers: TunnelServer[] } {
+  if (!isRecord(value) || value.enabled !== true || !Array.isArray(value.endpoints) || value.endpoints.length > 32) {
+    return { enabled: false, servers: [] };
+  }
+  const endpoints = value.endpoints.filter((endpoint): endpoint is { address: string; port: number; protocol: string } =>
+    isRecord(endpoint) && typeof endpoint.address === "string" && endpoint.address.length <= 253
+    && typeof endpoint.port === "number" && Number.isInteger(endpoint.port) && endpoint.port > 0 && endpoint.port <= 65535
+    && typeof endpoint.protocol === "string");
+  return { enabled: true, servers: servers.filter((server) => {
+    const endpoint = extractServerEndpoint(server.outbound);
+    return endpoint && endpoints.some((candidate) =>
+      candidate.address.toLowerCase() === endpoint.host.toLowerCase() && candidate.port === endpoint.port
+      && candidate.protocol === server.outbound.protocol);
+  }).slice(0, 32) };
 }
 
 function parseSource(source: string): TunnelServer[] {

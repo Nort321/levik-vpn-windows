@@ -5,10 +5,13 @@ import { join } from "node:path";
 import { EventEmitter } from "node:events";
 import { promisify } from "node:util";
 import { parseXrayStats, XRAY_STATS_ENDPOINT } from "./xrayStats";
-import { bindXrayOutboundInterface } from "./xrayConfig";
+import { bindXrayOutboundInterface, GAME_MULTIPATH, GAME_UDP_BALANCER } from "./xrayConfig";
+import { GameMultipath } from "./multipath/client";
+import { networkInterfaces } from "node:os";
 import { findWindowsOutboundInterface } from "../windows/outboundInterface";
 import { TuicSidecar, withTuicProxy } from "./tuicSidecar";
-import type { TuicEndpoint } from "../../shared/contracts";
+import type { TuicEndpoint, GameMultipathStats } from "../../shared/contracts";
+import { GAME_BALANCER, GAME_BLOCK, gameTag } from "./gameRoutes";
 
 const execFileAsync = promisify(execFile);
 
@@ -25,11 +28,36 @@ export class XrayManager extends EventEmitter<XrayEvents> {
   private statsQueryRunning: ChildProcess | null = null;
   private statsErrorReported = false;
   private readonly tuic = new TuicSidecar(stopChild);
+  private readonly gameTuic = new TuicSidecar(stopChild);
   private outboundName: string | null = null;
+  private multipath: GameMultipath | null = null;
+  private gameUdpFallback = false;
+
+  get gameMultipathStats(): GameMultipathStats | null {
+    const stats = this.multipath?.snapshot();
+    return stats ? { ...stats, ...(this.gameUdpFallback ? { state: "fallback" as const } : {}) } : null;
+  }
+
+  async selectGameUdpRoute(index: number | null): Promise<void> {
+    const child = this.process;
+    if (!child) throw new Error("VPN disconnected");
+    await execFileAsync(this.executablePath(), ["api", "bo", `--server=${XRAY_STATS_ENDPOINT}`, "-b", GAME_UDP_BALANCER,
+      index === null ? GAME_MULTIPATH : gameTag(index)], { windowsHide: true, timeout: 4_000, maxBuffer: 16 * 1024 });
+    if (this.process !== child) throw new Error("VPN connection changed");
+    this.gameUdpFallback = index !== null;
+    if (index === null) this.multipath?.startCounting();
+    else await this.multipath?.stop();
+  }
+
+  async connectGameMultipath(candidates: Array<{ index: number; port: number }>, password: string): Promise<void> {
+    await this.multipath?.connect(candidates, password);
+  }
 
   constructor() {
     super();
     this.tuic.on("log", (line) => this.emit("log", line));
+    this.gameTuic.on("log", (line) => this.emit("log", `Game ${line}`));
+    this.gameTuic.on("exit", () => this.emit("log", "Game: TUIC остановлен; переподключите VPN для восстановления"));
     // Without its sidecar a TUIC session blackholes traffic. Ending the core
     // surfaces an unexpected exit, so the controller reconnects.
     this.tuic.on("exit", (code) => {
@@ -45,7 +73,7 @@ export class XrayManager extends EventEmitter<XrayEvents> {
     return this.outboundName;
   }
 
-  async start(config: Record<string, unknown>, tuic?: TuicEndpoint): Promise<void> {
+  async start(config: Record<string, unknown>, tuic?: TuicEndpoint, gameTuic: Array<{ tag: string; endpoint: TuicEndpoint }> = []): Promise<void> {
     if (process.platform !== "win32") throw new Error("VPN-туннель запускается только в Windows-сборке");
     const { stdout: version } = await execFileAsync(this.executablePath(), ["version"], {
       windowsHide: true, timeout: 5_000, maxBuffer: 64 * 1024,
@@ -66,7 +94,31 @@ export class XrayManager extends EventEmitter<XrayEvents> {
       }
       this.emit("log", `TUIC: sing-box bound to [${interfaceName}]`);
     }
-    const configInput = Buffer.from(JSON.stringify(bindXrayOutboundInterface(launchConfig, interfaceName, outbound.ipv6)), "utf8");
+    if (gameTuic.length) {
+      try {
+        const proxies = await this.gameTuic.startRoutes(gameTuic, interfaceName);
+        for (const [tag, proxy] of proxies) launchConfig = withTuicProxy(launchConfig, proxy, tag);
+      } catch {
+        await this.gameTuic.stop();
+        const tags = new Set(gameTuic.map((route) => route.tag));
+        const outbounds = Array.isArray(launchConfig.outbounds) ? launchConfig.outbounds : [];
+        launchConfig = { ...launchConfig, outbounds: outbounds.map((outbound: unknown) => {
+          if (typeof outbound === "object" && outbound !== null && "tag" in outbound && typeof outbound.tag === "string" && tags.has(outbound.tag)) {
+            return { tag: outbound.tag, protocol: "blackhole", settings: {} };
+          }
+          return outbound;
+        }) };
+        this.emit("log", "Game: TUIC недоступен; проверяем остальные игровые маршруты");
+      }
+    }
+    if (Array.isArray(launchConfig.outbounds) && launchConfig.outbounds.some((outbound: unknown) =>
+      typeof outbound === "object" && outbound !== null && "tag" in outbound && outbound.tag === GAME_MULTIPATH)) {
+      this.multipath = new GameMultipath(false);
+      const local = await this.multipath.listen();
+      launchConfig = withTuicProxy(launchConfig, { port: local.port, id: local.uuid }, GAME_MULTIPATH);
+    }
+    const loopback = Object.entries(networkInterfaces()).find(([, addresses]) => addresses?.some((address) => address.address === "127.0.0.1"))?.[0];
+    const configInput = Buffer.from(JSON.stringify(bindXrayOutboundInterface(launchConfig, interfaceName, outbound.ipv6, loopback)), "utf8");
     this.emit("log", `Xray: outbound interface [${interfaceName}] (TCP/UDP, direct, IPv6 ${outbound.ipv6 ? "on" : "off"})`);
     try {
       await this.validate(configInput);
@@ -100,6 +152,9 @@ export class XrayManager extends EventEmitter<XrayEvents> {
   }
 
   async stop(): Promise<void> {
+    this.gameUdpFallback = false;
+    const multipath = this.multipath; this.multipath = null;
+    await multipath?.stop();
     this.stopStatsPolling();
     const child = this.process;
     if (child) {
@@ -108,6 +163,7 @@ export class XrayManager extends EventEmitter<XrayEvents> {
       if (this.process === child) this.process = null;
     }
     await this.tuic.stop();
+    await this.gameTuic.stop();
   }
 
   tuicExecutablePath(): string {
@@ -116,6 +172,15 @@ export class XrayManager extends EventEmitter<XrayEvents> {
 
   isRunning(): boolean {
     return this.process !== null;
+  }
+
+  async selectGameRoute(index: number | null): Promise<void> {
+    if (index !== null && (!Number.isInteger(index) || index < 0 || index >= 32)) throw new Error("Некорректный игровой маршрут");
+    const child = this.process;
+    if (!child) throw new Error("Подключите VPN для выбора игрового маршрута");
+    await execFileAsync(this.executablePath(), ["api", "bo", `--server=${XRAY_STATS_ENDPOINT}`, "-b", GAME_BALANCER,
+      index === null ? GAME_BLOCK : gameTag(index)], { windowsHide: true, timeout: 4_000, maxBuffer: 16 * 1024 });
+    if (this.process !== child) throw new Error("Подключение изменилось");
   }
 
   async isHealthy(): Promise<boolean> {
