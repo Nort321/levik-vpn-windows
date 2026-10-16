@@ -23,7 +23,7 @@ export class DeliveryEvidence {
     this.expected += finalizedCount; this.lost += finalizedCount - delivered;
     this.finalized = Math.max(this.finalized, boundary);
   }
-  snapshot(): { lossPercent: number | null; rescuedPackets: number } {
-    return { lossPercent: this.expected ? this.lost / this.expected * 100 : null, rescuedPackets: this.rescued };
+  snapshot(): { lossPercent: number | null; lostPackets: number | null; rescuedPackets: number } {
+    return { lossPercent: this.expected ? this.lost / this.expected * 100 : null, lostPackets: this.expected ? this.lost : null, rescuedPackets: this.rescued };
   }
 }

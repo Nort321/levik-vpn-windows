@@ -365,6 +365,7 @@ export interface GameSnapshot {
   multipath?: GameMultipathStats | null;
   runtime?: GameRuntimeSnapshot | null;
   installedGames?: Array<{ gameId: string; launcher: "steam" | "riot" | "epic" }>;
+  sessions?: GameSessionRecord[];
 }
 
 export interface GameMeasurement extends GameRouteQuality {
@@ -423,6 +424,43 @@ export interface GameMatchReport {
   routeDecision?: GameRouteDecision;
   protection?: { enabled: boolean; pathCount: number };
   lowerBound?: boolean;
+  minRttMs?: number | null;
+  /** Game packets the PC sent into this connection. */
+  sentPackets?: number;
+  /** Relay→PC envelopes never delivered after replication; null without sequence evidence. */
+  lostPackets?: number | null;
+  /** Packets rebuilt from parity (FEC) for this connection. */
+  recoveredPackets?: number;
+  /** Replies each path delivered first, most first. */
+  paths?: Array<{ routeIndex: number; entryNodeId: string; packets: number }>;
+}
+
+/** One finished or running match connection, kept on this PC only: no IP addresses. */
+export interface GameSessionRecord {
+  id: string;
+  gameId: string;
+  startedAt: number;
+  endedAt: number;
+  durationMs: number;
+  live: boolean;
+  /** Network estimates (≈), not the in-game ping. */
+  averageRttMs: number | null;
+  p95RttMs: number | null;
+  minRttMs: number | null;
+  jitterMs: number | null;
+  lowerBound: boolean;
+  lossPercent: number | null;
+  lostPackets: number | null;
+  rescuedPackets: number;
+  recoveredPackets: number;
+  receivedPackets: number;
+  sentPackets: number;
+  region: string | null;
+  exitName: string;
+  direct: boolean;
+  pathCount: number;
+  /** Replies each path delivered first, most first. */
+  paths: Array<{ name: string; packets: number }>;
 }
 
 export interface GameRuntimeSnapshot {
@@ -441,6 +479,8 @@ export interface GameRuntimeSnapshot {
   protection: { enabled: boolean; limitedByUpload: boolean; reason: string | null; effective?: boolean; pathCount?: number; fec?: boolean };
   shadowAlternative: { nodeId: string; name: string; savingMs: number } | null;
   matchReport: GameMatchReport | null;
+  /** The running match connection so far, so a disconnect never loses its statistics. */
+  liveMatchReport?: GameMatchReport | null;
   estimateHistory: Array<{ measuredAt: number; latencyMs: number | null; approximate: boolean; lowerBound?: boolean }>;
   compatibility: "full" | "legacy";
   meshRows?: Array<{ nodeId: string; neighbors: Array<{ nodeId: string; quality: GameMeasurement }> }>;

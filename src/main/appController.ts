@@ -20,6 +20,7 @@ import type {
   TunnelServer,
   TuicEndpoint,
   GameSnapshot,
+  GameRuntimeSnapshot,
 } from "../shared/contracts";
 import { isAuthenticationRejected, MobileApiClient, MobileApiError } from "./api/mobileApiClient";
 import type { AuthChallengeResponse, MobileAccountResponse, RoadExitResponse } from "./api/models";
@@ -96,6 +97,7 @@ import { discoverInstalledGames } from "./windows/installedGames";
 import { listWindowsProcesses } from "./windows/processes";
 import { measureDirectGameTargets, physicalGameSourceAddress } from "./windows/gameProbe";
 import { GameHistory } from "./vpn/gameHistory";
+import { GameSessions, sessionRecord } from "./vpn/gameSessions";
 import { TelemetryClient } from "./telemetry/telemetryClient";
 import type { ProbeMeasurement } from "./vpn/multipath/wire";
 import { bestGameRoute, measureGameDataRoute, GAME_PROBE_PORT, GAME_DATA_PROBE_PORT, GAME_DIRECT_PORT, gameTag } from "./vpn/gameRoutes";
@@ -200,6 +202,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
   private gameLastHistoryKey: string | null = null;
   private gameLastRegionReportAt = 0;
   private readonly gameHistory = new GameHistory(join(app.getPath("userData"), "game-history.json"));
+  private readonly gameSessions = new GameSessions(join(app.getPath("userData"), "game-sessions.json"));
   private readonly gameRegionTelemetry = new TelemetryClient();
   private pendingGameProfile: PreparedTunnelProfile | null = null;
   private applyingPendingGameProfile = false;
@@ -378,6 +381,8 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     this.state.sessionAvailable = this.accessToken !== null;
     this.state.settings = await this.loadSettings();
     await this.gameHistory.load();
+    await this.gameSessions.load();
+    this.updateGame({ sessions: this.gameSessions.snapshot() });
     if (process.platform === "win32") void discoverInstalledGames().then((installedGames) => this.updateGame({ installedGames })).catch(() => {});
     await this.loadSyncState();
     await this.notices.load();
@@ -2094,6 +2099,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
         }).finally(() => { this.applyingPendingGameProfile = false; });
       }
       this.updateGame({ multipath: this.xray.gameMultipathStats, runtime: runtime ?? null, quality });
+      this.recordGameSessions(runtime);
       void this.checkPlayingGames();
       if (runtime?.currentMatch && runtime.selectedExitId) {
         const gameId = runtime.gameId ?? this.currentGameId;
@@ -2200,6 +2206,20 @@ export class AppController extends EventEmitter<AppControllerEvents> {
       await this.xray.stop();
       throw error;
     }
+  }
+
+  /** Keeps the running and finished match connections in the local session history. */
+  private recordGameSessions(runtime: GameRuntimeSnapshot | undefined): void {
+    const game = this.profile?.game;
+    const records = ([[runtime?.liveMatchReport, true], [runtime?.matchReport, false]] as const).flatMap(([report, live]) => {
+      if (!report) return [];
+      const record = sessionRecord(report, live, (routeIndex, entryNodeId) => {
+        const entry = game?.nodes?.find((node) => node.nodeId === entryNodeId)?.name ?? game?.servers[routeIndex]?.name ?? "Игровой путь";
+        return entryNodeId && report.exitId && entryNodeId !== report.exitId ? `${entry} → ${report.exitName ?? "игровой выход"}` : entry;
+      });
+      return record ? [record] : [];
+    });
+    if (this.gameSessions.update(records)) this.updateGame({ sessions: this.gameSessions.snapshot() });
   }
 
   /** Multipath did not pass its check: game UDP joins its TCP on the ordinary VPN. A single

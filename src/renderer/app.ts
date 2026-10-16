@@ -1,4 +1,4 @@
-import type { AppSettings, AppSnapshot, AppTab, DiagnosisAction, DiagnosisSummary, TunnelServer, WindowsProcess, PendingApproval, GameExitComparison } from "../shared/contracts";
+import type { AppSettings, AppSnapshot, AppTab, DiagnosisAction, DiagnosisSummary, TunnelServer, WindowsProcess, PendingApproval, GameExitComparison, GameSessionRecord } from "../shared/contracts";
 import { isDiagnosisAction } from "../shared/contracts";
 import { activeVariant, groupServers, serverProtocolShortLabel, type ServerGroup } from "../shared/serverGroups";
 import { shouldShowLogin } from "../shared/sessionState";
@@ -34,6 +34,7 @@ let pendingProcesses = new Set<string>();
 let processSearchQuery = "";
 let serverSearchQuery = "";
 let gameSearchQuery = "";
+let openGameSession: string | null = null;
 let favoritesOnly = false;
 let devicesSubscriptionId: string | null = null;
 let supportDialog: { creating: boolean; url: string | null } | null = null;
@@ -250,6 +251,7 @@ function renderGame(): string {
       <div class="game-hero-bottom"><span class="muted">${enabled && state.status === "connected" ? "Действующие UDP-потоки не переносятся между выходами" : "Обычный сервер: " + escapeHtml(selectedServer()?.name ?? "автовыбор")}</span><button class="button ${enabled ? "" : "primary"}" id="game-toggle" ${busy || (!enabled && (!gameProcesses(state.settings).length || !game.routes.length)) ? "disabled" : ""}>${icon("power")} ${enabled ? "Выключить Game" : "Включить Game"}</button></div>
     </section>
     ${renderGameInsights()}
+    ${renderGameSessions()}
     ${game.message ? `<div class="game-notice" role="status">${icon("pulse")}<span>${escapeHtml(game.message)}</span></div>` : ""}
     ${!game.routes.length ? `<div class="game-notice">В Game Squad пока нет совместимых маршрутов. Обновите подписку после добавления серверов.</div>` : ""}
     <section class="game-library"><div class="game-section-header"><div><h2>Мои игры</h2><p class="muted">Установленные игры определяются по манифестам Steam, Riot и Epic. Лаунчеры остаются на обычном VPN.</p></div><button class="button compact" id="game-add" ${busy ? "disabled" : ""}>${icon("browse")} Добавить .exe</button></div>
@@ -309,6 +311,45 @@ function renderGameInsights(): string {
     ${good.length > 1 ? `<svg class="game-chart" viewBox="0 0 600 132" role="img" aria-label="История оценок сети, не точный пинг игры${lowerBoundHistory ? "; включает нижние оценки части пути" : ""}"><path class="game-chart-grid" d="M12 18H588 M12 65H588 M12 112H588"/><path class="game-chart-line" d="${drawing}"/><text x="12" y="130">${Math.ceil(maximum)} мс · верх шкалы</text><text x="588" y="130" text-anchor="end">последняя оценка</text></svg>` : `<div class="game-chart-empty">${icon("pulse")}<span>${escapeHtml(emptyHistory)}</span></div>`}
     ${report ? `<div class="game-chart-heading"><strong>Последнее игровое UDP-соединение · ${Math.max(1, Math.round(report.durationMs / 60_000))} мин</strong><span>Оценки сети, не пинг игры</span></div><p class="game-footnote">${report.server ? `${escapeHtml(report.server.address)}:${report.server.port} · ` : ""}${report.exitName ? report.exitId === "direct" ? "Напрямую, без VPN." : `Через ${escapeHtml(report.exitName)}.` : "Исторический выход не записан."}${report.protection && report.exitId !== "direct" ? ` Максимум путей передачи за соединение: ${report.protection.pathCount}.` : ""}${report.routeDecision ? " " + escapeHtml(report.routeDecision.reason) : ""}${report.lowerBound ? " Есть нижние оценки части пути; это не полный RTT до игры." : ""}${report.averageRttMs == null ? " Пригодных оценок задержки не было. Прочерки не означают нулевой пинг." : ""}</p><div class="game-proof"><div><strong>${report.averageRttMs == null ? "—" : (report.lowerBound ? "от ≈" : "≈") + metric(report.averageRttMs) + " мс"}</strong><span>Средняя оценка сети</span></div><div><strong>${report.p95RttMs == null ? "—" : (report.lowerBound ? "от ≈" : "≈") + metric(report.p95RttMs) + " мс"}</strong><span>p95 оценки сети</span></div><div><strong>${report.jitterMs == null ? "—" : metric(report.jitterMs) + " мс"}</strong><span>Разброс оценок, не джиттер игры</span></div><div><strong>${reportLoss}</strong><span>Пропуски ответов на участке реле → ПК после резервирования</span></div><div><strong>${report.exitId === "direct" ? "Не применяется" : report.rescuedPackets.toLocaleString("ru-RU")}</strong><span>Ответов доставлено копией при пропуске основного пути</span></div><div><strong>${report.receivedPackets.toLocaleString("ru-RU")}</strong><span>Уникальных ответов передано игровому соединению</span></div></div>` : ""}
     <p class="game-footnote">Счётчик пропусков видит только ответы от реле до ПК и не видит потери до реле или в сторону игрового сервера. Самые последние ответы включаются в итог с задержкой. Удалённые дубликаты не считаются потерями. Прямой UDP этим способом не измеряется. История маршрутов хранится только на этом компьютере.</p>
+  </section>`;
+}
+
+function renderGameSessions(): string {
+  const sessions = (state?.game?.sessions ?? []).slice(0, 10);
+  const connected = state?.status === "connected";
+  const number = (value: number): string => value.toLocaleString("ru-RU");
+  const ping = (value: number | null, lowerBound: boolean): string => value == null ? "—" : `${lowerBound ? "от " : ""}≈${Math.round(value)} мс`;
+  const loss = (session: GameSessionRecord): string => session.direct ? "не измеряются" : session.lossPercent == null ? "нет данных"
+    : session.lossPercent > 0 && session.lossPercent < .1 ? "< 0,1%" : session.lossPercent.toLocaleString("ru-RU", { maximumFractionDigits: 1 }) + "%";
+  const when = (at: number): string => new Date(at).toLocaleString("ru-RU", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
+  const minutes = (ms: number): string => ms < 60_000 ? `${Math.max(1, Math.round(ms / 1000))} с` : `${Math.round(ms / 60_000)} мин`;
+  const rows = sessions.map((session) => {
+    const live = session.live && connected;
+    const total = session.paths.reduce((sum, path) => sum + path.packets, 0);
+    const top = session.paths[0];
+    const name = GAMES.find((item) => item.id === session.gameId)?.name ?? "Своя игра";
+    const route = session.direct ? "Напрямую" : top && total ? `${top.name} · ${Math.round(top.packets / total * 100)}%` : session.exitName;
+    return `<details class="game-session" data-game-session="${escapeAttribute(session.id)}" ${openGameSession === session.id ? "open" : ""}>
+      <summary><span class="game-session-title"><strong>${escapeHtml(name)}${live ? ` <span class="game-session-live">идёт</span>` : ""}</strong><small>${escapeHtml(when(session.startedAt))} · ${minutes(session.durationMs)}${session.region ? ` · ${escapeHtml(session.region)}` : ""}</small></span>
+      <span class="game-session-value"><strong>${ping(session.averageRttMs, session.lowerBound)}</strong><small>средний пинг</small></span>
+      <span class="game-session-value"><strong>${escapeHtml(loss(session))}</strong><small>потери</small></span>
+      <span class="game-session-route"><strong>${escapeHtml(route)}</strong><small>${session.direct ? "без резервирования" : `выход ${escapeHtml(session.exitName)}`}</small></span></summary>
+      <div class="game-session-body">
+        <div class="game-proof">
+          <div><strong>${ping(session.minRttMs, session.lowerBound)}</strong><span>Минимальный пинг</span></div>
+          <div><strong>${ping(session.p95RttMs, session.lowerBound)}</strong><span>p95 — 95% времени пинг был не выше</span></div>
+          <div><strong>${session.jitterMs == null ? "—" : Math.round(session.jitterMs) + " мс"}</strong><span>Разброс пинга</span></div>
+          <div><strong>${escapeHtml(loss(session))}</strong><span>Потери ответов после резервирования${session.lostPackets ? ` · ${number(session.lostPackets)} пак.` : ""}</span></div>
+          <div><strong>${number(session.sentPackets)} / ${number(session.receivedPackets)}</strong><span>Пакетов отправлено / получено</span></div>
+          <div><strong>${session.direct ? "—" : number(session.rescuedPackets + session.recoveredPackets)}</strong><span>Спасено копиями и избыточным кодом${session.recoveredPackets ? ` · из них FEC ${number(session.recoveredPackets)}` : ""}</span></div>
+        </div>
+        ${session.paths.length ? `<table class="game-session-paths"><caption>Какой путь первым доставил ответы игры. Путей за матч: до ${session.pathCount}.</caption><thead><tr><th scope="col">Сервер</th><th scope="col">Пакетов первым</th><th scope="col">Доля</th></tr></thead><tbody>${session.paths.map((path) => `<tr><th scope="row">${escapeHtml(path.name)}</th><td>${number(path.packets)}</td><td><span class="game-session-share" aria-hidden="true"><span data-progress="${total ? Math.round(path.packets / total * 100) : 0}"></span></span>${total ? Math.round(path.packets / total * 100) : 0}%</td></tr>`).join("")}</tbody></table>` : `<p class="game-footnote">${session.direct ? "Матч шёл напрямую: пакеты через узлы Levik не передавались." : "Счётчики путей недоступны для этого матча."}</p>`}
+      </div>
+    </details>`;
+  }).join("");
+  return `<section class="card game-sessions" aria-label="История игровых сессий">
+    <div class="game-section-header"><div><div class="game-eyebrow">ИСТОРИЯ</div><h2>Последние матчи</h2><p class="muted">Пинг здесь — оценка сети до сервера игры (≈), а не число из игры. Хранится только на этом компьютере.</p></div></div>
+    ${rows ? `<div class="game-session-list">${rows}</div>` : `<div class="game-chart-empty">${icon("pulse")}<span>Здесь появятся матчи после первой игры через Game: пинг, потери и серверы, которые передали больше всего пакетов.</span></div>`}
   </section>`;
 }
 
@@ -819,6 +860,10 @@ function bindCommonEvents(): void {
 }
 
 function bindPageEvents(): void {
+  document.querySelectorAll<HTMLDetailsElement>("[data-game-session]").forEach((item) => item.addEventListener("toggle", () => {
+    if (item.open) openGameSession = item.dataset.gameSession ?? null;
+    else if (openGameSession === item.dataset.gameSession) openGameSession = null;
+  }));
   document.getElementById("game-search")?.addEventListener("input", (event) => { gameSearchQuery = (event.target as HTMLInputElement).value; applyGameFilter(); });
   document.getElementById("game-toggle")?.addEventListener("click", () => void run(async () => {
     const enabled = state?.settings.gameEnabled !== true;

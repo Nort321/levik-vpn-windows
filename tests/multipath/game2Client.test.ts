@@ -271,6 +271,12 @@ it("keeps the opening decision, forecasts the real next exit and reports the flo
     await new Promise<void>((resolve) => setImmediate(resolve));
     await vi.waitFor(() => expect(client.runtimeSnapshot().matchReport).toMatchObject({ gameId: "cs2", server: { address: "1.1.1.1", port: 7000 },
       exitId: "node-a", exitName: "node-a", routeDecision: { source: "access" }, protection: { enabled: true, pathCount: 1 } }));
+    // Per-match statistics: what the PC sent and which path delivered the replies first.
+    const report = client.runtimeSnapshot().matchReport!;
+    expect(report.sentPackets).toBeGreaterThan(0);
+    expect(report.paths?.[0]).toMatchObject({ routeIndex: 0, entryNodeId: "node-a" });
+    expect(report.paths?.reduce((sum, path) => sum + path.packets, 0)).toBe(report.receivedPackets - (report.recoveredPackets ?? 0));
+    expect(client.runtimeSnapshot().liveMatchReport).toMatchObject({ exitId: "node-b" });
   } finally { for (const socket of sockets) socket.destroy(); await client.stop(); }
 });
 

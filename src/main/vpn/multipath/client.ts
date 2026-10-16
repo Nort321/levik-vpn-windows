@@ -10,7 +10,7 @@ import { decode, encode, Kind, MAX_PAYLOAD, MAX_PATHS, SequenceWindow, controlPa
 import { QualityWindow, FastQuality, MeasurementHistory, chooseExit, chooseIngress, classifyFlow, estimateExit, GAME_POLICY, UploadQueueGuard, subnet24, byLatency,
   type DestinationMetric, type FlowKind, type ExitCandidate, type PathEstimate, type Segment } from "../gameEngine";
 import type { GameExitScope } from "../../../shared/games";
-import type { GameMultipathStats, GameNode, GameRuntimeSnapshot, GameExitComparison, GameMatchReport, GameRouteQuality, GameRouteDecision } from "../../../shared/contracts";
+import type { GameMultipathStats, GameNode, GameRuntimeSnapshot, GameExitComparison, GameMatchReport, GameMatchServer, GameRouteQuality, GameRouteDecision } from "../../../shared/contracts";
 
 export interface GameRuntimeOptions {
   nodes: GameNode[]; preferredExitId: string | null; protection: boolean; exitScope: GameExitScope; gameId?: string;
@@ -40,7 +40,9 @@ interface Flow { id: string; connection: Connection; address: string; port: numb
   /** Last second with match-rate traffic; a long-quiet flow may follow a better exit. */
   lastBusyAt: number; sentAtTick: number; reopenReason: string | null; finished: boolean;
   /** Once a flow carried match-rate traffic it is a game connection: it never moves to another exit while alive. */
-  busy: boolean }
+  busy: boolean; recovered: number;
+  /** Replies each path delivered first, keyed by route index and entry node. */
+  pathPackets: Map<string, { routeIndex: number; entryNodeId: string; packets: number }> }
 const emptyOptions = (): GameRuntimeOptions => ({ nodes: [], preferredExitId: null, protection: true, exitScope: "flow" });
 const NO_CAPS: RelayCapabilities = parseCapabilities({});
 const ACTIVE_MATCH_MS = 5_000;
@@ -256,7 +258,7 @@ export class GameMultipath {
         && selected.latencyMs > better.latencyMs
         ? { nodeId: better.nodeId, name: exits.find((exit) => exit.nodeId === better.nodeId)?.name ?? better.nodeId,
           savingMs: Math.max(0, Math.round(selected.latencyMs - better.latencyMs)) } : null,
-      matchReport: this.matchReport, estimateHistory: [...this.estimateHistory],
+      matchReport: this.matchReport, liveMatchReport: current ? this.report(current) : null, estimateHistory: [...this.estimateHistory],
       compatibility: current?.exitId === "direct" || this.paths.some((path) => (!current || path.exitNodeId === current.exitId) && path.modern) ? "full" : "legacy",
       meshRows: [...this.meshRows].map(([nodeId, neighbors]) => ({ nodeId, neighbors: [...neighbors] })) };
   }
@@ -285,7 +287,7 @@ export class GameMultipath {
           flow = { id: randomBytes(8).toString("hex"), connection, ...target, counted: this.counting, startedAt: Date.now(), touched: Date.now(), sent: 0, received: 0,
             exitId: "", instance: null, wire: null, direct: null, pending: [], hold: null, held: false, kind: "service", latencyHistory: [], lowerBoundSamples: false,
             evidence: new DeliveryEvidence(), gameId: this.options.gameId ?? "custom", finished: false, decision: null,
-            protectionRequested: this.options.protection, maxPathCount: 0, noPathSince: null, lastBusyAt: Date.now(), sentAtTick: 0, reopenReason: null, busy: false };
+            protectionRequested: this.options.protection, maxPathCount: 0, noPathSince: null, lastBusyAt: Date.now(), sentAtTick: 0, reopenReason: null, busy: false, recovered: 0, pathPackets: new Map() };
           connection.flows.set(key, flow); this.flows.set(flow.id, flow);
         }
         connection.touched = Date.now();
@@ -1022,7 +1024,12 @@ export class GameMultipath {
     }
     const active = this.activePaths(wire).sort(byLatency);
     wire.evidence.observe(packet.sequence, route.pathSlot, active[0]?.pathSlot ?? route.pathSlot, active.length);
-    if (this.accept(wire, packet.sequence, packet.address, packet.port, packet.payload, false)) { route.wins++; route.recentWins++; }
+    if (this.accept(wire, packet.sequence, packet.address, packet.port, packet.payload, false)) {
+      route.wins++; route.recentWins++;
+      const flow = wire.flows.get(`${packet.address}:${packet.port}`); const key = `${route.index}:${route.entryNodeId}`;
+      const counter = flow?.pathPackets.get(key);
+      if (counter) counter.packets++; else flow?.pathPackets.set(key, { routeIndex: route.index, entryNodeId: route.entryNodeId, packets: 1 });
+    }
     const recovered = wire.decoder.data({ sequence: packet.sequence, address: packet.address, port: packet.port, payload: packet.payload });
     if (recovered) this.accept(wire, recovered.sequence, recovered.address, recovered.port, recovered.payload, true);
   }
@@ -1030,7 +1037,7 @@ export class GameMultipath {
     const flow = wire.flows.get(`${address}:${port}`);
     if (!wire.seen.accept(sequence)) { if (!recovered && flow?.counted) this.duplicates++; return false; }
     if (!flow || flow.finished) return false;
-    flow.received++; flow.touched = Date.now();
+    flow.received++; flow.touched = Date.now(); if (recovered) flow.recovered++;
     if (flow.counted) { this.received++; if (recovered) this.recovered++; }
     this.deliver(flow, payload); return true;
   }
@@ -1058,17 +1065,25 @@ export class GameMultipath {
     if (flow.hold) { clearTimeout(flow.hold.timer); flow.hold = null; this.holds.delete(flow); }
     if (final) { flow.direct?.close(); flow.pending = []; }
     if (flow.kind !== "match" || (this.matchReport && this.matchReport.endedAt > flow.touched)) return;
+    this.lastMatch = this.matchServer(flow);
+    this.matchReport = this.report(flow);
+  }
+  private matchServer(flow: Flow): GameMatchServer {
     const metric = this.measurements.get(flow.exitId)?.find((item) => item.address === flow.address && item.port === flow.port)?.metric;
-    this.lastMatch = { address: flow.address, port: flow.port, ...(metric?.region ? { region: metric.region } : {}), ...(metric?.operator ? { operator: metric.operator } : {}) };
+    return { address: flow.address, port: flow.port, ...(metric?.region ? { region: metric.region } : {}), ...(metric?.operator ? { operator: metric.operator } : {}) };
+  }
+  private report(flow: Flow): GameMatchReport {
     const sorted = [...flow.latencyHistory].sort((a, b) => a - b); const now = flow.touched;
-    this.matchReport = { startedAt: flow.startedAt, endedAt: now, durationMs: now - flow.startedAt,
+    return { startedAt: flow.startedAt, endedAt: now, durationMs: now - flow.startedAt,
       averageRttMs: sorted.length ? sorted.reduce((a, b) => a + b, 0) / sorted.length : null,
       p95RttMs: sorted[Math.max(0, Math.ceil(sorted.length * 0.95) - 1)] ?? null,
       jitterMs: flow.latencyHistory.length > 1 ? flow.latencyHistory.slice(1).reduce((sum, value, index) => sum + Math.abs(value - flow.latencyHistory[index]!), 0) / (flow.latencyHistory.length - 1) : null,
       ...(flow.wire?.evidence ?? flow.evidence).snapshot(), receivedPackets: flow.received, approximate: true, gameId: flow.gameId,
-      server: { ...this.lastMatch }, exitId: flow.exitId, exitName: flow.decision?.exitName ?? this.node(flow.exitId)?.name ?? "Игровой узел",
+      server: this.matchServer(flow), exitId: flow.exitId, exitName: flow.decision?.exitName ?? this.node(flow.exitId)?.name ?? "Игровой узел",
       ...(flow.decision ? { routeDecision: { ...flow.decision } } : {}),
-      protection: { enabled: flow.protectionRequested, pathCount: flow.maxPathCount }, lowerBound: flow.lowerBoundSamples };
+      protection: { enabled: flow.protectionRequested, pathCount: flow.maxPathCount }, lowerBound: flow.lowerBoundSamples,
+      minRttMs: sorted[0] ?? null, sentPackets: flow.sent, recoveredPackets: flow.recovered,
+      paths: [...flow.pathPackets.values()].sort((a, b) => b.packets - a.packets).map((path) => ({ ...path })) };
   }
   async stop(): Promise<void> {
     this.password = ""; this.abort.abort(); if (this.timer) clearInterval(this.timer); this.timer = null;
