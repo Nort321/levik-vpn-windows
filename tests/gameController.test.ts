@@ -118,7 +118,7 @@ describe("Game controller", () => {
   function starting(options: { working: boolean; connect?: () => Promise<void>; quality?: Record<number, ReturnType<typeof summarizeGameSamples>> }) {
     const { app, state, selectGameRoute, quality } = controller();
     const order: string[] = [];
-    selectGameRoute.mockImplementation(async (index: number) => { order.push(`tcp:${index}`); });
+    selectGameRoute.mockImplementation(async (index: number) => { order.push(`exit:${index}`); });
     vi.mocked(measureGameDataRoute).mockReset().mockImplementation(async () => {
       order.push("check"); return summarizeGameSamples(Array(4).fill(options.working ? 25 : null));
     });
@@ -133,21 +133,21 @@ describe("Game controller", () => {
     return { app, state, xray, order, selectGameUdpRoute, routeGameThroughTunnel,
       run: () => start.call(app, {}, Reflect.get(app, "connectionGeneration") as number) };
   }
-  it("opens the game's TCP before the UDP check and enables multipath once UDP crosses it", async () => {
+  it("sets multipath's first exit, then enables multipath once UDP crosses the check", async () => {
     const { app, order, run } = starting({ working: true });
     await run();
-    expect(order).toEqual(["tcp:0", "check", "udp:null"]);
+    expect(order).toEqual(["exit:0", "check", "udp:null"]);
     // Plain queries: public resolvers drop large or padded ones from some nodes.
     expect(vi.mocked(measureGameDataRoute).mock.calls.at(-1)?.[3]).toBeUndefined();
     expect(app.snapshot().game).toMatchObject({ phase: "ready", activeRouteId: "a", message: null });
   });
-  it("keeps the game on its best node without backup copies when the multipath check fails", async () => {
-    const { app, order, routeGameThroughTunnel, run } = starting({ working: false });
+  it("sends game UDP through the ordinary VPN, never an unchecked single node, when the multipath check fails", async () => {
+    const { app, order, selectGameUdpRoute, run } = starting({ working: false });
     await run();
-    expect(order).toEqual(["tcp:0", "check", "tcp:0", "udp:0"]);
-    expect(routeGameThroughTunnel).not.toHaveBeenCalled();
-    expect(app.snapshot().game).toMatchObject({ phase: "degraded", activeRouteId: "a" });
-    expect(app.snapshot().game?.message).toContain("без резервных копий");
+    expect(order).toEqual(["exit:0", "check", "tunnel"]);
+    expect(selectGameUdpRoute).not.toHaveBeenCalled();
+    expect(app.snapshot().game).toMatchObject({ phase: "degraded", activeRouteId: null });
+    expect(app.snapshot().game?.message).toContain("обычный VPN");
   });
   it.each([
     ["the relays are unreachable", { connect: async () => { throw new Error("Game relay unavailable"); } }],
@@ -162,10 +162,10 @@ describe("Game controller", () => {
   it("leaves a fallback route alone during later measurements", async () => {
     const { app, xray, order, run } = starting({ working: false });
     await run();
-    xray.gameFallback = "route";
+    xray.gameFallback = "tunnel";
     await app.measureGameRoutes(true);
-    expect(order).toEqual(["tcp:0", "check", "tcp:0", "udp:0"]);
-    expect(app.snapshot().game?.message).toContain("без резервных копий");
+    expect(order).toEqual(["exit:0", "check", "tunnel"]);
+    expect(app.snapshot().game?.message).toContain("обычный VPN");
   });
   it("rejects renderer attempts to enable Game without an authorized profile", async () => {
     const app = new AppController();

@@ -13,7 +13,7 @@ import { networkInterfaces } from "node:os";
 import { findWindowsOutboundInterface } from "../windows/outboundInterface";
 import { TuicSidecar, withTuicProxy } from "./tuicSidecar";
 import type { TuicEndpoint, GameMultipathStats, GameRuntimeSnapshot, GameRouteQuality } from "../../shared/contracts";
-import { GAME_BALANCER, GAME_BLOCK, gameTag } from "./gameRoutes";
+import { GAME_BLOCK, gameTag } from "./gameRoutes";
 import { gameProcesses } from "../../shared/games";
 import type { AppSettings } from "../../shared/contracts";
 
@@ -37,7 +37,6 @@ export class XrayManager extends EventEmitter<XrayEvents> {
   private multipath: GameDataPlane | null = null;
   private gameUdpFallback = false;
   private routing: Record<string, unknown> | null = null;
-  private selectedGameRoute: number | null = null;
   private selectedGameUdpRoute: number | null = null;
   private gameUdpReady = false;
   /** The selected VPN outbound: carries the game when no game node answers. */
@@ -52,17 +51,15 @@ export class XrayManager extends EventEmitter<XrayEvents> {
   /** route: game UDP over one game node without multipath; tunnel: the game uses the ordinary VPN. */
   get gameFallback(): "route" | "tunnel" | null { return this.gameViaTunnel ? "tunnel" : this.gameUdpFallback ? "route" : null; }
 
-  /** No game node answers: the game's TCP and UDP use the selected VPN server instead of
-   * being blocked. Kept until reconnect, so a running match never changes its exit. */
+  /** No game node carries the match: the game's UDP uses the selected VPN server, as its TCP
+   * always does, instead of being blocked. Kept until reconnect, so a running match never changes its exit. */
   async routeGameThroughTunnel(): Promise<void> {
     const child = this.process; const tag = this.tunnelTag;
     if (!child || !tag) throw new Error("VPN disconnected");
-    for (const balancer of [GAME_BALANCER, GAME_UDP_BALANCER]) {
-      await execFileAsync(this.executablePath(), ["api", "bo", `--server=${XRAY_STATS_ENDPOINT}`, "-b", balancer, tag],
-        { windowsHide: true, timeout: 4_000, maxBuffer: 16 * 1024 });
-      if (this.process !== child) throw new Error("VPN connection changed");
-    }
-    this.gameViaTunnel = true; this.selectedGameRoute = null; this.selectedGameUdpRoute = null; this.gameUdpReady = true;
+    await execFileAsync(this.executablePath(), ["api", "bo", `--server=${XRAY_STATS_ENDPOINT}`, "-b", GAME_UDP_BALANCER, tag],
+      { windowsHide: true, timeout: 4_000, maxBuffer: 16 * 1024 });
+    if (this.process !== child) throw new Error("VPN connection changed");
+    this.gameViaTunnel = true; this.selectedGameUdpRoute = null; this.gameUdpReady = true;
     await this.multipath?.stop();
   }
 
@@ -104,8 +101,6 @@ export class XrayManager extends EventEmitter<XrayEvents> {
       && "ruleTag" in rule && (rule.ruleTag === "game" || rule.ruleTag === "game-multipath")));
     if (Array.isArray(routing.balancers)) for (const balancer of routing.balancers) {
       if (!balancer || typeof balancer !== "object" || !("tag" in balancer)) continue;
-      if (balancer.tag === GAME_BALANCER) Object.assign(balancer, { selector: [this.gameViaTunnel && this.tunnelTag ? this.tunnelTag
-        : this.selectedGameRoute === null ? GAME_BLOCK : gameTag(this.selectedGameRoute)] });
       if (balancer.tag === GAME_UDP_BALANCER) Object.assign(balancer, { selector: [this.gameViaTunnel && this.tunnelTag ? this.tunnelTag
         : !this.gameUdpReady ? GAME_BLOCK : this.selectedGameUdpRoute === null ? GAME_MULTIPATH : gameTag(this.selectedGameUdpRoute)] });
     }
@@ -228,7 +223,7 @@ export class XrayManager extends EventEmitter<XrayEvents> {
   }
 
   async stop(): Promise<void> {
-    this.routing = null; this.selectedGameRoute = null; this.selectedGameUdpRoute = null; this.gameUdpReady = false;
+    this.routing = null; this.selectedGameUdpRoute = null; this.gameUdpReady = false;
     this.gameUdpFallback = false; this.gameViaTunnel = false; this.tunnelTag = null;
     const multipath = this.multipath; this.multipath = null;
     await multipath?.stop();
@@ -251,14 +246,11 @@ export class XrayManager extends EventEmitter<XrayEvents> {
     return this.process !== null;
   }
 
+  /** The game node multipath prefers as its first exit. The game's TCP never follows it:
+   * it always takes the ordinary tunnel. */
   async selectGameRoute(index: number | null): Promise<void> {
     if (index !== null && (!Number.isInteger(index) || index < 0 || index >= 256)) throw new Error("Некорректный игровой маршрут");
-    const child = this.process;
-    if (!child) throw new Error("Подключите VPN для выбора игрового маршрута");
-    await execFileAsync(this.executablePath(), ["api", "bo", `--server=${XRAY_STATS_ENDPOINT}`, "-b", GAME_BALANCER,
-      index === null ? GAME_BLOCK : gameTag(index)], { windowsHide: true, timeout: 4_000, maxBuffer: 16 * 1024 });
-    if (this.process !== child) throw new Error("Подключение изменилось");
-    this.selectedGameRoute = index;
+    if (!this.process) throw new Error("Подключите VPN для выбора игрового маршрута");
     if (index !== null) this.multipath?.setPrimaryRoute(index);
   }
 

@@ -4,8 +4,8 @@ import { createSocket } from "node:dgram";
 import { once } from "node:events";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
-import { buildXrayConfig } from "../src/main/vpn/xrayConfig";
-import { GAME_BALANCER, GAME_PROBE_USER, gameTag, measureGameDataRoute as measureGameRoute } from "../src/main/vpn/gameRoutes";
+import { buildXrayConfig, GAME_UDP_BALANCER } from "../src/main/vpn/xrayConfig";
+import { GAME_PROBE_USER, gameTag, measureGameDataRoute as measureGameRoute } from "../src/main/vpn/gameRoutes";
 import type { AppSettings, TunnelServer } from "../src/shared/contracts";
 import { updateXrayRouting } from "../src/main/vpn/xrayManager";
 
@@ -70,7 +70,7 @@ describe("Game routing with the bundled Xray core", () => {
       config.inbounds = inbounds;
       config.log = { loglevel: "warning" };
       const rules = (config.routing as { rules: Record<string, unknown>[] }).rules;
-      const processRule = rules.find((rule) => rule.ruleTag === "game")!;
+      const processRule = rules.find((rule) => rule.ruleTag === "game-multipath")!;
       delete processRule.process;
       processRule.inboundTag = ["test-game-app"];
       execFileSync(executable, ["run", "-test", "-format", "json", "-config", "stdin:"], { input: JSON.stringify(config), stdio: "pipe", timeout: 5000 });
@@ -98,7 +98,7 @@ describe("Game routing with the bundled Xray core", () => {
       const blocked = await measureGameRoute(gameAppPort!, "test-pass", AbortSignal.timeout(300));
       expect(blocked.latencyMs).toBeNull();
       expect(normalPackets).toBe(0);
-      execFileSync(executable, ["api", "bo", `--server=127.0.0.1:${apiPort}`, "-b", GAME_BALANCER, gameTag(0)], { stdio: "pipe", timeout: 5000 });
+      execFileSync(executable, ["api", "bo", `--server=127.0.0.1:${apiPort}`, "-b", GAME_UDP_BALANCER, gameTag(0)], { stdio: "pipe", timeout: 5000 });
       const gaming = await measureGameRoute(gameAppPort!, "test-pass", AbortSignal.timeout(5000));
       expect(gaming.lossPercent).toBe(0);
       expect(gamePackets).toBe(20);
@@ -109,7 +109,7 @@ describe("Game routing with the bundled Xray core", () => {
       // Actual pinned-core AddRule from stdin, without stopping the process.
       // ReloadRules replaces balancers, so preserve the live Game selection.
       const routing = structuredClone(config.routing) as { rules: Record<string, unknown>[]; balancers: Array<{ tag: string; selector: string[] }> };
-      routing.balancers.find((balancer) => balancer.tag === GAME_BALANCER)!.selector = [gameTag(0)];
+      routing.balancers.find((balancer) => balancer.tag === GAME_UDP_BALANCER)!.selector = [gameTag(0)];
       routing.rules.unshift({ type: "field", inboundTag: ["test-normal-app"], outboundTag: gameTag(0), ruleTag: "test-new-game" });
       await updateXrayRouting(executable, `127.0.0.1:${apiPort}`, routing);
       const newlySelected = await measureGameRoute(normalAppPort!, "test-pass", AbortSignal.timeout(5000));

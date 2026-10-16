@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { bestGameRoute, summarizeGameSamples, gameDnsProbe, GAME_BALANCER, GAME_BLOCK, GAME_DATA_PROBE_TAG } from "../src/main/vpn/gameRoutes";
+import { bestGameRoute, summarizeGameSamples, gameDnsProbe, GAME_BLOCK, GAME_DATA_PROBE_TAG } from "../src/main/vpn/gameRoutes";
 import { gameProcesses, normalizeGameIds } from "../src/shared/games";
 import { prepareTunnelProfile } from "../src/main/vpn/tunnelProfile";
 import { buildXrayConfig, bindXrayOutboundInterface, GAME_MULTIPATH, GAME_UDP_BALANCER } from "../src/main/vpn/xrayConfig";
@@ -32,7 +32,7 @@ describe("Game access and routing", () => {
       expect(p.game).toEqual({ enabled: false, servers: [] });
       const config = buildXrayConfig(p, p.servers[0]!, settings, "test-password");
       expect(config).not.toHaveProperty("routing.balancers");
-      expect(config).toHaveProperty("routing.rules", expect.arrayContaining([expect.objectContaining({ ruleTag: "game", outboundTag: "levik-block" })]));
+      expect(config).toHaveProperty("routing.rules", expect.arrayContaining([expect.objectContaining({ ruleTag: "game", outboundTag: p.servers[0]!.tag })]));
     }
   });
   it("matches protocol as well as endpoint and separates game from ordinary auto-selection", () => {
@@ -44,10 +44,12 @@ describe("Game access and routing", () => {
     const p = profile({ enabled: true, endpoints: [endpoint] });
     const config = buildXrayConfig(p, p.servers[0]!, settings, "test-password");
     expect(config).toHaveProperty("outbounds.0.tag", p.servers[0]!.tag);
-    expect(config).toHaveProperty("routing.balancers.0", { tag: GAME_BALANCER, selector: [GAME_BLOCK], strategy: { type: "random" } });
+    expect(config).toHaveProperty("routing.balancers.0", { tag: GAME_UDP_BALANCER, selector: [GAME_BLOCK], strategy: { type: "random" } });
+    expect(config).not.toHaveProperty("routing.balancers.1");
     const rules = (config.routing as { rules: Record<string, unknown>[] }).rules;
     expect(rules.findIndex((r) => r.ruleTag === "game")).toBeLessThan(rules.findIndex((r) => r.ruleTag === "process-bypass"));
-    expect(rules.find((r) => r.ruleTag === "game")).toMatchObject({ process: ["VALORANT.exe", "VALORANT-Win64-Shipping.exe"], balancerTag: GAME_BALANCER });
+    expect(rules.find((r) => r.ruleTag === "game")).toMatchObject({ process: ["VALORANT.exe", "VALORANT-Win64-Shipping.exe"], outboundTag: p.servers[0]!.tag });
+    expect(rules.find((r) => r.ruleTag === "game-multipath")).toMatchObject({ network: "udp", balancerTag: GAME_UDP_BALANCER });
     expect(config).toHaveProperty("inbounds.1.settings.accounts.0", { user: "levik-game", pass: "test-password" });
     // Anti-DPI belongs to ordinary VPN; adding latency to Game is never inherited.
     expect(config).not.toHaveProperty("outbounds.1.streamSettings.sockopt.dialerProxy");

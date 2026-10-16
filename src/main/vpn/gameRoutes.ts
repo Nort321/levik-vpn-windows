@@ -7,7 +7,6 @@ import { decode, encode, Kind } from "./multipath/wire";
 import { GAME_POLICY } from "./gameEngine";
 import type { GameRouteQuality, TunnelServer } from "../../shared/contracts";
 
-export const GAME_BALANCER = "levik-game";
 export const GAME_BLOCK = "levik-game-block";
 export const GAME_PROBE_PORT = 48000;
 export const GAME_DATA_PROBE_PORT = 47280;

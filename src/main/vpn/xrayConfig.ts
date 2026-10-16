@@ -5,7 +5,7 @@ import { TUNNEL_HEALTH_PORT, TUNNEL_HEALTH_TAG } from "./tunnelHealth";
 import { resolveProcessCompanions } from "../../shared/processes";
 import { isIP } from "node:net";
 import { gameProcesses } from "../../shared/games";
-import { GAME_BALANCER, GAME_BLOCK, GAME_PROBE_PORT, GAME_DIRECT_PORT, GAME_PROBE_USER, GAME_DATA_PROBE_PORT, GAME_DATA_PROBE_TAG, gameTag, gameProbeTag } from "./gameRoutes";
+import { GAME_BLOCK, GAME_PROBE_PORT, GAME_DIRECT_PORT, GAME_PROBE_USER, GAME_DATA_PROBE_PORT, GAME_DATA_PROBE_TAG, gameTag, gameProbeTag } from "./gameRoutes";
 import { RELAY_PORT } from "./multipath/wire";
 export const GAME_MULTIPATH = "levik-game-multipath";
 export { GAME_DIRECT_PORT } from "./gameRoutes";
@@ -79,8 +79,10 @@ export function buildXrayConfig(
     ...(gameRules.length ? [{ type: "field", ip: LOCAL_CIDRS, outboundTag: "direct" }] : []),
     // Explicit Game selection wins over process bypass and regional direct rules.
     ...(gaming && gameRules.length ? [{ type: "field", process: gameRules, ip: ["0.0.0.0/0"], network: "udp", balancerTag: GAME_UDP_BALANCER, ruleTag: "game-multipath" }] : []),
-    ...(gameRules.length ? [{ type: "field", process: gameRules, network: "tcp,udp",
-      ...(gaming ? { balancerTag: GAME_BALANCER } : { outboundTag: "levik-block" }), ruleTag: "game" }] : []),
+    // The game's TCP (login, lobby, matchmaking) and non-IPv4 UDP take the ordinary tunnel,
+    // the path its launcher already uses. A game node that answers echoes may still refuse
+    // new TCP connections, and a game never plays over TCP, so nothing waits on that node.
+    ...(gameRules.length ? [{ type: "field", process: gameRules, network: "tcp,udp", outboundTag: server.tag, ruleTag: "game" }] : []),
     ...(processBypass
       ? [{ type: "field", process: processes, network: "tcp,udp", outboundTag: "direct", ruleTag: "process-bypass" }]
       : []),
@@ -160,8 +162,7 @@ export function buildXrayConfig(
     ],
     routing: { domainStrategy: "IPIfNonMatch", domainMatcher: "hybrid", rules,
       ...(gaming ? { balancers: [
-        { tag: GAME_BALANCER, selector: [GAME_BLOCK], strategy: { type: "random" } },
-        ...(gaming ? [{ tag: GAME_UDP_BALANCER, selector: [GAME_BLOCK], strategy: { type: "random" } }] : []),
+        { tag: GAME_UDP_BALANCER, selector: [GAME_BLOCK], strategy: { type: "random" } },
       ] } : {}),
     },
     policy: { system: { statsInboundDownlink: true, statsInboundUplink: true, statsOutboundDownlink: true, statsOutboundUplink: true } },

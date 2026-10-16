@@ -824,7 +824,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
       const enabled = servers.filter((server) => !profile.game?.nodes?.some((node) => node.nodeId === server.nodeId && node.state !== "enabled"));
       const best = bestGameRoute(enabled, quality);
       const activeId = this.state.game?.activeRouteId;
-      // Ordinary scans keep the TCP exit. A newly observed game can select it
+      // Ordinary scans keep multipath's first exit. A newly observed game can select it
       // again only before UDP flows have pinned that process session's exit.
       const selectAtStart = forGameStart && (this.xray.gameRuntimeSnapshot?.activeFlowCount ?? 0) === 0;
       const pinnedId = selectAtStart ? null : activeId;
@@ -2149,7 +2149,6 @@ export class AppController extends EventEmitter<AppControllerEvents> {
           this.currentGameId = gameId;
           const preference = this.state.settings.gameRouteId;
           const preferredExitId = this.profile?.game?.servers.find((server) => server.id === preference)?.nodeId ?? preference ?? null;
-          let primary: { routeIndex: number; latencyMs: number } | undefined;
           try {
             const source = physicalGameSourceAddress(this.xray.outboundInterfaceName);
             await this.xray.connectGameMultipath(candidates, this.gamePassword, {
@@ -2170,10 +2169,10 @@ export class AppController extends EventEmitter<AppControllerEvents> {
                 && !this.profile?.game?.nodes?.some((node) => node.nodeId === server.nodeId && node.state !== "enabled")
                 ? [{ routeIndex, latencyMs: measured.latencyMs }] : [];
             }).sort((a, b) => a.latencyMs - b.latencyMs);
-            const tcpPreference = preferredExitId ?? this.gameHistory.preferredExit(gameId);
-            primary = healthy.find((path) => this.profile?.game?.servers[path.routeIndex]?.nodeId === tcpPreference) ?? healthy[0];
+            const exitPreference = preferredExitId ?? this.gameHistory.preferredExit(gameId);
+            const primary = healthy.find((path) => this.profile?.game?.servers[path.routeIndex]?.nodeId === exitPreference) ?? healthy[0];
             if (!primary) throw new Error("No Game path");
-            // The game's TCP (login, lobby, matchmaking) does not wait for the UDP check.
+            // Multipath's first exit. The game's TCP (login, lobby) is already on the ordinary tunnel.
             await this.xray.selectGameRoute(primary.routeIndex);
             this.updateGame({ activeRouteId: this.profile?.game?.servers[primary.routeIndex]?.id ?? null });
             const dataAbort = new AbortController();
@@ -2190,7 +2189,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
             this.assertCurrentConnection(generation);
             // A game is never left without a network. The fallback holds until
             // reconnect, so a match that starts on it never changes its exit.
-            await this.useGameFallback(primary?.routeIndex ?? null, generation);
+            await this.useGameFallback(generation);
           }
           this.assertCurrentConnection(generation);
           this.updateGame({ multipath: this.xray.gameMultipathStats, runtime: this.xray.gameRuntimeSnapshot ?? null });
@@ -2203,25 +2202,15 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     }
   }
 
-  /** Multipath did not pass its check. With a responding game node the game keeps it
-   * (one route, no backup copies); with none it uses the ordinary VPN. Never blocked. */
-  private async useGameFallback(routeIndex: number | null, generation: number): Promise<void> {
-    const server = routeIndex === null ? undefined : this.profile?.game?.servers[routeIndex];
+  /** Multipath did not pass its check: game UDP joins its TCP on the ordinary VPN. A single
+   * game node is never used unchecked, since one that answers echoes may still drop the match. */
+  private async useGameFallback(generation: number): Promise<void> {
     try {
-      if (routeIndex !== null && server) {
-        await this.xray.selectGameRoute(routeIndex);
-        await this.xray.selectGameUdpRoute(routeIndex);
-        this.assertCurrentConnection(generation);
-        this.addLog(`Game: проверка многопутевого канала не прошла; игра идёт через ${server.name} без резервных копий`);
-        this.updateGame({ activeRouteId: server.id, phase: "degraded",
-          message: `Игра идёт через ${server.name} без резервных копий: проверка игрового канала не прошла. Переподключите VPN между матчами, чтобы включить защиту.` });
-        return;
-      }
       await this.xray.routeGameThroughTunnel();
       this.assertCurrentConnection(generation);
-      this.addLog("Game: игровые узлы не ответили; игра идёт через обычный VPN");
+      this.addLog("Game: игровой канал не прошёл проверку; игра идёт через обычный VPN");
       this.updateGame({ activeRouteId: null, phase: "degraded",
-        message: "Игровые узлы не ответили: игра идёт через обычный VPN без игровой оптимизации. Переподключите VPN между матчами, чтобы попробовать снова." });
+        message: "Игровой канал не прошёл проверку: игра идёт через обычный VPN без игровой оптимизации. Переподключите VPN между матчами, чтобы попробовать снова." });
     } catch {
       this.assertCurrentConnection(generation);
       this.updateGame({ phase: "degraded", message: "Не удалось подготовить игровой маршрут. Переподключите VPN." });
