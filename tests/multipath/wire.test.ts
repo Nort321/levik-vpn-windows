@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { decode, encode, Kind, publicIPv4, SequenceWindow, MAX_CONTROL_BYTES, HEADER_V2, parseMeasurement } from "../../src/main/vpn/multipath/wire";
+import { decode, encode, Kind, publicIPv4, SequenceWindow, MAX_CONTROL_BYTES, HEADER_V2, HEADER_V3, parseMeasurement, tagResolver, instanceMatches, parseCapabilities } from "../../src/main/vpn/multipath/wire";
 
 describe("Game multipath packet boundary", () => {
   it("rejects truncation and unknown versions and round-trips opaque game payloads", () => {
@@ -37,5 +37,34 @@ describe("Game multipath packet boundary", () => {
     expect(parseMeasurement({ ...result, address: "169.254.169.254" })).toBeNull();
     expect(parseMeasurement({ ...result, lossPercent: 101 })).toBeNull();
     expect(parseMeasurement({ ...result, sampleCount: 0 })).toBeNull();
+  });
+  it("version 3 matches the golden vector shared with the Go relay", () => {
+    const session = Buffer.alloc(32); Buffer.from("0102030405060708", "hex").copy(session);
+    const flow = Buffer.alloc(8); Buffer.from("a1b2c3d4", "hex").copy(flow);
+    const packet = { version: 3 as const, kind: Kind.Up, path: 2, session, flow, sequence: 0x01020304, address: "203.0.114.9", port: 27015,
+      payload: Buffer.from("game"), exitNodeId: "node-a", hops: 1, instance: Buffer.from("deadbeef", "hex") };
+    const golden = "4c474d33030201000102030405060708a1b2c3d401020304775375addeadbeefcb007209698767616d65";
+    expect(encode(packet).toString("hex")).toBe(golden);
+    expect(encode(packet).length).toBe(HEADER_V3 + 4);
+    expect(decode(Buffer.from(golden, "hex"), tagResolver(["node-a", "node-b"]))).toEqual(packet);
+    // An unknown exit tag is never guessed.
+    expect(decode(Buffer.from(golden, "hex"), tagResolver(["node-b"]))).toBeNull();
+    expect(decode(Buffer.from(golden, "hex"))).toBeNull();
+    const reserved = Buffer.from(golden, "hex"); reserved[7] = 1; expect(decode(reserved, tagResolver(["node-a"]))).toBeNull();
+    const flags = Buffer.from(golden, "hex"); flags[6] = 3; expect(decode(flags, tagResolver(["node-a"]))).toBeNull();
+    // Control frames and long session ids stay on version 2.
+    expect(() => encode({ ...packet, kind: Kind.NodeInfo })).toThrow();
+    expect(() => encode({ ...packet, session: Buffer.alloc(32, 1) })).toThrow();
+  });
+  it("compares short instance tags with the full process instance", () => {
+    const instance = Buffer.from("00112233445566778899aabbccddeeff", "hex");
+    expect(instanceMatches(Buffer.from("00112233", "hex"), instance)).toBe(true);
+    expect(instanceMatches(Buffer.alloc(4), instance)).toBe(true);
+    expect(instanceMatches(Buffer.from("00112234", "hex"), instance)).toBe(false);
+    expect(instanceMatches(instance, instance)).toBe(true);
+  });
+  it("treats missing capabilities as an old relay", () => {
+    expect(parseCapabilities(undefined)).toEqual({ probe: false, mesh: false, lgm3: false, eim: false, fec: false, regions: false, spread: false });
+    expect(parseCapabilities({ lgm3: true, eim: "yes" })).toMatchObject({ lgm3: true, eim: false });
   });
 });

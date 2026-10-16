@@ -18,6 +18,16 @@ await Promise.all([
     sourcemap: true,
   }),
   build({
+    entryPoints: ["src/main/vpn/multipath/worker.ts"],
+    outfile: "dist/main/gameDataPlane.js",
+    bundle: true,
+    platform: "node",
+    format: "cjs",
+    target: "node22",
+    external: ["electron"],
+    sourcemap: true,
+  }),
+  build({
     entryPoints: ["src/preload/preload.ts"],
     outfile: "dist/preload.js",
     bundle: true,

@@ -76,9 +76,12 @@ it.each(["flow", "session"] as const)("chooses measured B for new %s exits and n
     const local = await client.listen();
     const pending = client.connect([{ index: 0, port: 1, nodeId: "node-a" }, { index: 1, port: 2, nodeId: "node-b" }], "test", { nodes, protection: true, preferredExitId: null, exitScope });
     await vi.advanceTimersByTimeAsync(2300); await pending;
+    // The nodes have nothing cached for these servers yet: the opening uses A.
+    network.probeMode = "empty";
     for (const [index, address] of ["1.1.1.1", "8.8.8.8", "9.9.9.9"].entries()) {
       const socket = await association(local, address); sockets.push(socket); await send(socket, `lobby-${index}`);
     }
+    network.probeMode = "ready";
     await vi.advanceTimersByTimeAsync(100);
     const next = await association(local, "1.1.1.1"); sockets.push(next); await send(next, "next-match");
     await send(sockets[0]!, "old-flow");
@@ -125,9 +128,11 @@ it.each(["flow", "session"] as const)("drains a pinned node without moving exist
     const pending = client.connect([{ index: 0, port: 1, nodeId: "node-a" }, { index: 1, port: 2, nodeId: "node-b" }],
       "test", { nodes, protection: true, preferredExitId: null, exitScope });
     await vi.advanceTimersByTimeAsync(2300); await pending;
+    network.probeMode = "empty";
     for (const [index, address] of ["1.1.1.1", "8.8.8.8", "9.9.9.9"].entries()) {
       const socket = await association(local, address); sockets.push(socket); await send(socket, `drain-lobby-${index}`);
     }
+    network.probeMode = "ready";
     await vi.advanceTimersByTimeAsync(100);
     expect(network.sent.find((item) => item.payload === "drain-lobby-0")?.node).toBe("node-a");
     const original = network.sent.find((item) => item.payload === "drain-lobby-0")!;
@@ -242,7 +247,9 @@ it("keeps the opening decision, forecasts the real next exit and reports the flo
       nodes, protection: true, preferredExitId: null, exitScope: "flow", gameId: "cs2",
     });
     await vi.advanceTimersByTimeAsync(2300); await pending;
-    const first = await association(local, "1.1.1.1"); sockets.push(first); await play(first, "cold");
+    network.probeMode = "empty";
+    const first = await association(local, "1.1.1.1"); sockets.push(first); await send(first, "cold-open");
+    network.probeMode = "ready"; await play(first, "cold");
     expect(client.runtimeSnapshot()).toMatchObject({ currentMatch: { address: "1.1.1.1" }, selectedExitId: "node-a",
       routeDecision: { exitId: "node-a", source: "access" }, nextRouteDecision: { exitId: "node-b", source: "measured" } });
     expect(client.runtimeSnapshot().selectionReason).toContain("При открытии потока");
@@ -306,7 +313,9 @@ it.each([
       nodes: [nodes[0]!], protection: true, preferredExitId: null, exitScope: "flow",
     });
     await vi.advanceTimersByTimeAsync(2300); await pending;
-    const socket = await association(local, "1.1.1.1"); sockets.push(socket); await play(socket);
+    network.probeMode = "empty";
+    const socket = await association(local, "1.1.1.1"); sockets.push(socket); await send(socket, "cold-open");
+    network.probeMode = "ready"; await play(socket);
     expect(client.runtimeSnapshot().exits[0]?.egressStatus).toBe("ready");
     network.probeMode = mode; await vi.advanceTimersByTimeAsync(1100); await send(socket, "still-relayed");
     expect(client.runtimeSnapshot().exits[0]).toMatchObject({ egressStatus: status, estimatedRttMs: null, egress: null });
@@ -340,7 +349,9 @@ it("preserves a historical cold-start decision after endpoint measurements becom
       history: [{ gameId: "cs2", subnet: "1.1.1.0/24", region: null, nodeId: "node-b", updatedAt: Date.now() }],
     });
     await vi.advanceTimersByTimeAsync(2300); await pending;
-    const socket = await association(local, "1.1.1.1"); sockets.push(socket); await play(socket, "history");
+    network.probeMode = "empty";
+    const socket = await association(local, "1.1.1.1"); sockets.push(socket); await send(socket, "cold-open");
+    network.probeMode = "ready"; await play(socket, "history");
     expect(client.runtimeSnapshot()).toMatchObject({ selectedExitId: "node-b", routeDecision: { source: "history" },
       nextRouteDecision: { exitId: "node-b", source: "measured" } });
     expect(client.runtimeSnapshot().exits.every((exit) => exit.egressStatus === "ready")).toBe(true);

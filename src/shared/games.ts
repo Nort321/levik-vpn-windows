@@ -10,18 +10,23 @@ const CATALOG = [
   { id: "apex", name: "Apex Legends", genre: "Королевская битва", initials: "AP", processes: ["r5apex.exe", "r5apex_dx12.exe"] },
   { id: "fortnite", name: "Fortnite", genre: "Королевская битва", initials: "FN", processes: ["FortniteClient-Win64-Shipping.exe"] },
   { id: "pubg", name: "PUBG: Battlegrounds", genre: "Королевская битва", initials: "PG", processes: ["TslGame.exe"] },
-  { id: "warzone", name: "Call of Duty", genre: "Шутер", initials: "CoD", processes: ["cod.exe"] },
+  // Party/lobby traffic is peer-to-peer: every destination must see one public IP:port.
+  { id: "warzone", name: "Call of Duty", genre: "Шутер", initials: "CoD", processes: ["cod.exe"], exitScope: "socket" },
   { id: "rocket", name: "Rocket League", genre: "Спорт", initials: "RL", processes: ["RocketLeague.exe"] },
   { id: "tarkov", name: "Escape from Tarkov", genre: "Тактический шутер", initials: "ET", processes: ["EscapeFromTarkov.exe"] },
   { id: "wot", name: "Мир танков", genre: "Командные сражения", initials: "MT", processes: ["WorldOfTanks.exe"] },
 ] as const;
 
-export type GameExitScope = "flow" | "session";
-export const GAMES = CATALOG.map((game) => ({ ...game, exitScope: "flow" as GameExitScope }));
+/** flow: exit per destination; socket: one exit per game socket (P2P/NAT punching);
+ * session: one exit for the whole game process. */
+export type GameExitScope = "flow" | "socket" | "session";
+export const GAMES = CATALOG.map((game) => ({ ...game, exitScope: ("exitScope" in game ? game.exitScope : "flow") as GameExitScope }));
 
-/** Unknown/custom games use per-flow selection; individual compatibility exceptions are explicit. */
+/** Unknown/custom games use per-flow selection; individual compatibility exceptions are explicit.
+ * The strictest scope among the selected games applies to the shared bridge. */
 export function gameExitScope(settings: AppSettings): GameExitScope {
-  return GAMES.some((game) => settings.gameIds?.includes(game.id) && game.exitScope === "session") ? "session" : "flow";
+  const scopes = new Set(GAMES.filter((game) => settings.gameIds?.includes(game.id)).map((game) => game.exitScope));
+  return scopes.has("session") ? "session" : scopes.has("socket") ? "socket" : "flow";
 }
 
 export function normalizeGameIds(value: unknown): string[] {

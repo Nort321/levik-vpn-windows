@@ -338,7 +338,7 @@ export interface GameSnapshot {
 
 export interface GameMeasurement extends GameRouteQuality {
   p95Ms: number | null;
-  method: "echo" | "icmp" | "ttl-hop" | "unknown";
+  method: "echo" | "icmp" | "ttl-hop" | "udp-echo" | "unknown";
   approximate: boolean;
 }
 
@@ -407,7 +407,7 @@ export interface GameRuntimeSnapshot {
   activeMatchFlowCount?: number;
   mixedMatchExits?: boolean;
   ingressPaths: Array<{ routeId: string; entryNodeId: string; exitNodeId: string; latencyMs: number | null; active: boolean }>;
-  protection: { enabled: boolean; limitedByUpload: boolean; reason: string | null; effective?: boolean; pathCount?: number };
+  protection: { enabled: boolean; limitedByUpload: boolean; reason: string | null; effective?: boolean; pathCount?: number; fec?: boolean };
   shadowAlternative: { nodeId: string; name: string; savingMs: number } | null;
   matchReport: GameMatchReport | null;
   estimateHistory: Array<{ measuredAt: number; latencyMs: number | null; approximate: boolean; lowerBound?: boolean }>;
@@ -421,4 +421,6 @@ export interface GameMultipathStats {
   receivedPackets: number;
   duplicateReplies: number;
   uploadedPackets: number;
+  /** Packets rebuilt from parity (FEC) instead of being lost. */
+  recoveredPackets?: number;
 }

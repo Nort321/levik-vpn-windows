@@ -56,13 +56,14 @@ it.each(["direct", "vpn"] as const)("prefers completed endpoint measurements ove
   expect(chooseExit(estimates, lowerBoundExit)).toMatchObject({ nodeId: lowerBoundExit === "direct" ? "vpn" : "direct", evidence: "endpoint" });
   expect(chooseExit(estimates, null, lowerBoundExit)?.nodeId).toBe(lowerBoundExit);
 });
-it("keeps lower-bound selection as an explicit fallback when both routes stop at a router", () => {
+it("never chooses a direct router lower bound over a relay one: they end at different routers", () => {
   const target = { address: "1.1.1.1", port: 7000 };
   const vpn = node("vpn", 10, 20); vpn.egress[0]!.metric.method = "ttl-hop";
   const estimates = [estimateExit(vpn, target, [], now),
     estimateExit({ nodeId: "direct", state: "enabled", access: null, egress: [], direct: { ...metric(5), method: "ttl-hop" } }, target, [], now)];
-  expect(chooseExit(estimates)).toMatchObject({ nodeId: "direct", evidence: "lower-bound" });
-  expect(chooseExit(estimates, null, "vpn")).toMatchObject({ nodeId: "vpn", evidence: "lower-bound" });
+  expect(chooseExit(estimates)).toMatchObject({ nodeId: "vpn", evidence: "lower-bound" });
+  expect(chooseExit(estimates, null, "direct")).toMatchObject({ nodeId: "direct", evidence: "lower-bound" });
+  expect(chooseExit([estimates[1]!])).toBeNull();
 });
 it("uses access-only fallback when no B is measured and ignores an unavailable manual exit", () => {
   const target = { address: "1.1.1.1", port: 7000 };
@@ -92,10 +93,10 @@ it("always takes two best paths and near paths, reduces copies on upload inflati
   const paths = [10, 70, 20, 30, 90].map((latencyMs) => ({ latencyMs }));
   expect(chooseIngress(paths, true).map((item) => item.latencyMs)).toEqual([10, 20, 30]);
   expect(chooseIngress(paths, false)).toHaveLength(1); expect(chooseIngress(paths, true, true)).toHaveLength(1);
-  const guard = new UploadQueueGuard(); guard.update(10, 0, 2, now);
-  for (let i = 0; i < 4; i++) expect(guard.update(30, 64_000, 2, now + i * 1000)).toBe(false);
-  expect(guard.update(30, 64_000, 2, now + 4000)).toBe(true);
-  expect(guard.update(10, 0, 1, now + 35_000)).toBe(false);
+  const guard = new UploadQueueGuard(); guard.update("exit:a:0", 10, 0, 2, now);
+  for (let i = 0; i < 4; i++) expect(guard.update("exit:a:0", 30, 64_000, 2, now + i * 1000)).toBe(false);
+  expect(guard.update("exit:a:0", 30, 64_000, 2, now + 4000)).toBe(true);
+  expect(guard.update("exit:a:0", 10, 0, 1, now + 35_000)).toBe(false);
 });
 it("rejects insufficient samples even for a plausible low RTT", () => {
   const candidate = node("early", 1, 1); candidate.access!.samples = 1;

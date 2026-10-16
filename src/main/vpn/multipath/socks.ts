@@ -3,7 +3,9 @@ import { Socket } from "node:net";
 import { GAME_PROBE_USER } from "../gameRoutes";
 import { RELAY_PORT } from "./wire";
 
-export interface RelayPath { readonly closed?: boolean; send(data: Buffer): void; close(): void }
+export interface RelayPath { readonly closed?: boolean; send(data: Buffer): void; close(): void;
+  /** SOCKS UDP header to prepend; with sendPrefixed the caller encodes into one buffer. */
+  readonly prefix?: Buffer; sendPrefixed?(data: Buffer): void }
 export async function openRelayPath(port: number, password: string, receive: (data: Buffer) => void,
   signal: AbortSignal, target = { address: "127.0.0.1", port: RELAY_PORT }): Promise<RelayPath> {
   const tcp = new Socket(); const udp = createSocket("udp4");
@@ -39,7 +41,8 @@ export async function openRelayPath(port: number, password: string, receive: (da
     });
     const header = Buffer.from([0, 0, 0, 1, ...target.address.split(".").map(Number), target.port >> 8, target.port & 255]);
     udp.on("message", (data) => { if (data.length >= 10 && data.subarray(0, 10).equals(header)) receive(data.subarray(10)); });
-    return { get closed() { return closed; }, send: (data) => { if (!closed) udp.send(Buffer.concat([header, data]), () => {}); }, close };
+    return { get closed() { return closed; }, prefix: header, send: (data) => { if (!closed) udp.send(Buffer.concat([header, data]), () => {}); },
+      sendPrefixed: (data) => { if (!closed) udp.send(data, () => {}); }, close };
   } catch (error) { close(); throw error; }
   finally { clearTimeout(timer); }
 }

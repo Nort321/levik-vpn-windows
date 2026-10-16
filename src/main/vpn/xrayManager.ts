@@ -6,7 +6,9 @@ import { EventEmitter } from "node:events";
 import { promisify } from "node:util";
 import { parseXrayStats, XRAY_STATS_ENDPOINT } from "./xrayStats";
 import { bindXrayOutboundInterface, GAME_MULTIPATH, GAME_UDP_BALANCER } from "./xrayConfig";
-import { GameMultipath, type GameRuntimeOptions } from "./multipath/client";
+import type { GameRouteCandidate, GameRuntimeOptions } from "./multipath/client";
+import type { GameConfigurableOptions, GameDataPlane } from "./multipath/dataPlane";
+import { RemoteGameDataPlane } from "./multipath/remote";
 import { networkInterfaces } from "node:os";
 import { findWindowsOutboundInterface } from "../windows/outboundInterface";
 import { TuicSidecar, withTuicProxy } from "./tuicSidecar";
@@ -32,7 +34,7 @@ export class XrayManager extends EventEmitter<XrayEvents> {
   private readonly tuic = new TuicSidecar(stopChild);
   private readonly gameTuic = new TuicSidecar(stopChild);
   private outboundName: string | null = null;
-  private multipath: GameMultipath | null = null;
+  private multipath: GameDataPlane | null = null;
   private gameUdpFallback = false;
   private routing: Record<string, unknown> | null = null;
   private selectedGameRoute: number | null = null;
@@ -64,7 +66,7 @@ export class XrayManager extends EventEmitter<XrayEvents> {
   pauseNewGameFlowsIfIdle(): boolean { return this.multipath?.pauseNewFlowsIfIdle() ?? true; }
   resumeNewGameFlows(): void { this.multipath?.resumeNewFlows(); }
 
-  updateGameOptions(options: Partial<Pick<GameRuntimeOptions, "protection" | "preferredExitId" | "exitScope" | "gameId" | "history" | "nodes">>): void {
+  updateGameOptions(options: GameConfigurableOptions): void {
     this.multipath?.configure(options);
   }
 
@@ -97,7 +99,7 @@ export class XrayManager extends EventEmitter<XrayEvents> {
     }
   }
 
-  async connectGameMultipath(candidates: Array<{ index: number; port: number; nodeId?: string }>, password: string, options?: GameRuntimeOptions): Promise<void> {
+  async connectGameMultipath(candidates: GameRouteCandidate[], password: string, options?: GameRuntimeOptions): Promise<void> {
     await this.multipath?.connect(candidates, password, options);
   }
 
@@ -161,7 +163,7 @@ export class XrayManager extends EventEmitter<XrayEvents> {
     }
     if (Array.isArray(launchConfig.outbounds) && launchConfig.outbounds.some((outbound: unknown) =>
       typeof outbound === "object" && outbound !== null && "tag" in outbound && outbound.tag === GAME_MULTIPATH)) {
-      this.multipath = new GameMultipath(false);
+      this.multipath = await RemoteGameDataPlane.create((line) => this.emit("log", line));
       const local = await this.multipath.listen();
       launchConfig = withTuicProxy(launchConfig, { port: local.port, id: local.uuid }, GAME_MULTIPATH);
     }

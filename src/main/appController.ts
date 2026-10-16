@@ -2102,7 +2102,8 @@ export class AppController extends EventEmitter<AppControllerEvents> {
           const candidates = (this.profile?.game?.servers ?? []).map((server, index) => ({ server, index }))
             .filter(({ server }) => ["hysteria", "tuic", "vless"].includes(String(server.outbound.protocol)))
             .sort((a, b) => (quality[a.server.id]?.latencyMs ?? Infinity) - (quality[b.server.id]?.latencyMs ?? Infinity))
-            .map(({ server, index }) => ({ index, port: GAME_PROBE_PORT + index, ...(server.nodeId ? { nodeId: server.nodeId } : {}) }));
+            .map(({ server, index }) => ({ index, port: GAME_PROBE_PORT + index, ...(server.nodeId ? { nodeId: server.nodeId } : {}),
+              reliable: streamTransport(server.outbound) }));
           try {
             const ids = this.state.settings.gameIds ?? [];
             const gameId = ids.length === 1 && !this.state.settings.gameProcesses?.length ? ids[0]! : "custom";
@@ -2562,3 +2563,11 @@ function clamp(value: number, minimum: number, maximum: number): number {
 const DIAGNOSIS_REPORT_MS = 30 * 60_000;
 /** The check Windows itself uses to find a sign-in page. */
 const CAPTIVE_PROBE = { url: "http://www.msftconnecttest.com/connecttest.txt", expect: "Microsoft Connect Test" };
+
+/** UDP inside a TCP/HTTP stream (VLESS over TCP, XHTTP, WS, gRPC) stalls on loss behind retransmission. */
+function streamTransport(outbound: Record<string, unknown>): boolean {
+  if (outbound.protocol !== "vless") return false;
+  const stream = outbound.streamSettings;
+  const network = stream && typeof stream === "object" ? (stream as Record<string, unknown>).network : undefined;
+  return network !== "kcp";
+}
