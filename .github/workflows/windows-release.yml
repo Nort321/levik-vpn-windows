@@ -6,6 +6,11 @@ on:
   pull_request:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      publish:
+        description: Publish the release to users (otherwise it stays a draft)
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -127,6 +132,8 @@ jobs:
           GH_REPO: ${{ github.repository }}
           VERSION: ${{ needs.build.outputs.version }}
           COMMIT_SHA: ${{ github.sha }}
+          # A push only prepares a draft; users get the update once it is published.
+          PUBLISH: ${{ github.event_name == 'workflow_dispatch' && inputs.publish }}
         run: |
           set -euo pipefail
           tag="v${VERSION}"
@@ -142,4 +149,9 @@ jobs:
               --notes-file "$notes" \
               --draft
           fi
-          gh release edit "$tag" --notes-file "$notes" --draft=false --prerelease=false --latest
+          if [ "$PUBLISH" = "true" ]; then
+            gh release edit "$tag" --notes-file "$notes" --draft=false --prerelease=false --latest
+          else
+            gh release edit "$tag" --notes-file "$notes"
+            echo "Release $tag is a draft: publish it on GitHub or run this workflow with publish enabled."
+          fi
