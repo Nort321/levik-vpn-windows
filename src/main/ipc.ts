@@ -7,7 +7,12 @@ import { AppController } from "./appController";
 import { listWindowsProcesses, windowsProcessFromPath } from "./windows/processes";
 import { isAllowedExternalUrl, isCabinetTarget } from "./platform/links";
 
-export function registerIpc(controller: AppController, window: BrowserWindow): void {
+export interface AppLifecycle {
+  /** Starts the app through the UAC prompt and closes this copy. */
+  relaunchAsAdministrator(): Promise<void>;
+}
+
+export function registerIpc(controller: AppController, window: BrowserWindow, lifecycle: AppLifecycle): void {
   ipcMain.handle(IPC.snapshot, () => controller.snapshot());
   ipcMain.handle(IPC.login, async (_event, shouldOpenExternal: unknown = true) => {
     if (typeof shouldOpenExternal !== "boolean") throw new Error("Некорректный способ входа");
@@ -109,6 +114,9 @@ export function registerIpc(controller: AppController, window: BrowserWindow): v
     clipboard.writeText(link);
     await shell.openExternal(new URL(link).toString());
   });
+  ipcMain.handle(IPC.relaunchAsAdmin, () => lifecycle.relaunchAsAdministrator());
+  ipcMain.handle(IPC.checkConflicts, () => controller.checkConflicts());
+  ipcMain.handle(IPC.closeConflicts, () => controller.closeConflicts());
   controller.on("navigate", (tab) => {
     if (!window.isDestroyed()) window.webContents.send(IPC.navigate, tab);
   });

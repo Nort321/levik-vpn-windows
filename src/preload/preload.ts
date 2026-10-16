@@ -34,6 +34,9 @@ const api: LevikDesktopApi = {
   sendRemoteCommand: (deviceId, command) => ipcRenderer.invoke(IPC.sendRemoteCommand, deviceId, command),
   openRemoteNote: (commandId) => ipcRenderer.invoke(IPC.openRemoteNote, commandId),
   setHomeRoad: (enabled) => ipcRenderer.invoke(IPC.setHomeRoad, enabled),
+  relaunchAsAdmin: () => ipcRenderer.invoke(IPC.relaunchAsAdmin),
+  checkConflicts: () => ipcRenderer.invoke(IPC.checkConflicts),
+  closeConflicts: () => ipcRenderer.invoke(IPC.closeConflicts) as Promise<number>,
   onSnapshot(listener) {
     const wrapped = (_event: Electron.IpcRendererEvent, snapshot: AppSnapshot) => listener(snapshot);
     ipcRenderer.on(IPC.snapshotChanged, wrapped);

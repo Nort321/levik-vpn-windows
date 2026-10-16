@@ -50,6 +50,24 @@ export interface HomeRoadSnapshot {
   detail: string | null;
 }
 
+/** Something on this computer that keeps the tunnel from starting. */
+export interface TunnelConflict {
+  id: string;
+  /** orphan: a Levik core left from a crash; port: a process on a port Xray needs; vpn: another VPN client; reserved: a port Windows keeps. */
+  kind: "orphan" | "port" | "vpn" | "reserved";
+  name: string;
+  processName: string | null;
+  detail: string;
+  /** Levik can end it; system services and reserved ports cannot be closed from here. */
+  closable: boolean;
+}
+
+export interface TunnelConflictsSnapshot {
+  items: TunnelConflict[];
+  checking: boolean;
+  closing: boolean;
+}
+
 export interface WindowsProcess {
   name: string;
   path: string | null;
@@ -184,6 +202,10 @@ export interface AppSnapshot {
   loginPending: boolean;
   /** null until the account says whether the road is offered. */
   homeRoad: HomeRoadSnapshot | null;
+  /** The app runs with administrator rights; null where it cannot be told. */
+  elevated: boolean | null;
+  /** Other VPN clients and processes that keep the tunnel from starting. */
+  conflicts: TunnelConflictsSnapshot;
   update: {
     status: UpdateStatus;
     version: string | null;
@@ -273,6 +295,12 @@ export interface LevikDesktopApi {
   openRemoteNote(commandId: string): Promise<void>;
   /** «Пускать ко мне домой»: this computer becomes (or stops being) a home exit. */
   setHomeRoad(enabled: boolean): Promise<void>;
+  /** Starts the app again through the UAC prompt and closes this copy. */
+  relaunchAsAdmin(): Promise<void>;
+  /** Looks again for other VPN clients and busy ports. */
+  checkConflicts(): Promise<void>;
+  /** Closes the conflicting apps found by a fresh check; returns how many could not be closed. */
+  closeConflicts(): Promise<number>;
   onSnapshot(listener: (snapshot: AppSnapshot) => void): () => void;
   /** A levik:// link or a notification asks for a tab. */
   onNavigate(listener: (tab: AppTab) => void): () => void;
@@ -310,6 +338,9 @@ export const IPC = {
   refreshRemote: "levik:refresh-remote",
   sendRemoteCommand: "levik:send-remote-command",
   openRemoteNote: "levik:open-remote-note",
+  relaunchAsAdmin: "levik:relaunch-as-admin",
+  checkConflicts: "levik:check-conflicts",
+  closeConflicts: "levik:close-conflicts",
   snapshotChanged: "levik:snapshot-changed",
   navigate: "levik:navigate",
 } as const;

@@ -3,6 +3,7 @@ import { join } from "node:path";
 import type { AppSnapshot, AppTab, ConnectionStatus } from "../shared/contracts";
 import { AppController } from "./appController";
 import { openCabinet, registerIpc } from "./ipc";
+import { startElevated } from "./windows/elevation";
 import { DEEP_LINK_SCHEME, deepLinkFromArgv } from "./platform/links";
 import type { AppNotice } from "./platform/notices";
 
@@ -12,6 +13,7 @@ let controller: AppController | null = null;
 let quitting = false;
 let lastTrayKey = "";
 let started = false;
+let relaunching = false;
 /** A levik:// link that arrived before the window was ready. */
 let pendingLink: AppTab | null = deepLinkFromArgv(process.argv);
 
@@ -30,7 +32,7 @@ app.whenReady().then(async () => {
   if (app.isPackaged) app.setAsDefaultProtocolClient(DEEP_LINK_SCHEME);
   controller = new AppController();
   mainWindow = createWindow();
-  registerIpc(controller, mainWindow);
+  registerIpc(controller, mainWindow, { relaunchAsAdministrator });
   createTray();
   controller.on("changed", updateTray);
   controller.on("updateInstalling", () => { quitting = true; });
@@ -190,6 +192,25 @@ function toggleWindow(): void {
 function refreshTrayMenu(): void {
   lastTrayKey = "";
   updateTray(controller?.snapshot());
+}
+
+/**
+ * The elevated copy must get the single-instance lock, so this one lets go of
+ * it first and takes it back when the user declines the UAC prompt.
+ */
+async function relaunchAsAdministrator(): Promise<void> {
+  if (relaunching || quitting) return;
+  relaunching = true;
+  app.releaseSingleInstanceLock();
+  try {
+    // A development run starts electron.exe with the app folder; links are not carried over.
+    await startElevated(process.execPath, app.isPackaged ? [] : [app.getAppPath()]);
+  } catch (error) {
+    relaunching = false;
+    if (!app.requestSingleInstanceLock()) app.quit();
+    throw error;
+  }
+  requestQuit();
 }
 
 function requestQuit(): void {

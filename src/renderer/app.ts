@@ -38,6 +38,7 @@ let favoritesOnly = false;
 let devicesSubscriptionId: string | null = null;
 let supportDialog: { creating: boolean; url: string | null } | null = null;
 let homeRoadSaving = false;
+let relaunchingAsAdmin = false;
 /** "It's not the VPN": checked each time the support dialog opens. */
 let diagnosis: { running: boolean; result: DiagnosisSummary | null } = { running: false, result: null };
 let toastTimer: ReturnType<typeof setTimeout> | null = null;
@@ -121,7 +122,7 @@ function render(preserveScroll = true): void {
           <div class="status-subtitle">${escapeHtml(state.statusDetail ?? "VPN готов к подключению")}</div>
         </div>
       </aside>
-      <main class="content"><div class="content-inner">${renderAnnouncements()}${renderTelemetryNotice()}${renderPage()}</div></main>
+      <main class="content"><div class="content-inner">${renderElevationNotice()}${renderConflicts()}${renderAnnouncements()}${renderTelemetryNotice()}${renderPage()}</div></main>
     </div>
     ${showProcessDialog ? renderProcessDialog() : ""}
     ${devicesSubscriptionId ? renderDevicesDialog(devicesSubscriptionId) : ""}
@@ -459,6 +460,33 @@ function renderAnnouncements(): string {
     <div class="announcement-copy"><h2 class="card-title" id="announcement-${escapeAttribute(item.id)}">${escapeHtml(item.title)}</h2><p class="card-caption">${escapeHtml(item.body)}</p></div>
     <div class="announcement-actions">${item.linkUrl ? `<button class="button compact" data-announcement-link="${escapeAttribute(item.linkUrl)}">${icon("external")} Подробнее</button>` : ""}<button class="button icon-button" data-dismiss-announcement="${escapeAttribute(item.id)}" aria-label="Скрыть сообщение">${icon("close")}</button></div>
   </section>`).join("");
+}
+
+function renderElevationNotice(): string {
+  if (state?.elevated !== false) return "";
+  return `<section class="announcement card warning" role="alert" aria-labelledby="elevation-title">
+    <div class="announcement-copy"><h2 class="card-title" id="elevation-title">Нужны права администратора</h2><p class="card-caption">Levik VPN запущен без прав администратора, поэтому не сможет создать VPN-туннель, включить Kill Switch и защиту от утечек DNS.</p></div>
+    <div class="announcement-actions"><button class="button primary compact" id="relaunch-admin-button" ${relaunchingAsAdmin ? "disabled aria-busy=\"true\"" : ""}>${icon("shield")} ${relaunchingAsAdmin ? "Ожидаем подтверждения…" : "Перезапустить от имени администратора"}</button></div>
+  </section>`;
+}
+
+function renderConflicts(): string {
+  const conflicts = state?.conflicts;
+  if (!conflicts?.items.length) return "";
+  const blocking = conflicts.items.some((item) => item.kind !== "vpn");
+  const closable = conflicts.items.some((item) => item.closable);
+  const busy = conflicts.checking || conflicts.closing;
+  return `<section class="announcement card ${blocking ? "critical" : "warning"} conflicts" role="alert" aria-labelledby="conflicts-title" aria-busy="${busy}">
+    <div class="announcement-copy">
+      <h2 class="card-title" id="conflicts-title">${blocking ? "Туннелю мешают другие приложения" : "Другие VPN могут помешать подключению"}</h2>
+      <p class="card-caption">${closable ? "Закройте их, чтобы Levik VPN смог создать туннель." : "Levik VPN не может закрыть их сам."}</p>
+      <ul class="conflict-list">${conflicts.items.map((item) => `<li class="conflict-item"><span class="conflict-name">${escapeHtml(item.name)}${item.processName ? ` <span class="conflict-process">${escapeHtml(item.processName)}</span>` : ""}</span><span class="conflict-detail">${escapeHtml(item.detail)}</span></li>`).join("")}</ul>
+    </div>
+    <div class="announcement-actions">
+      ${closable ? `<button class="button primary compact" id="close-conflicts-button" ${busy ? "disabled" : ""}>${conflicts.closing ? "Закрываем…" : "Закрыть мешающие приложения"}</button>` : ""}
+      <button class="button compact" id="check-conflicts-button" ${busy ? "disabled" : ""}>${icon("refresh")} ${conflicts.checking && !conflicts.closing ? "Проверяем…" : "Проверить снова"}</button>
+    </div>
+  </section>`;
 }
 
 function renderTelemetryNotice(): string {
@@ -930,6 +958,12 @@ function bindPageEvents(): void {
   document.getElementById("cabinet-button")?.addEventListener("click", () => run(() => window.levik.openCabinet("/dashboard")));
   document.getElementById("home-road-cabinet-button")?.addEventListener("click", () => run(() => window.levik.openCabinet("/dashboard/road")));
   document.getElementById("home-road-switch")?.addEventListener("click", () => void toggleHomeRoad());
+  document.getElementById("relaunch-admin-button")?.addEventListener("click", () => void relaunchAsAdmin());
+  document.getElementById("check-conflicts-button")?.addEventListener("click", () => void run(() => window.levik.checkConflicts()));
+  document.getElementById("close-conflicts-button")?.addEventListener("click", () => void run(async () => {
+    const left = await window.levik.closeConflicts();
+    showToast(left ? `Не удалось закрыть приложений: ${left}. Закройте их вручную` : "Мешающие приложения закрыты. Можно подключаться");
+  }));
   document.querySelectorAll<HTMLElement>("[data-announcement-link]").forEach((button) => button.addEventListener("click", () => {
     const url = button.dataset.announcementLink;
     if (url) void run(() => window.levik.openExternal(url));
@@ -1095,6 +1129,19 @@ async function toggleHomeRoad(): Promise<void> {
   } finally {
     homeRoadSaving = false;
     render();
+  }
+}
+
+async function relaunchAsAdmin(): Promise<void> {
+  if (relaunchingAsAdmin) return;
+  relaunchingAsAdmin = true;
+  render();
+  try {
+    await window.levik.relaunchAsAdmin();
+  } catch (error) {
+    relaunchingAsAdmin = false;
+    render();
+    showToast(error instanceof Error ? error.message : String(error));
   }
 }
 

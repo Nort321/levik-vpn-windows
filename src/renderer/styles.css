@@ -434,6 +434,12 @@ select option { color: var(--text); background-color: var(--select-bg); }
 .announcement.critical { border-left-color: var(--red); }
 .announcement-copy .card-caption { max-width: 680px; white-space: pre-line; }
 .announcement-actions { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+.conflict-list { list-style: none; margin: 10px 0 0; padding: 0; display: grid; gap: 8px; }
+.conflict-item { display: grid; gap: 2px; font-size: 13px; }
+.conflict-name { font-weight: 650; }
+.conflict-process { color: var(--muted); font-weight: 400; font-size: 12px; }
+.conflict-detail { color: var(--muted); font-size: 12px; line-height: 1.45; }
+.conflicts .announcement-actions { flex-direction: column; align-items: stretch; }
 
 /* Game shares the client's theme palette and keeps readable contrast in light mode. */
 .game-eyebrow { color: var(--blue-bright); font-size: 11px; letter-spacing: .2em; font-weight: 750; margin-bottom: 8px; }

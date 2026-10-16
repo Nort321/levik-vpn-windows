@@ -47,6 +47,12 @@ import { cabinetFallbackUrl, isAllowedExternalUrl, isHandoffUrl } from "./platfo
 import { serviceEndpoints, ServiceEndpointsStore, websiteHosts } from "./platform/serviceEndpoints";
 import { createRoadKey, HomeRoadExit, isHomeRoadServer, parseRoadExit, roadKeyFrom, type RoadKey } from "./platform/homeRoad";
 import { findWindowsOutboundInterface } from "./windows/outboundInterface";
+import { isProcessElevated } from "./windows/elevation";
+import { windowsHelperPath } from "./windows/helperPath";
+import { closeConflictingProcesses, scanTunnelConflicts } from "./windows/tunnelConflicts";
+import type { DetectedConflict } from "./windows/tunnelConflicts";
+import { XRAY_STATS_ENDPOINT } from "./vpn/xrayStats";
+import { TUNNEL_HEALTH_PORT } from "./vpn/tunnelHealth";
 import { DEFAULT_API_ORIGIN } from "./api/apiEndpoints";
 import { parseAccountNotices } from "./platform/accountNotices";
 import { beaconFresh, HomeSleepPolicy, localAddresses, parseSighting, protects, scanHomes } from "./platform/levikHome";
@@ -137,6 +143,9 @@ const ENDPOINTS_REFRESH_MS = 12 * 60 * 60_000;
 const ENDPOINTS_RETRY_MS = 60_000;
 /** «Дорога домой»: the exit's relay token is renewed long before its 30 days run out. */
 const HOME_ROAD_REFRESH_MS = 6 * 60 * 60_000;
+/** Repeated connection failures look for conflicting apps at most this often. */
+const CONFLICT_RESCAN_MS = 15_000;
+const NOT_ELEVATED_MESSAGE = "Levik VPN запущен без прав администратора и не может создать туннель. Нажмите «Перезапустить от имени администратора».";
 
 const DEFAULT_SETTINGS: AppSettings = {
   gameEnabled: false,
@@ -217,6 +226,10 @@ export class AppController extends EventEmitter<AppControllerEvents> {
   private api!: MobileApiClient;
   private accessToken: string | null = null;
   private profile: PreparedTunnelProfile | null = null;
+  /** The last conflict scan with process ids; the snapshot carries only names. */
+  private detectedConflicts: DetectedConflict[] = [];
+  private conflictScan: Promise<void> | null = null;
+  private lastConflictScanAt = 0;
   private loginGeneration = 0;
   private reconnectAttempts = 0;
   private lastConfig: Record<string, unknown> | null = null;
@@ -317,6 +330,8 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     loginPending: false,
     settingsSyncedAt: null,
     homeRoad: null,
+    elevated: null,
+    conflicts: { items: [], checking: false, closing: false },
   };
 
   constructor() {
@@ -337,6 +352,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
   async initialize(): Promise<void> {
     this.diskLog = new DiskLog(join(app.getPath("userData"), "logs"));
     this.diskLog.write(`Levik VPN ${app.getVersion()} started on Windows ${release()}`);
+    const elevation = isProcessElevated();
     await this.killSwitch.cleanupLegacyConfig(app.getPath("userData"));
     await this.dnsLeakProtection.disable();
     this.identity = await this.loadIdentity();
@@ -403,8 +419,15 @@ export class AppController extends EventEmitter<AppControllerEvents> {
         ?? null;
     }
     this.applyLoginItemSettings();
+    this.state.elevated = await elevation;
+    if (this.state.elevated === false) {
+      this.addLog("Права: приложение запущено без прав администратора");
+      this.state.statusDetail = NOT_ELEVATED_MESSAGE;
+    }
     this.state.busy = false;
     this.emitChanged();
+    // Before the first connection: another VPN or a leftover core is shown up front.
+    void this.checkConflicts();
     void this.reconcileFavorites();
     // Before any tunnel: protocol advice describes the user's own operator.
     void this.refreshRemoteConfig();
@@ -558,6 +581,10 @@ export class AppController extends EventEmitter<AppControllerEvents> {
 
   async connect(trigger: SessionTrigger = "user"): Promise<void> {
     if (this.xray.isRunning() || this.state.status === "connecting") return;
+    if (this.state.elevated === false) {
+      this.patch({ statusDetail: NOT_ELEVATED_MESSAGE });
+      throw new Error(NOT_ELEVATED_MESSAGE);
+    }
     // Connecting by hand at home: the VPN stays on until the next arrival.
     if (trigger === "user" && this.homePolicy.asleep) this.homePolicy.resumedByUser();
     const generation = this.connectionGeneration;
@@ -616,6 +643,8 @@ export class AppController extends EventEmitter<AppControllerEvents> {
         statusDetail: `Защищено через ${server.name}`,
         sessionStartedAt: Date.now(),
       });
+      // The tunnel works, so whatever else is running does not block it.
+      this.clearConflicts();
       this.recordConnected();
     } catch (error) {
       this.lastConfig = null;
@@ -631,6 +660,8 @@ export class AppController extends EventEmitter<AppControllerEvents> {
         this.patch({ status: "error", statusDetail: messageOf(failure), sessionStartedAt: null });
         progress.fail();
         void this.telemetry.finish("error", progress.code);
+        // Outside the tunnel lock: the scan takes a second or two of PowerShell.
+        void this.explainFailureByConflicts(generation, failure);
       }
       throw failure;
     } finally {
@@ -2402,6 +2433,93 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     this.telemetry.record((session) => session.connected());
     // Reports leave through the working tunnel, after it has settled.
     this.telemetry.flushSoon();
+  }
+
+  /** Looks for other VPN clients, busy ports and a leftover core while no tunnel runs. */
+  checkConflicts(): Promise<void> {
+    if (this.conflictScan) return this.conflictScan;
+    if (process.platform !== "win32" || this.xray.isRunning()) return Promise.resolve();
+    this.patch({ conflicts: { ...this.state.conflicts, checking: true } });
+    const scan = (async () => {
+      try {
+        this.detectedConflicts = await scanTunnelConflicts({
+          ports: this.tunnelPorts(),
+          ownExecutables: [process.execPath, windowsHelperPath()],
+          coreExecutables: [this.xray.executablePath(), this.xray.tuicExecutablePath()],
+          ownPid: process.pid,
+        });
+        this.lastConflictScanAt = Date.now();
+        for (const { conflict } of this.detectedConflicts) this.addLog(`Конфликт: ${conflict.name} — ${conflict.detail}`);
+      } catch (error) {
+        this.addLog(`Проверка конфликтов: ${messageOf(error)}`);
+      } finally {
+        this.conflictScan = null;
+        this.patch({ conflicts: { ...this.state.conflicts, items: this.detectedConflicts.map(({ conflict }) => conflict), checking: false } });
+      }
+    })();
+    this.conflictScan = scan;
+    return scan;
+  }
+
+  /** Closes what a fresh scan finds; returns how many conflicts are left that could have been closed. */
+  async closeConflicts(): Promise<number> {
+    if (this.state.conflicts.closing) throw new Error("Приложения уже закрываются");
+    if (this.xray.isRunning()) throw new Error("Отключите VPN, чтобы закрыть мешающие приложения");
+    this.patch({ conflicts: { ...this.state.conflicts, closing: true } });
+    try {
+      // Ids from the renderer are never trusted: the list is taken again right now.
+      await this.checkConflicts();
+      const targets = this.detectedConflicts.filter(({ conflict }) => conflict.closable);
+      const pids = [...new Set(targets.flatMap(({ pids }) => pids))];
+      if (!pids.length) return 0;
+      this.addLog(`Закрываем мешающие приложения: ${targets.map(({ conflict }) => conflict.name).join(", ")}`);
+      try {
+        await closeConflictingProcesses(pids);
+      } catch (error) {
+        this.addLog(`Закрытие приложений: ${messageOf(error)}`);
+      }
+      await this.checkConflicts();
+      const left = this.detectedConflicts.filter(({ conflict }) => conflict.closable).length;
+      if (!left && this.state.status === "error" && !this.killSwitch.isActive()) {
+        this.patch({ status: "disconnected", statusDetail: "Мешающие приложения закрыты. Можно подключаться" });
+      }
+      return left;
+    } finally {
+      this.patch({ conflicts: { ...this.state.conflicts, closing: false } });
+    }
+  }
+
+  private clearConflicts(): void {
+    this.detectedConflicts = [];
+    if (this.state.conflicts.items.length) this.patch({ conflicts: { ...this.state.conflicts, items: [] } });
+  }
+
+  /** A failed start names the apps in the way instead of a raw core error. */
+  private async explainFailureByConflicts(generation: number, failure: unknown): Promise<void> {
+    if (Date.now() - this.lastConflictScanAt >= CONFLICT_RESCAN_MS) {
+      await Promise.race([this.checkConflicts(), delay(25_000)]);
+    }
+    if (generation !== this.connectionGeneration || this.state.status !== "error") return;
+    const items = this.state.conflicts.items;
+    if (!items.length) return;
+    this.addLog(`Ошибка подключения: ${messageOf(failure)}`);
+    const blocking = items.some((item) => item.kind !== "vpn");
+    const names = [...new Set(items.map((item) => item.name))].slice(0, 3).join(", ");
+    this.patch({
+      statusDetail: blocking
+        ? `Туннель не запустился: нужный порт занят (${names}). Закройте мешающие приложения кнопкой выше`
+        : `Туннель не запустился: мешает ${names}. Закройте мешающие приложения кнопкой выше`,
+    });
+  }
+
+  /** The local ports Xray listens on for the current settings, as buildXrayConfig opens them. */
+  private tunnelPorts(): number[] {
+    const apiPort = Number(XRAY_STATS_ENDPOINT.split(":").pop());
+    const games = this.state.settings.gameEnabled && this.profile?.game?.enabled ? this.profile.game.servers.length : 0;
+    return [
+      apiPort, TUNNEL_HEALTH_PORT,
+      ...(games ? [GAME_DATA_PROBE_PORT, GAME_DIRECT_PORT, ...Array.from({ length: games }, (_item, index) => GAME_PROBE_PORT + index)] : []),
+    ];
   }
 
   private addLog(line: string): void {
