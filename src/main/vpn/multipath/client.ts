@@ -21,7 +21,9 @@ export interface GameRuntimeOptions {
 /** One authenticated route to the relay. `reliable` marks UDP carried in a TCP/HTTP stream. */
 export interface GameRouteCandidate { index: number; port: number; nodeId?: string; reliable?: boolean }
 interface Path { index: number; slot: number; pathSlot: number; session: Buffer; port: number; epoch: number; accepted: boolean; active: boolean; spread: boolean; repairing: boolean;
-  transport: RelayPath; instance: string | null; latencyMs: number | null; lastReply: number; lastLatencyMs: number | null; sent: Map<number, number>; wins: number; recentWins: number; misses: number;
+  transport: RelayPath; instance: string | null; latencyMs: number | null; lastReply: number;
+  /** First ping sent since the last reply: silence is measured from when the path was asked, not from its last answer. */
+  awaitingSince: number | null; lastLatencyMs: number | null; sent: Map<number, number>; wins: number; recentWins: number; misses: number;
   entryNodeId: string; exitNodeId: string; modern: boolean; mesh: boolean; caps: RelayCapabilities; quality: QualityWindow; fast: FastQuality;
   cpuPercent: number; networkBytesPerSecond: number; activeFlows: number; probe: boolean; reliable: boolean }
 /** Relay-side identity of one client socket at one exit. With endpoint-independent mapping
@@ -42,6 +44,11 @@ interface Flow { id: string; connection: Connection; address: string; port: numb
 const emptyOptions = (): GameRuntimeOptions => ({ nodes: [], preferredExitId: null, protection: true, exitScope: "flow" });
 const NO_CAPS: RelayCapabilities = parseCapabilities({});
 const ACTIVE_MATCH_MS = 5_000;
+/** Below the relay's 60 s session idle timeout with room for two lost pings. */
+const IDLE_PING_MS = 20_000;
+const IDLE_FRESH_MS = 65_000;
+/** While a game is busy, a path asked and silent this long is gone. */
+const ACTIVE_SILENCE_MS = 6_000;
 export const GAME_FLOW_LIMITS = Object.freeze({ perConnection: 256, total: 1024, connections: 64 });
 const REGIONS_INTERVAL_MS = 30_000;
 
@@ -71,7 +78,7 @@ export class GameMultipath {
   private pingSequence = 0; private controlSequence = 0x80000000;
   private received = 0; private duplicates = 0; private uploaded = 0; private recovered = 0;
   private relayInstance: string | null = null; private password = "";
-  private options = emptyOptions(); private playing = false; private lastProbeAt = 0;
+  private options = emptyOptions(); private playing = false; private lastProbeAt = 0; private lastIdlePingAt = 0; private lastPacketAt = 0;
   private resolve: TagResolver = () => undefined;
   private readonly destinations = new Map<string, ProbeTarget>();
   private readonly meshRows = new Map<string, Array<{ nodeId: string; quality: Segment }>>();
@@ -146,8 +153,11 @@ export class GameMultipath {
   }
   setPlaying(active: boolean): void {
     if (this.playing && !active) this.sessionExit = null;
-    if (active && !this.playing) this.lastProbeAt = 0;
+    const starting = active && !this.playing;
+    if (starting) this.lastProbeAt = 0;
     this.playing = active;
+    // A game is starting: confirm every path now instead of on the next tick.
+    if (starting) this.ping();
   }
   configure(options: Partial<Pick<GameRuntimeOptions, "protection" | "preferredExitId" | "exitScope" | "gameId" | "history" | "nodes">>): void {
     this.options = { ...this.options, ...options }; if (options.nodes) this.rebuildResolver(); this.selectActive();
@@ -163,7 +173,14 @@ export class GameMultipath {
     const path = this.paths.find((path) => path?.index === index && path.entryNodeId === path.exitNodeId && path.accepted);
     if (path) this.primaryExitId = path.exitNodeId;
   }
-  private fresh(path: Path): boolean { return performance.now() - path.lastReply < (this.playing ? 6_000 : 65_000); }
+  /** A path is usable while it answers. Idle paths are pinged only every IDLE_PING_MS, so a
+   * path that answered its last ping stays usable until it has been asked again and kept
+   * silent for the window; a game starting after idle time never finds every path stale. */
+  private fresh(path: Path): boolean {
+    const now = performance.now();
+    return now - path.lastReply < IDLE_FRESH_MS && (path.awaitingSince === null || now - path.awaitingSince < this.silenceLimit());
+  }
+  private silenceLimit(): number { return this.playing || Date.now() - this.lastPacketAt < 5_000 ? ACTIVE_SILENCE_MS : IDLE_FRESH_MS; }
   routeQualities(): Record<number, GameRouteQuality> {
     return Object.fromEntries(this.paths.filter((path) => path?.accepted && !path.transport.closed && this.fresh(path)
       && path.quality.snapshot().samples >= GAME_POLICY.minimumSamples && path.entryNodeId === path.exitNodeId)
@@ -404,7 +421,7 @@ export class GameMultipath {
       const transport = await openRelayPath(candidate.port, this.password, (data) => this.receive(slot, data), this.abort.signal);
       if (this.abort.signal.aborted) { transport.close(); return; }
       this.paths[slot] = { index: candidate.index, slot, pathSlot, session, port: candidate.port, epoch: 0, accepted: modern, active: false, spread: false,
-        repairing: false, transport, instance: null, latencyMs: null, lastReply: -Infinity, lastLatencyMs: null, sent: new Map(), wins: 0, recentWins: 0, misses: 0,
+        repairing: false, transport, instance: null, latencyMs: null, lastReply: -Infinity, awaitingSince: null, lastLatencyMs: null, sent: new Map(), wins: 0, recentWins: 0, misses: 0,
         entryNodeId: candidate.nodeId ?? "", exitNodeId, modern, mesh: modern, caps: NO_CAPS, quality: new QualityWindow(), fast: new FastQuality(),
         cpuPercent: 0, networkBytesPerSecond: 0, activeFlows: 0, probe: false, reliable: candidate.reliable === true };
     } catch { /* Remaining authenticated paths may still carry the game. */ }
@@ -490,7 +507,7 @@ export class GameMultipath {
     for (const path of this.paths) if (path) path.recentWins *= 0.8;
     const active = this.playing || [...this.flows.values()].some((flow) => now - flow.touched < 5_000);
     if (now - this.lastProbeAt >= (active ? 1_000 : 60_000)) {
-      this.selectActive(); this.ping(); this.requestMeasurements(); this.lastProbeAt = now;
+      this.selectActive(); this.ping(); this.requestMeasurements(); this.lastProbeAt = now; this.lastIdlePingAt = now;
       const carrying = [...this.flows.values()].filter((flow) => flow.counted && flow.wire)
         .sort((a, b) => b.sent - a.sent)[0];
       const best = this.activePaths(carrying?.wire ?? null).sort(byLatency)[0];
@@ -499,7 +516,13 @@ export class GameMultipath {
       else if (!carrying) this.limitedByUpload = false;
       this.uploadBytes = 0;
     }
-    for (const [slot, route] of this.paths.entries()) if (route?.accepted && !route.repairing && (route.transport.closed || performance.now() - route.lastReply >= (active ? 6_000 : 65_000))) void this.repair(slot);
+    // Idle pings keep the relay session (60 s idle timeout) and the path state alive.
+    if (now - this.lastIdlePingAt >= IDLE_PING_MS) { this.ping(); this.lastIdlePingAt = now; }
+    // Only a path that was asked and kept silent is rebuilt: the first busy tick after idle
+    // time must not tear down every path the game is about to use.
+    const silence = active ? ACTIVE_SILENCE_MS : IDLE_FRESH_MS;
+    for (const [slot, route] of this.paths.entries()) if (route?.accepted && !route.repairing && (route.transport.closed
+      || (route.awaitingSince !== null && performance.now() - route.awaitingSince >= silence))) void this.repair(slot);
   }
   /** A pinned exit with no live path for long is a lost match: re-decide instead of
    * dropping the game's packets forever. A non-match flow may also follow a clearly
@@ -530,7 +553,7 @@ export class GameMultipath {
     return exitId === "direct" ? Boolean(this.options.directSocksPort) : this.livePaths(exitId).some((path) => path.active || path.latencyMs !== null);
   }
   private forward(flow: Flow, payload: Buffer): void {
-    flow.touched = Date.now(); flow.sent++;
+    flow.touched = this.lastPacketAt = Date.now(); flow.sent++;
     if (flow.hold) { if (flow.pending.length < GAME_POLICY.holdMaxPackets) flow.pending.push(Buffer.from(payload)); if (flow.counted) this.uploaded++; return; }
     if (!flow.exitId) {
       this.selectActive();
@@ -795,7 +818,7 @@ export class GameMultipath {
   }
   private async repair(slot: number): Promise<void> {
     const route = this.paths[slot]; if (!route || this.abort.signal.aborted) return;
-    route.repairing = true; route.active = false; route.lastReply = -Infinity;
+    route.repairing = true; route.active = false; route.lastReply = -Infinity; route.awaitingSince = null;
     const epoch = ++route.epoch; route.sent.clear(); route.transport.close();
     try {
       const transport = await openRelayPath(route.port, this.password, (data) => { if (route.epoch === epoch) this.receive(slot, data); }, this.abort.signal);
@@ -811,7 +834,7 @@ export class GameMultipath {
     const now = performance.now();
     for (const [key, sent] of route.sent) if (now - sent >= 1500) { route.quality.push(null); route.fast.push(null); route.misses++; route.sent.delete(key); }
     const sequence = this.pingSequence++ >>> 0;
-    route.sent.set(sequence, now);
+    route.sent.set(sequence, now); route.awaitingSince ??= now;
     const fec = route.active && this.options.protection && this.nodeCaps.get(route.exitNodeId)?.fec;
     const flags = (route.active ? PING_ACTIVE : 0) | (route.active && route.spread && route.caps.spread ? PING_SPREAD : 0) | (fec ? PING_FEC : 0);
     const version = this.dataVersion(route);
@@ -913,7 +936,7 @@ export class GameMultipath {
       route.sent.delete(packet.sequence); route.instance = instance; route.misses = 0;
       route.lastLatencyMs = performance.now() - started; route.quality.push(route.lastLatencyMs); route.fast.push(route.lastLatencyMs);
       route.latencyMs = route.quality.snapshot().latencyMs;
-      route.lastReply = performance.now(); if (route.modern) route.accepted = true; return;
+      route.lastReply = performance.now(); route.awaitingSince = null; if (route.modern) route.accepted = true; return;
     }
     if (packet.version === 2 && packet.kind >= Kind.NodeInfo && packet.kind !== Kind.Parity) {
       if (route.instance && packet.instance?.toString("hex") !== route.instance) return;
@@ -991,7 +1014,7 @@ export class GameMultipath {
     }
     if (packet.kind !== Kind.Down && packet.kind !== Kind.Parity) return;
     if (!wire || wire.exitId !== route.exitNodeId || wire.instance !== route.instance) return;
-    route.lastReply = performance.now();
+    route.lastReply = performance.now(); route.awaitingSince = null;
     if (packet.kind === Kind.Parity) {
       const recovered = wire.decoder.parity(packet.sequence, packet.payload);
       if (recovered) this.accept(wire, recovered.sequence, recovered.address, recovered.port, recovered.payload, true);

@@ -40,10 +40,30 @@ export class XrayManager extends EventEmitter<XrayEvents> {
   private selectedGameRoute: number | null = null;
   private selectedGameUdpRoute: number | null = null;
   private gameUdpReady = false;
+  /** The selected VPN outbound: carries the game when no game node answers. */
+  private tunnelTag: string | null = null;
+  private gameViaTunnel = false;
 
   get gameMultipathStats(): GameMultipathStats | null {
     const stats = this.multipath?.snapshot();
-    return stats ? { ...stats, ...(this.gameUdpFallback ? { state: "fallback" as const } : {}) } : null;
+    return stats ? { ...stats, ...(this.gameUdpFallback || this.gameViaTunnel ? { state: "fallback" as const } : {}) } : null;
+  }
+
+  /** route: game UDP over one game node without multipath; tunnel: the game uses the ordinary VPN. */
+  get gameFallback(): "route" | "tunnel" | null { return this.gameViaTunnel ? "tunnel" : this.gameUdpFallback ? "route" : null; }
+
+  /** No game node answers: the game's TCP and UDP use the selected VPN server instead of
+   * being blocked. Kept until reconnect, so a running match never changes its exit. */
+  async routeGameThroughTunnel(): Promise<void> {
+    const child = this.process; const tag = this.tunnelTag;
+    if (!child || !tag) throw new Error("VPN disconnected");
+    for (const balancer of [GAME_BALANCER, GAME_UDP_BALANCER]) {
+      await execFileAsync(this.executablePath(), ["api", "bo", `--server=${XRAY_STATS_ENDPOINT}`, "-b", balancer, tag],
+        { windowsHide: true, timeout: 4_000, maxBuffer: 16 * 1024 });
+      if (this.process !== child) throw new Error("VPN connection changed");
+    }
+    this.gameViaTunnel = true; this.selectedGameRoute = null; this.selectedGameUdpRoute = null; this.gameUdpReady = true;
+    await this.multipath?.stop();
   }
 
   async selectGameUdpRoute(index: number | null): Promise<void> {
@@ -84,8 +104,10 @@ export class XrayManager extends EventEmitter<XrayEvents> {
       && "ruleTag" in rule && (rule.ruleTag === "game" || rule.ruleTag === "game-multipath")));
     if (Array.isArray(routing.balancers)) for (const balancer of routing.balancers) {
       if (!balancer || typeof balancer !== "object" || !("tag" in balancer)) continue;
-      if (balancer.tag === GAME_BALANCER) Object.assign(balancer, { selector: [this.selectedGameRoute === null ? GAME_BLOCK : gameTag(this.selectedGameRoute)] });
-      if (balancer.tag === GAME_UDP_BALANCER) Object.assign(balancer, { selector: [!this.gameUdpReady ? GAME_BLOCK : this.selectedGameUdpRoute === null ? GAME_MULTIPATH : gameTag(this.selectedGameUdpRoute)] });
+      if (balancer.tag === GAME_BALANCER) Object.assign(balancer, { selector: [this.gameViaTunnel && this.tunnelTag ? this.tunnelTag
+        : this.selectedGameRoute === null ? GAME_BLOCK : gameTag(this.selectedGameRoute)] });
+      if (balancer.tag === GAME_UDP_BALANCER) Object.assign(balancer, { selector: [this.gameViaTunnel && this.tunnelTag ? this.tunnelTag
+        : !this.gameUdpReady ? GAME_BLOCK : this.selectedGameUdpRoute === null ? GAME_MULTIPATH : gameTag(this.selectedGameUdpRoute)] });
     }
     try {
       await updateXrayRouting(this.executablePath(), XRAY_STATS_ENDPOINT, routing);
@@ -167,6 +189,8 @@ export class XrayManager extends EventEmitter<XrayEvents> {
       const local = await this.multipath.listen();
       launchConfig = withTuicProxy(launchConfig, { port: local.port, id: local.uuid }, GAME_MULTIPATH);
     }
+    const first: unknown = Array.isArray(launchConfig.outbounds) ? launchConfig.outbounds[0] : null;
+    this.tunnelTag = typeof first === "object" && first !== null && "tag" in first && typeof first.tag === "string" ? first.tag : null;
     const loopback = Object.entries(networkInterfaces()).find(([, addresses]) => addresses?.some((address) => address.address === "127.0.0.1"))?.[0];
     const configInput = Buffer.from(JSON.stringify(bindXrayOutboundInterface(launchConfig, interfaceName, outbound.ipv6, loopback)), "utf8");
     this.emit("log", `Xray: outbound interface [${interfaceName}] (TCP/UDP, direct, IPv6 ${outbound.ipv6 ? "on" : "off"})`);
@@ -205,7 +229,7 @@ export class XrayManager extends EventEmitter<XrayEvents> {
 
   async stop(): Promise<void> {
     this.routing = null; this.selectedGameRoute = null; this.selectedGameUdpRoute = null; this.gameUdpReady = false;
-    this.gameUdpFallback = false;
+    this.gameUdpFallback = false; this.gameViaTunnel = false; this.tunnelTag = null;
     const multipath = this.multipath; this.multipath = null;
     await multipath?.stop();
     this.stopStatsPolling();

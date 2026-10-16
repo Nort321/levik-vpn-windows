@@ -6,10 +6,11 @@ import { afterEach, expect, it, vi } from "vitest";
 /** Lossy loopback "tunnels": every path is its own UDP socket towards the relay, like
  * distinct Xray associations. `drop` decides per datagram and direction. */
 const network = vi.hoisted(() => ({ relayPorts: new Map<number, number>(),
-  drop: (_direction: "up" | "down", _data: Buffer): boolean => false, wire: [] as string[] }));
+  drop: (_direction: "up" | "down", _data: Buffer): boolean => false, wire: [] as string[], opens: 0 }));
 vi.mock("../../src/main/vpn/multipath/socks", async () => {
   const { createSocket: socket } = await import("node:dgram");
   return { openRelayPath: async (port: number, _password: string, receive: (data: Buffer) => void) => {
+    network.opens++;
     const udp = socket("udp4"); let closed = false; udp.on("error", () => {});
     await new Promise<void>((done) => udp.bind(0, "127.0.0.1", () => done()));
     udp.on("message", (data) => { if (!closed && !network.drop("down", data)) receive(data); });
@@ -21,7 +22,7 @@ import { GameMultipath, type GameRuntimeOptions } from "../../src/main/vpn/multi
 import { startRelay } from "../../src/main/vpn/multipath/relay";
 import { decode, Kind, tagResolver } from "../../src/main/vpn/multipath/wire";
 
-afterEach(() => { network.relayPorts.clear(); network.drop = () => false; network.wire = []; });
+afterEach(() => { network.relayPorts.clear(); network.drop = () => false; network.wire = []; network.opens = 0; vi.restoreAllMocks(); });
 const nodes: GameRuntimeOptions["nodes"] = [{ nodeId: "exit-a", name: "Exit A", countryCode: "SE", city: null, mesh: null, state: "enabled" }];
 const resolve = tagResolver(["exit-a"]);
 const pause = (milliseconds: number): Promise<void> => new Promise((done) => setTimeout(done, milliseconds));
@@ -204,3 +205,34 @@ it("keeps a match on its exit and its packets flowing while its only path stalls
     expect(lines.filter((line) => line.includes("открыт заново"))).toEqual([]);
   } finally { game?.socket.destroy(); await client.stop(); await Promise.all(relays.map((relay) => relay.close())); await server.close(); }
 }, 40_000);
+
+it("starts a game after idle time on the paths it has, without rebuilding them or losing its first packets", async () => {
+  const relay = await startRelay({ port: 0, nodeId: "exit-a", allowTestLoopback: true });
+  network.relayPorts.set(1, relay.port); network.relayPorts.set(2, relay.port);
+  const server = await Server.start();
+  const client = new GameMultipath();
+  let game: GameSocket | undefined;
+  try {
+    const listener = await client.listen();
+    await client.connect([{ index: 0, port: 1, nodeId: "exit-a" }, { index: 1, port: 2, nodeId: "exit-a" }], "test",
+      { nodes, protection: true, preferredExitId: null, exitScope: "flow" });
+    await pause(300);
+    expect(network.opens).toBe(2);
+    // Idle paths are pinged only every 20 s: their last answer is 30 s old when the game starts.
+    const now = performance.now.bind(performance);
+    vi.spyOn(performance, "now").mockImplementation(() => now() + 30_000);
+    client.setPlaying(true);
+    game = await GameSocket.open(listener);
+    const startedAt = Date.now();
+    game.send(server.port, "hello");
+    await until(() => game!.replies.length > 0, 1_000);
+    expect(Date.now() - startedAt).toBeLessThan(500);
+    for (let index = 0; index < 30; index++) { game.send(server.port, `tick-${index}`); await pause(40); }
+    await until(() => game!.replies.length >= 31, 2_000);
+    // The first busy tick did not tear the paths down: no new SOCKS associations.
+    expect(network.opens).toBe(2);
+    expect(server.sources.size).toBe(1);
+  } finally {
+    game?.socket.destroy(); await client.stop(); await relay.close(); await server.close();
+  }
+});

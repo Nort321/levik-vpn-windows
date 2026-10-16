@@ -71,13 +71,16 @@ export async function measureGameRoute(port: number, password: string, signal: A
 
 /** Measures real UDP DNS round trips through one authenticated, loopback SOCKS inbound.
  * These are control-point measurements, never presented as a game's match ping.
- */
+ * It checks that UDP crosses the whole multipath chain to the Internet. Public resolvers
+ * often drop large or padded queries (from some nodes 100% at 1000+ bytes) and rate-limit
+ * per source, so plain queries are used and one answering resolver is enough: the result
+ * is the better of the two targets. */
 export async function measureGameDataRoute(port: number, password: string, signal: AbortSignal, payloadBytes = 0): Promise<GameRouteQuality> {
   // Separate associations also prevent destination aliasing in UDP transports.
   const samples = await Promise.all([[1, 1, 1, 1], [8, 8, 8, 8]].map((address) => measureGameTarget(port, password, signal, address, payloadBytes)));
-  const quality = summarizeGameSamples(samples.flat());
-  const jitter = samples.map((target) => summarizeGameSamples(target).jitterMs).filter((value): value is number => value !== null);
-  return { ...quality, jitterMs: jitter.length ? Math.round(jitter.reduce((sum, value) => sum + value, 0) / jitter.length) : null };
+  const [best] = samples.map((target) => summarizeGameSamples(target))
+    .sort((a, b) => a.lossPercent - b.lossPercent || (a.latencyMs ?? Infinity) - (b.latencyMs ?? Infinity));
+  return best ?? summarizeGameSamples([]);
 }
 
 async function measureGameTarget(port: number, password: string, signal: AbortSignal, address: number[], payloadBytes: number): Promise<Array<number | null>> {

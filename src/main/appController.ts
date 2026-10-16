@@ -803,6 +803,8 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     const game = this.state.game;
     const password = this.gamePassword;
     if (!profile?.game?.enabled || !game?.available || !password || !this.state.settings.gameEnabled || !this.xray.isRunning()) return;
+    // A fallback route is kept until reconnect: re-selecting it could move a running match.
+    if (this.xray.gameFallback) return;
     const servers = profile.game.servers;
     const generation = this.connectionGeneration;
     const abort = new AbortController();
@@ -2142,12 +2144,13 @@ export class AppController extends EventEmitter<AppControllerEvents> {
             .sort((a, b) => (quality[a.server.id]?.latencyMs ?? Infinity) - (quality[b.server.id]?.latencyMs ?? Infinity))
             .map(({ server, index }) => ({ index, port: GAME_PROBE_PORT + index, ...(server.nodeId ? { nodeId: server.nodeId } : {}),
               reliable: streamTransport(server.outbound) }));
+          const ids = this.state.settings.gameIds ?? [];
+          const gameId = ids.length === 1 && !this.state.settings.gameProcesses?.length ? ids[0]! : "custom";
+          this.currentGameId = gameId;
+          const preference = this.state.settings.gameRouteId;
+          const preferredExitId = this.profile?.game?.servers.find((server) => server.id === preference)?.nodeId ?? preference ?? null;
+          let primary: { routeIndex: number; latencyMs: number } | undefined;
           try {
-            const ids = this.state.settings.gameIds ?? [];
-            const gameId = ids.length === 1 && !this.state.settings.gameProcesses?.length ? ids[0]! : "custom";
-            this.currentGameId = gameId;
-            const preference = this.state.settings.gameRouteId;
-            const preferredExitId = this.profile?.game?.servers.find((server) => server.id === preference)?.nodeId ?? preference ?? null;
             const source = physicalGameSourceAddress(this.xray.outboundInterfaceName);
             await this.xray.connectGameMultipath(candidates, this.gamePassword, {
               nodes: this.profile?.game?.nodes ?? [], preferredExitId, protection: this.state.settings.gameProtection !== false,
@@ -2161,14 +2164,6 @@ export class AppController extends EventEmitter<AppControllerEvents> {
                 })) } : {}),
             });
             this.assertCurrentConnection(generation);
-            const dataAbort = new AbortController();
-            this.gameProbeAbort = dataAbort;
-            const dataCheck = await measureGameDataRoute(GAME_DATA_PROBE_PORT, this.gamePassword,
-              AbortSignal.any([dataAbort.signal, AbortSignal.timeout(12_000)]), 1200).finally(() => {
-                if (this.gameProbeAbort === dataAbort) this.gameProbeAbort = null;
-              });
-            this.assertCurrentConnection(generation);
-            if (dataCheck.latencyMs === null || dataCheck.lossPercent > 25) throw new Error("Game UDP validation failed");
             const healthy = (this.profile?.game?.servers ?? []).flatMap((server, routeIndex) => {
               const measured = this.xray.gameRouteQualities[routeIndex];
               return measured?.latencyMs != null && measured.lossPercent <= 25
@@ -2176,16 +2171,26 @@ export class AppController extends EventEmitter<AppControllerEvents> {
                 ? [{ routeIndex, latencyMs: measured.latencyMs }] : [];
             }).sort((a, b) => a.latencyMs - b.latencyMs);
             const tcpPreference = preferredExitId ?? this.gameHistory.preferredExit(gameId);
-            const primary = healthy.find((path) => this.profile?.game?.servers[path.routeIndex]?.nodeId === tcpPreference) ?? healthy[0];
+            primary = healthy.find((path) => this.profile?.game?.servers[path.routeIndex]?.nodeId === tcpPreference) ?? healthy[0];
             if (!primary) throw new Error("No Game path");
+            // The game's TCP (login, lobby, matchmaking) does not wait for the UDP check.
             await this.xray.selectGameRoute(primary.routeIndex);
+            this.updateGame({ activeRouteId: this.profile?.game?.servers[primary.routeIndex]?.id ?? null });
+            const dataAbort = new AbortController();
+            this.gameProbeAbort = dataAbort;
+            const dataCheck = await measureGameDataRoute(GAME_DATA_PROBE_PORT, this.gamePassword,
+              AbortSignal.any([dataAbort.signal, AbortSignal.timeout(12_000)])).finally(() => {
+                if (this.gameProbeAbort === dataAbort) this.gameProbeAbort = null;
+              });
+            this.assertCurrentConnection(generation);
+            if (dataCheck.latencyMs === null || dataCheck.lossPercent > 25) throw new Error("Game UDP validation failed");
             await this.xray.selectGameUdpRoute(null);
-            this.updateGame({ activeRouteId: this.profile?.game?.servers[primary.routeIndex]?.id ?? null, phase: "ready", message: null });
+            this.updateGame({ phase: "ready", message: null });
           } catch {
             this.assertCurrentConnection(generation);
-            // No bypass around the flow observer: otherwise an ongoing match
-            // could silently move to a different exit after a later retry.
-            this.updateGame({ phase: "degraded", message: "Игровой UDP не прошёл проверку. Завершите матч и переподключите VPN; обычный VPN работает." });
+            // A game is never left without a network. The fallback holds until
+            // reconnect, so a match that starts on it never changes its exit.
+            await this.useGameFallback(primary?.routeIndex ?? null, generation);
           }
           this.assertCurrentConnection(generation);
           this.updateGame({ multipath: this.xray.gameMultipathStats, runtime: this.xray.gameRuntimeSnapshot ?? null });
@@ -2195,6 +2200,31 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     } catch (error) {
       await this.xray.stop();
       throw error;
+    }
+  }
+
+  /** Multipath did not pass its check. With a responding game node the game keeps it
+   * (one route, no backup copies); with none it uses the ordinary VPN. Never blocked. */
+  private async useGameFallback(routeIndex: number | null, generation: number): Promise<void> {
+    const server = routeIndex === null ? undefined : this.profile?.game?.servers[routeIndex];
+    try {
+      if (routeIndex !== null && server) {
+        await this.xray.selectGameRoute(routeIndex);
+        await this.xray.selectGameUdpRoute(routeIndex);
+        this.assertCurrentConnection(generation);
+        this.addLog(`Game: проверка многопутевого канала не прошла; игра идёт через ${server.name} без резервных копий`);
+        this.updateGame({ activeRouteId: server.id, phase: "degraded",
+          message: `Игра идёт через ${server.name} без резервных копий: проверка игрового канала не прошла. Переподключите VPN между матчами, чтобы включить защиту.` });
+        return;
+      }
+      await this.xray.routeGameThroughTunnel();
+      this.assertCurrentConnection(generation);
+      this.addLog("Game: игровые узлы не ответили; игра идёт через обычный VPN");
+      this.updateGame({ activeRouteId: null, phase: "degraded",
+        message: "Игровые узлы не ответили: игра идёт через обычный VPN без игровой оптимизации. Переподключите VPN между матчами, чтобы попробовать снова." });
+    } catch {
+      this.assertCurrentConnection(generation);
+      this.updateGame({ phase: "degraded", message: "Не удалось подготовить игровой маршрут. Переподключите VPN." });
     }
   }
 
