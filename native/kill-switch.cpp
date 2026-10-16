@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "outbound-interface.h"
+#include "game-probe.h"
 
 #pragma comment(lib, "fwpuclnt.lib")
 #pragma comment(lib, "iphlpapi.lib")
@@ -27,6 +28,7 @@ constexpr GUID kSubLayerKey = {0xfe0d8f47, 0x83d6, 0x4f9e, {0xb7, 0x2d, 0x64, 0x
 
 constexpr GUID kAppV4Key = {0x05b55772, 0x67e2, 0x4643, {0x94, 0x43, 0x84, 0xce, 0xfd, 0x1b, 0xc8, 0xf1}};
 constexpr GUID kAppV6Key = {0xac1528df, 0xd4cb, 0x4701, {0x99, 0x75, 0xbc, 0x56, 0xc4, 0x08, 0x0d, 0xd1}};
+constexpr GUID kProbeV4Key = {0x50105a39, 0xe14b, 0x446e, {0xaa, 0x90, 0xc3, 0x89, 0x17, 0xb8, 0x48, 0x6f}};
 constexpr GUID kXrayV4Key = {0xa66b42da, 0xaa63, 0x41a1, {0xb9, 0x8d, 0x84, 0x45, 0xd8, 0x34, 0x43, 0x6f}};
 constexpr GUID kXrayV6Key = {0x99665898, 0x65cb, 0x4a1c, {0xa7, 0x82, 0xe6, 0x7b, 0x6c, 0xdf, 0x2a, 0xf0}};
 // Optional TUIC sidecar (sing-box). Removed with the boundary, but not required
@@ -51,7 +53,7 @@ GUID NetworkPermitKey(size_t index) {
 
 std::vector<GUID> BoundaryKeys(bool includeTunnel) {
   std::vector<GUID> keys = {kAppV4Key, kAppV6Key, kXrayV4Key, kXrayV6Key,
-                          kLoopbackV4Key, kLoopbackV6Key, kBlockV4Key, kBlockV6Key};
+                          kLoopbackV4Key, kLoopbackV6Key, kBlockV4Key, kBlockV6Key, kProbeV4Key};
   if (includeTunnel) { keys.push_back(kTunnelV4Key); keys.push_back(kTunnelV6Key); }
   for (size_t i = 0; i < kNetworkPermitCount; ++i) keys.push_back(NetworkPermitKey(i));
   return keys;
@@ -191,6 +193,28 @@ DWORD AddApplicationPermit(HANDLE engine, const std::wstring& path, const GUID& 
   return result;
 }
 
+DWORD AddGameProbePermit(HANDLE engine) {
+  std::array<wchar_t, 32768> path{};
+  const DWORD length = GetModuleFileNameW(nullptr, path.data(), static_cast<DWORD>(path.size()));
+  if (length == 0 || length >= path.size()) return ERROR_INVALID_DATA;
+  FWP_BYTE_BLOB* appId = nullptr;
+  DWORD result = FwpmGetAppIdFromFileName0(path.data(), &appId);
+  if (result != ERROR_SUCCESS) return result;
+  std::array<FWPM_FILTER_CONDITION0, 2> conditions{};
+  conditions[0].fieldKey = FWPM_CONDITION_ALE_APP_ID;
+  conditions[0].matchType = FWP_MATCH_EQUAL;
+  conditions[0].conditionValue.type = FWP_BYTE_BLOB_TYPE;
+  conditions[0].conditionValue.byteBlob = appId;
+  conditions[1].fieldKey = FWPM_CONDITION_IP_PROTOCOL;
+  conditions[1].matchType = FWP_MATCH_EQUAL;
+  conditions[1].conditionValue.type = FWP_UINT8;
+  conditions[1].conditionValue.uint8 = IPPROTO_ICMP;
+  result = AddFilter(engine, kProviderKey, kSubLayerKey, kProbeV4Key, FWPM_LAYER_ALE_AUTH_CONNECT_V4,
+      FWP_ACTION_PERMIT, kPermitWeight, conditions.data(), static_cast<UINT32>(conditions.size()));
+  FwpmFreeMemory0(reinterpret_cast<void**>(&appId));
+  return result;
+}
+
 DWORD AddInterfacePermit(HANDLE engine, UINT64 interfaceLuid, const GUID& layerKey, const GUID& filterKey) {
   FWPM_FILTER_CONDITION0 condition{};
   condition.fieldKey = FWPM_CONDITION_IP_LOCAL_INTERFACE;
@@ -311,6 +335,7 @@ DWORD Enable(const std::wstring& appPath, const std::wstring& xrayPath, const st
   if (result == ERROR_SUCCESS) result = EnsureSubLayer(engine.get(), kProviderKey, kSubLayerKey);
 
   if (result == ERROR_SUCCESS) result = AddApplicationPermit(engine.get(), appPath, FWPM_LAYER_ALE_AUTH_CONNECT_V4, kAppV4Key);
+  if (result == ERROR_SUCCESS) result = AddGameProbePermit(engine.get());
   if (result == ERROR_SUCCESS) result = AddApplicationPermit(engine.get(), appPath, FWPM_LAYER_ALE_AUTH_CONNECT_V6, kAppV6Key);
   if (result == ERROR_SUCCESS) result = AddApplicationPermit(engine.get(), xrayPath, FWPM_LAYER_ALE_AUTH_CONNECT_V4, kXrayV4Key);
   if (result == ERROR_SUCCESS) result = AddApplicationPermit(engine.get(), xrayPath, FWPM_LAYER_ALE_AUTH_CONNECT_V6, kXrayV6Key);
@@ -697,6 +722,8 @@ DWORD LoopbackSelfTest(int family) {
 }
 
 DWORD SelfTest() {
+  const DWORD probeResult = levik::GameProbeSelfTest();
+  if (probeResult != ERROR_SUCCESS) return probeResult;
   const DWORD interfaceResult = levik::OutboundInterfaceSelfTest();
   if (interfaceResult != ERROR_SUCCESS) return interfaceResult;
   EngineHandle engine;
@@ -747,7 +774,7 @@ DWORD SelfTest() {
 
 int wmain(int argc, wchar_t* argv[]) {
   if (argc < 2) {
-    std::wcerr << L"Usage: levik-kill-switch <enable APP XRAY [TUIC]|allow-tunnel|disable|status|cleanup-legacy|outbound-interfaces|self-test>\n";
+    std::wcerr << L"Usage: levik-kill-switch <enable APP XRAY [TUIC]|allow-tunnel|disable|status|cleanup-legacy|outbound-interfaces|game-probe SOURCE TARGET TTL|self-test>\n";
     return ERROR_INVALID_PARAMETER;
   }
 
@@ -767,6 +794,16 @@ int wmain(int argc, wchar_t* argv[]) {
     std::string interfaces;
     result = levik::ReadOutboundInterfaces(interfaces);
     if (result == ERROR_SUCCESS) std::cout << interfaces << '\n';
+  }
+  else if (command == L"game-probe" && argc == 5) {
+    const std::wstring ttlText = argv[4];
+    if (!ttlText.empty() && ttlText.size() <= 2 && ttlText.find_first_not_of(L"0123456789") == std::wstring::npos) {
+      const int ttl = std::stoi(ttlText);
+      std::string measurement;
+      result = ttl > 0 && ttl <= 30 ? levik::DirectGameProbe(argv[2], argv[3], static_cast<BYTE>(ttl), measurement)
+                                  : ERROR_INVALID_PARAMETER;
+      if (result == ERROR_SUCCESS) std::cout << measurement << '\n';
+    }
   }
 
   if (result != ERROR_SUCCESS && result != 2 && result != 3) {

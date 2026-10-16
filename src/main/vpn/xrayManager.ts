@@ -6,12 +6,14 @@ import { EventEmitter } from "node:events";
 import { promisify } from "node:util";
 import { parseXrayStats, XRAY_STATS_ENDPOINT } from "./xrayStats";
 import { bindXrayOutboundInterface, GAME_MULTIPATH, GAME_UDP_BALANCER } from "./xrayConfig";
-import { GameMultipath } from "./multipath/client";
+import { GameMultipath, type GameRuntimeOptions } from "./multipath/client";
 import { networkInterfaces } from "node:os";
 import { findWindowsOutboundInterface } from "../windows/outboundInterface";
 import { TuicSidecar, withTuicProxy } from "./tuicSidecar";
-import type { TuicEndpoint, GameMultipathStats } from "../../shared/contracts";
+import type { TuicEndpoint, GameMultipathStats, GameRuntimeSnapshot, GameRouteQuality } from "../../shared/contracts";
 import { GAME_BALANCER, GAME_BLOCK, gameTag } from "./gameRoutes";
+import { gameProcesses } from "../../shared/games";
+import type { AppSettings } from "../../shared/contracts";
 
 const execFileAsync = promisify(execFile);
 
@@ -32,6 +34,10 @@ export class XrayManager extends EventEmitter<XrayEvents> {
   private outboundName: string | null = null;
   private multipath: GameMultipath | null = null;
   private gameUdpFallback = false;
+  private routing: Record<string, unknown> | null = null;
+  private selectedGameRoute: number | null = null;
+  private selectedGameUdpRoute: number | null = null;
+  private gameUdpReady = false;
 
   get gameMultipathStats(): GameMultipathStats | null {
     const stats = this.multipath?.snapshot();
@@ -45,12 +51,54 @@ export class XrayManager extends EventEmitter<XrayEvents> {
       index === null ? GAME_MULTIPATH : gameTag(index)], { windowsHide: true, timeout: 4_000, maxBuffer: 16 * 1024 });
     if (this.process !== child) throw new Error("VPN connection changed");
     this.gameUdpFallback = index !== null;
+    this.selectedGameUdpRoute = index; this.gameUdpReady = true;
     if (index === null) this.multipath?.startCounting();
     else await this.multipath?.stop();
   }
 
-  async connectGameMultipath(candidates: Array<{ index: number; port: number }>, password: string): Promise<void> {
-    await this.multipath?.connect(candidates, password);
+  get gameRuntimeSnapshot(): GameRuntimeSnapshot | undefined { return this.multipath?.runtimeSnapshot(); }
+  get gameRouteQualities(): Record<number, GameRouteQuality> { return this.multipath?.routeQualities() ?? {}; }
+  refreshGameMeasurements(): void { this.multipath?.refreshMeasurements(); }
+
+  setGamePlaying(active: boolean): void { this.multipath?.setPlaying(active); }
+  pauseNewGameFlowsIfIdle(): boolean { return this.multipath?.pauseNewFlowsIfIdle() ?? true; }
+  resumeNewGameFlows(): void { this.multipath?.resumeNewFlows(); }
+
+  updateGameOptions(options: Partial<Pick<GameRuntimeOptions, "protection" | "preferredExitId" | "exitScope" | "gameId" | "history" | "nodes">>): void {
+    this.multipath?.configure(options);
+  }
+
+  /** Pinned Xray supports AddRule from stdin. Replacing routing recreates
+   * balancers, so their initial selectors must retain the live overrides. */
+  async updateGameProcesses(settings: AppSettings): Promise<void> {
+    const child = this.process;
+    if (!child || !this.routing || !Array.isArray(this.routing.rules)) throw new Error("Подключите VPN для обновления игр");
+    const routing = structuredClone(this.routing);
+    if (!Array.isArray(routing.rules)) return;
+    const processes = gameProcesses(settings);
+    for (const rule of routing.rules) if (rule && typeof rule === "object" && "ruleTag" in rule
+      && (rule.ruleTag === "game" || rule.ruleTag === "game-multipath")) Object.assign(rule, { process: processes });
+    if (!processes.length) routing.rules = routing.rules.filter((rule: unknown) => !(rule && typeof rule === "object"
+      && "ruleTag" in rule && (rule.ruleTag === "game" || rule.ruleTag === "game-multipath")));
+    if (Array.isArray(routing.balancers)) for (const balancer of routing.balancers) {
+      if (!balancer || typeof balancer !== "object" || !("tag" in balancer)) continue;
+      if (balancer.tag === GAME_BALANCER) Object.assign(balancer, { selector: [this.selectedGameRoute === null ? GAME_BLOCK : gameTag(this.selectedGameRoute)] });
+      if (balancer.tag === GAME_UDP_BALANCER) Object.assign(balancer, { selector: [!this.gameUdpReady ? GAME_BLOCK : this.selectedGameUdpRoute === null ? GAME_MULTIPATH : gameTag(this.selectedGameUdpRoute)] });
+    }
+    try {
+      await updateXrayRouting(this.executablePath(), XRAY_STATS_ENDPOINT, routing);
+      if (this.process !== child) throw new Error("Подключение изменилось");
+      this.routing = routing;
+    } catch {
+      // ReloadRules is not transactional on this core. Never leave a partially
+      // rebuilt policy running after API failure; existing WFP protection stays.
+      if (this.process === child) { this.stopping.add(child); await stopChild(child); if (this.process === child) this.process = null; }
+      throw new Error("Не удалось обновить игровые правила; переподключите VPN");
+    }
+  }
+
+  async connectGameMultipath(candidates: Array<{ index: number; port: number; nodeId?: string }>, password: string, options?: GameRuntimeOptions): Promise<void> {
+    await this.multipath?.connect(candidates, password, options);
   }
 
   constructor() {
@@ -142,6 +190,8 @@ export class XrayManager extends EventEmitter<XrayEvents> {
         waitForStartup(child),
         writeConfigInput(child, configInput),
       ]);
+      this.routing = typeof launchConfig.routing === "object" && launchConfig.routing !== null
+        ? structuredClone(launchConfig.routing) as Record<string, unknown> : null;
       this.startStatsPolling();
     } catch (error) {
       await this.stop();
@@ -152,6 +202,7 @@ export class XrayManager extends EventEmitter<XrayEvents> {
   }
 
   async stop(): Promise<void> {
+    this.routing = null; this.selectedGameRoute = null; this.selectedGameUdpRoute = null; this.gameUdpReady = false;
     this.gameUdpFallback = false;
     const multipath = this.multipath; this.multipath = null;
     await multipath?.stop();
@@ -175,12 +226,14 @@ export class XrayManager extends EventEmitter<XrayEvents> {
   }
 
   async selectGameRoute(index: number | null): Promise<void> {
-    if (index !== null && (!Number.isInteger(index) || index < 0 || index >= 32)) throw new Error("Некорректный игровой маршрут");
+    if (index !== null && (!Number.isInteger(index) || index < 0 || index >= 256)) throw new Error("Некорректный игровой маршрут");
     const child = this.process;
     if (!child) throw new Error("Подключите VPN для выбора игрового маршрута");
     await execFileAsync(this.executablePath(), ["api", "bo", `--server=${XRAY_STATS_ENDPOINT}`, "-b", GAME_BALANCER,
       index === null ? GAME_BLOCK : gameTag(index)], { windowsHide: true, timeout: 4_000, maxBuffer: 16 * 1024 });
     if (this.process !== child) throw new Error("Подключение изменилось");
+    this.selectedGameRoute = index;
+    if (index !== null) this.multipath?.setPrimaryRoute(index);
   }
 
   async isHealthy(): Promise<boolean> {
@@ -345,4 +398,16 @@ async function waitForStartup(child: ChildProcess): Promise<void> {
     child.once("exit", onExit);
     child.once("error", onError);
   });
+}
+
+export async function updateXrayRouting(executable: string, endpoint: string, routing: Record<string, unknown>): Promise<void> {
+  const bytes = Buffer.from(JSON.stringify({ routing }));
+  const child = spawn(executable, ["api", "adrules", `--server=${endpoint}`], { windowsHide: true, stdio: ["pipe", "ignore", "ignore"] });
+  try {
+    await Promise.all([writeConfigInput(child, bytes), new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => { child.kill(); reject(new Error("Game routing timeout")); }, 4_000);
+      child.once("error", () => { clearTimeout(timer); reject(new Error("Game routing unavailable")); });
+      child.once("exit", (code) => { clearTimeout(timer); if (code === 0) resolve(); else reject(new Error("Game routing rejected")); });
+    })]);
+  } finally { bytes.fill(0); if (child.exitCode === null) await stopChild(child); }
 }

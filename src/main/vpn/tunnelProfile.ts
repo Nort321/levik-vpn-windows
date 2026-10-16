@@ -1,12 +1,12 @@
 import { createDecipheriv, createHash, X509Certificate } from "node:crypto";
 import type { TunnelProfileEnvelope } from "../api/models";
 import { decodeBase64Url } from "../../shared/base64";
-import type { TunnelServer } from "../../shared/contracts";
+import type { GameNode, TunnelServer } from "../../shared/contracts";
 import { DeviceIdentity } from "../security/deviceIdentity";
 import { extractServerEndpoint } from "./serverPinger";
 
 export interface PreparedTunnelProfile {
-  game?: { enabled: boolean; servers: TunnelServer[] };
+  game?: { enabled: boolean; servers: TunnelServer[]; nodes?: GameNode[] };
   profileId: string;
   subscriptionId: string;
   subscriptionExpiresAt: string | null;
@@ -63,7 +63,7 @@ export function prepareTunnelProfile(plaintext: Uint8Array, expectedSubscription
   if (!/^[A-Za-z0-9._:-]{1,128}$/.test(raw.profileId)) throw new Error("Некорректный идентификатор профиля");
   if (!raw.source || typeof raw.source.content !== "string") throw new Error("Профиль не содержит конфигурацию");
   const servers = parseSource(raw.source.content);
-  if (servers.length === 0 || servers.length > 200) throw new Error("В профиле нет совместимых серверов");
+  if (servers.length === 0 || servers.length > 512) throw new Error("В профиле нет совместимых серверов");
   const game = parseGameAccess(raw.game, servers);
   return {
     profileId: raw.profileId,
@@ -77,20 +77,57 @@ export function prepareTunnelProfile(plaintext: Uint8Array, expectedSubscription
   };
 }
 
-function parseGameAccess(value: unknown, servers: TunnelServer[]): { enabled: boolean; servers: TunnelServer[] } {
-  if (!isRecord(value) || value.enabled !== true || !Array.isArray(value.endpoints) || value.endpoints.length > 32) {
+function parseGameAccess(value: unknown, servers: TunnelServer[]): NonNullable<PreparedTunnelProfile["game"]> {
+  if (!isRecord(value) || value.enabled !== true || !Array.isArray(value.endpoints) || value.endpoints.length > 256) {
     return { enabled: false, servers: [] };
   }
-  const endpoints = value.endpoints.filter((endpoint): endpoint is { address: string; port: number; protocol: string } =>
+  const endpoints = value.endpoints.filter((endpoint): endpoint is { address: string; port: number; protocol: string; nodeId?: string } =>
     isRecord(endpoint) && typeof endpoint.address === "string" && endpoint.address.length <= 253
     && typeof endpoint.port === "number" && Number.isInteger(endpoint.port) && endpoint.port > 0 && endpoint.port <= 65535
     && typeof endpoint.protocol === "string");
-  return { enabled: true, servers: servers.filter((server) => {
+  const nodes = parseGameNodes(value.nodes);
+  const selected = servers.filter((server) => {
     const endpoint = extractServerEndpoint(server.outbound);
-    return endpoint && endpoints.some((candidate) =>
+    const match = endpoint && endpoints.find((candidate) =>
       candidate.address.toLowerCase() === endpoint.host.toLowerCase() && candidate.port === endpoint.port
       && candidate.protocol === server.outbound.protocol);
-  }).slice(0, 32) };
+    if (!match || !endpoint) return false;
+    // Attach to the existing object so the ordinary server exclusion remains identity based.
+    server.nodeId = validNodeId(match.nodeId) ? match.nodeId : `legacy-${createHash("sha256").update(endpoint.host.toLowerCase()).digest("hex").slice(0, 24)}`;
+    return true;
+  }).slice(0, 256);
+  for (const server of selected) {
+    if (!nodes.some((node) => node.nodeId === server.nodeId)) nodes.push({ nodeId: server.nodeId!, name: server.name,
+      countryCode: server.countryCode, city: null, mesh: null,
+      state: Array.isArray(value.nodes) && !server.nodeId?.startsWith("legacy-") ? "disabled" : "enabled" });
+  }
+  return { enabled: true, servers: selected, nodes };
+}
+
+function validNodeId(value: unknown): value is string {
+  return typeof value === "string" && /^[A-Za-z0-9_-]{1,64}$/.test(value);
+}
+
+function parseGameNodes(value: unknown): GameNode[] {
+  if (!Array.isArray(value) || value.length > 64) return [];
+  const seen = new Set<string>();
+  return value.flatMap((node): GameNode[] => {
+    if (!isRecord(node) || !validNodeId(node.nodeId) || seen.has(node.nodeId)
+      || typeof node.name !== "string" || node.name.length < 1 || node.name.length > 128
+      || typeof node.countryCode !== "string" || !/^(?:[A-Z]{2})?$/.test(node.countryCode)
+      || (node.city !== undefined && node.city !== null && (typeof node.city !== "string" || node.city.length > 128))
+      || !["enabled", "draining", "disabled"].includes(String(node.state))) return [];
+    let mesh: GameNode["mesh"] = null;
+    if (node.mesh !== undefined && node.mesh !== null) {
+      if (!isRecord(node.mesh) || typeof node.mesh.address !== "string" || !IPV4_PATTERN.test(node.mesh.address)
+        || typeof node.mesh.port !== "number" || !Number.isInteger(node.mesh.port) || node.mesh.port < 1 || node.mesh.port > 65535) return [];
+      mesh = { address: node.mesh.address, port: node.mesh.port };
+    }
+    seen.add(node.nodeId);
+    return [{ nodeId: node.nodeId, name: node.name.replace(/[\u0000-\u001f]/g, ""), countryCode: node.countryCode,
+      city: typeof node.city === "string" ? node.city.replace(/[\u0000-\u001f]/g, "") : null,
+      mesh, state: node.state as GameNode["state"] }];
+  });
 }
 
 function parseSource(source: string): TunnelServer[] {

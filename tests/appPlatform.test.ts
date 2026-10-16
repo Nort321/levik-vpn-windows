@@ -206,6 +206,10 @@ describe("links", () => {
     expect(isCabinetTarget("/dashboard/admin")).toBe(false);
     expect(isAllowedExternalUrl("https://t.me/leviksupportbot")).toBe(true);
     expect(isAllowedExternalUrl("https://example.com")).toBe(false);
+    expect(isAllowedExternalUrl("https://db-ip.com/db/lite.php")).toBe(true);
+    expect(isAllowedExternalUrl("https://creativecommons.org/licenses/by/4.0/")).toBe(true);
+    expect(isAllowedExternalUrl("https://db-ip.com/account")).toBe(false);
+    expect(isAllowedExternalUrl("https://db-ip.com/db/lite.php?next=https://example.com")).toBe(false);
   });
 });
 

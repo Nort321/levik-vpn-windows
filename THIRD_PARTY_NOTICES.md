@@ -1,5 +1,9 @@
 # Third-Party Notices
 
+## Необязательные серверные данные DB-IP Lite
+
+Клиент не содержит базы IP-геолокации. Если оператор узла подключил DB-IP Lite, интерфейс может показывать полученную с узла подпись страны, города или оператора. Источник: [DB-IP Lite, © DB-IP.com](https://db-ip.com/db/lite.php), лицензия [Creative Commons Attribution 4.0 International](https://creativecommons.org/licenses/by/4.0/). На узле исходный CSV преобразуется в ограниченную офлайн-таблицу IPv4-префиксов; точность и покрытие Lite ограничены. Географическая подпись не является измерением RTT. Сетевые запросы к DB-IP из клиента не выполняются.
+
 Levik VPN for Windows bundles the following runtime components:
 
 ## Xray-core

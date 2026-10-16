@@ -141,6 +141,18 @@ describe("TelemetryQueue", () => {
 });
 
 describe("telemetry transport", () => {
+  it("sends regional aggregates without installation, session, account, cookies or network token", async () => {
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(new Response("{}", { status: 202 }));
+    const client = new TelemetryClient(fetchImpl);
+    expect(await client.sendGameRegions([{ region: "RU", matches: 2 }, { region: "RU", matches: 3 }, { region: "1.2.3.4", matches: 1 }])).toBe("sent");
+    const [url, init] = fetchImpl.mock.calls[0]!;
+    expect(String(url)).toBe("https://api.cloudnote-sync.xyz/api/telemetry/v1/game-regions");
+    expect(init).toMatchObject({ credentials: "omit", redirect: "error", cache: "no-store" });
+    expect(Object.keys(init?.headers ?? {})).toEqual(["Content-Type"]);
+    expect(JSON.parse(String(init?.body))).toEqual({ v: 1, regions: [{ region: "RU", matches: 2 }] });
+    expect(await client.sendGameRegions([{ region: "1.2.3.4", matches: 1 }])).toBe("rejected");
+    expect(fetchImpl).toHaveBeenCalledOnce();
+  });
   it("splits batches by count and size and recomputes ageS", () => {
     const time = clock();
     const entries = Array.from({ length: 45 }, () => {

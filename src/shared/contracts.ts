@@ -98,6 +98,17 @@ export interface TunnelServer {
   countryCode: string;
   outbound: Record<string, unknown>;
   tuic?: TuicEndpoint;
+  /** Stable Game exit identity; older profiles are grouped by endpoint address. */
+  nodeId?: string;
+}
+
+export interface GameNode {
+  nodeId: string;
+  name: string;
+  countryCode: string;
+  city: string | null;
+  mesh: { address: string; port: number } | null;
+  state: "enabled" | "draining" | "disabled";
 }
 
 export interface AppSettings {
@@ -107,6 +118,10 @@ export interface AppSettings {
   /** null selects the best measured Game route. Local to this computer. */
   gameRouteId?: string | null;
   gameMultipath?: boolean;
+  /** Loss protection defaults on independently of the legacy gameMultipath flag. */
+  gameProtection?: boolean;
+  /** Separate explicit consent; never inferred from connection telemetry consent. */
+  gameRegionTelemetry?: boolean;
   routingMode: RoutingMode;
   automaticServer: boolean;
   autoReconnect: boolean;
@@ -309,14 +324,75 @@ export interface GameRouteQuality {
 
 export interface GameSnapshot {
   available: boolean;
-  routes: Array<Pick<TunnelServer, "id" | "name" | "countryCode">>;
+  routes: Array<Pick<TunnelServer, "id" | "name" | "countryCode" | "nodeId">>;
+  nodes?: Array<Pick<GameNode, "nodeId" | "name" | "countryCode" | "state">>;
   quality: Record<string, GameRouteQuality>;
   activeRouteId: string | null;
   recommendedRouteId: string | null;
   phase: "idle" | "probing" | "ready" | "degraded";
   message: string | null;
-  history?: Record<string, GameRouteQuality[]>;
   multipath?: GameMultipathStats | null;
+  runtime?: GameRuntimeSnapshot | null;
+  installedGames?: Array<{ gameId: string; launcher: "steam" | "riot" | "epic" }>;
+}
+
+export interface GameMeasurement extends GameRouteQuality {
+  p95Ms: number | null;
+  method: "echo" | "icmp" | "ttl-hop" | "unknown";
+  approximate: boolean;
+}
+
+export interface GameMatchServer {
+  address: string;
+  port: number;
+  region?: string;
+  operator?: string;
+}
+
+export interface GameExitComparison {
+  nodeId: string;
+  name: string;
+  state: GameNode["state"];
+  access: GameMeasurement | null;
+  egress: GameMeasurement | null;
+  direct: GameMeasurement | null;
+  estimatedRttMs: number | null;
+  jitterMs: number | null;
+  lossPercent: number | null;
+  confidence: "exact" | "subnet" | "operator" | "region" | "access" | "unavailable";
+  approximate: boolean;
+  reason: string;
+}
+
+export interface GameMatchReport {
+  startedAt: number;
+  endedAt: number;
+  durationMs: number;
+  averageRttMs: number | null;
+  p95RttMs: number | null;
+  jitterMs: number | null;
+  /** Null when sequence evidence is insufficient; never guessed from duplicates. */
+  lossPercent: number | null;
+  rescuedPackets: number;
+  receivedPackets: number;
+  approximate: boolean;
+}
+
+export interface GameRuntimeSnapshot {
+  gameId?: string;
+  activeFlowCount?: number;
+  currentMatch: GameMatchServer | null;
+  lastMatch: GameMatchServer | null;
+  exits: GameExitComparison[];
+  selectedExitId: string | null;
+  selectionReason: string | null;
+  ingressPaths: Array<{ routeId: string; entryNodeId: string; exitNodeId: string; latencyMs: number | null; active: boolean }>;
+  protection: { enabled: boolean; limitedByUpload: boolean; reason: string | null };
+  shadowAlternative: { nodeId: string; name: string; savingMs: number } | null;
+  matchReport: GameMatchReport | null;
+  estimateHistory: Array<{ measuredAt: number; latencyMs: number | null; approximate: boolean }>;
+  compatibility: "full" | "legacy";
+  meshRows?: Array<{ nodeId: string; neighbors: Array<{ nodeId: string; quality: GameMeasurement }> }>;
 }
 
 export interface GameMultipathStats {

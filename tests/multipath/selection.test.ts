@@ -26,7 +26,7 @@ function routes(values: Array<{ instance: number; latency: number }>) {
 
 it("probes all compatible routes and admits more than two without mixing exit relays", async () => {
   vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"] });
-  const client = new GameMultipath();
+  const client = new GameMultipath(); client.setPlaying(true);
   try {
     const pending = client.connect(routes([{ instance: 1, latency: 20 }, { instance: 1, latency: 22 },
       { instance: 1, latency: 24 }, { instance: 1, latency: 70 }, { instance: 2, latency: 120 }]), "test");
@@ -41,7 +41,7 @@ it("probes all compatible routes and admits more than two without mixing exit re
 
 it("keeps a single working relay usable and repairs a previously working path", async () => {
   vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"] });
-  const client = new GameMultipath();
+  const client = new GameMultipath(); client.setPlaying(true);
   try {
     const pending = client.connect(routes([{ instance: 1, latency: 20 }, { instance: 1, latency: 22 }]), "test");
     await vi.advanceTimersByTimeAsync(2200); await pending;

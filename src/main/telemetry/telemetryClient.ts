@@ -56,6 +56,26 @@ export function buildBatches(install: string, entries: readonly QueuedSession[],
 export class TelemetryClient {
   constructor(private readonly fetchImpl: Fetch = fetch) {}
 
+  /** Regional planning has its own opt-in and deliberately no installation/session id. */
+  async sendGameRegions(regions: Array<{ region: string; matches: number }>): Promise<SendOutcome> {
+    const safe = regions.filter((entry, index, entries) => /^[A-Z]{2}$/.test(entry.region)
+      && entries.findIndex((candidate) => candidate.region === entry.region) === index
+      && Number.isInteger(entry.matches) && entry.matches > 0 && entry.matches <= 100).slice(0, 16);
+    if (!safe.length) return "rejected";
+    for (const origin of serviceEndpoints().apiOrigins) {
+      try {
+        const response = await this.fetchImpl(new URL("/api/telemetry/v1/game-regions", origin), {
+          method: "POST", credentials: "omit", redirect: "error", cache: "no-store",
+          headers: { "Content-Type": "application/json" }, body: JSON.stringify({ v: 1, regions: safe }),
+          signal: AbortSignal.timeout(10_000),
+        });
+        if (response.ok) return "sent";
+        if ([400, 413, 415].includes(response.status)) return "rejected";
+      } catch { /* The aggregate is optional and never delays a game. */ }
+    }
+    return "retry";
+  }
+
   async send(body: string): Promise<SendOutcome> {
     for (const origin of serviceEndpoints().apiOrigins) {
       try {

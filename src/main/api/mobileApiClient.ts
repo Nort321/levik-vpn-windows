@@ -93,7 +93,7 @@ export class MobileApiClient {
 
   tunnelProfile(accessToken: string, subscriptionId: string): Promise<TunnelProfileResponse> {
     // «🏠» servers of the account's home exits come with the profile (docs/app-platform.md "Home road").
-    return this.request("POST", "/api/mobile/v1/tunnel-profile", { subscriptionId }, accessToken, { "X-Levik-Road": "1" });
+    return this.request("POST", "/api/mobile/v1/tunnel-profile", { subscriptionId }, accessToken, { "X-Levik-Road": "1", "X-Levik-Game": "2" });
   }
 
   /** This computer's home exit with a fresh relay token, or null. */

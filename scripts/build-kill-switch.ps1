@@ -43,3 +43,16 @@ foreach ($interface in $interfaces) {
     throw "Native interface query returned an invalid route"
   }
 }
+
+# Game probes must reject reserved targets before sending any packet, and must
+# never accept loopback as a physical source. No internet target is contacted.
+try {
+  # Windows PowerShell 5 treats expected native stderr as ErrorRecord.
+  $ErrorActionPreference = "Continue"
+  & $executable game-probe 127.0.0.1 127.0.0.1 30 2>$null
+  if ($LASTEXITCODE -ne 87) { throw "Game probe did not reject a loopback target" }
+  & $executable game-probe 127.0.0.1 1.1.1.1 30 2>$null
+  if ($LASTEXITCODE -ne 1168) { throw "Game probe did not reject a virtual source" }
+  & $executable game-probe 127.0.0.1 1.1.1.1 0 2>$null
+  if ($LASTEXITCODE -ne 87) { throw "Game probe did not reject an invalid TTL" }
+} finally { $ErrorActionPreference = "Stop" }

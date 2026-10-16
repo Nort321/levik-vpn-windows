@@ -5,8 +5,9 @@ import { once } from "node:events";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import { buildXrayConfig } from "../src/main/vpn/xrayConfig";
-import { GAME_BALANCER, GAME_PROBE_USER, gameTag, measureGameRoute } from "../src/main/vpn/gameRoutes";
+import { GAME_BALANCER, GAME_PROBE_USER, gameTag, measureGameDataRoute as measureGameRoute } from "../src/main/vpn/gameRoutes";
 import type { AppSettings, TunnelServer } from "../src/shared/contracts";
+import { updateXrayRouting } from "../src/main/vpn/xrayManager";
 
 const executable = process.env.LEVIK_TEST_XRAY ?? resolve("vendor/xray/windows-x64/xray.exe");
 const settings: AppSettings = {
@@ -105,6 +106,14 @@ describe("Game routing with the bundled Xray core", () => {
       expect(ordinary.lossPercent).toBe(0);
       expect(normalPackets).toBe(10);
       expect(gamePackets).toBe(20);
+      // Actual pinned-core AddRule from stdin, without stopping the process.
+      // ReloadRules replaces balancers, so preserve the live Game selection.
+      const routing = structuredClone(config.routing) as { rules: Record<string, unknown>[]; balancers: Array<{ tag: string; selector: string[] }> };
+      routing.balancers.find((balancer) => balancer.tag === GAME_BALANCER)!.selector = [gameTag(0)];
+      routing.rules.unshift({ type: "field", inboundTag: ["test-normal-app"], outboundTag: gameTag(0), ruleTag: "test-new-game" });
+      await updateXrayRouting(executable, `127.0.0.1:${apiPort}`, routing);
+      const newlySelected = await measureGameRoute(normalAppPort!, "test-pass", AbortSignal.timeout(5000));
+      expect(newlySelected.lossPercent).toBe(0); expect(normalPackets).toBe(10); expect(gamePackets).toBe(30);
     } finally {
       if (core && core.exitCode === null) { const done = once(core, "exit"); core.kill(); await done; }
       gameDns.close(); normalDns.close();

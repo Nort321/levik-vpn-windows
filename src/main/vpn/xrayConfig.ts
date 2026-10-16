@@ -5,9 +5,11 @@ import { TUNNEL_HEALTH_PORT, TUNNEL_HEALTH_TAG } from "./tunnelHealth";
 import { resolveProcessCompanions } from "../../shared/processes";
 import { isIP } from "node:net";
 import { gameProcesses } from "../../shared/games";
-import { GAME_BALANCER, GAME_BLOCK, GAME_PROBE_PORT, GAME_PROBE_USER, GAME_DATA_PROBE_PORT, GAME_DATA_PROBE_TAG, gameTag, gameProbeTag } from "./gameRoutes";
+import { GAME_BALANCER, GAME_BLOCK, GAME_PROBE_PORT, GAME_DIRECT_PORT, GAME_PROBE_USER, GAME_DATA_PROBE_PORT, GAME_DATA_PROBE_TAG, gameTag, gameProbeTag } from "./gameRoutes";
 import { RELAY_PORT } from "./multipath/wire";
 export const GAME_MULTIPATH = "levik-game-multipath";
+export { GAME_DIRECT_PORT } from "./gameRoutes";
+export const GAME_DIRECT_TAG = "levik-game-direct";
 export const GAME_UDP_BALANCER = "levik-game-udp";
 
 const LOCAL_CIDRS = [
@@ -60,18 +62,23 @@ export function buildXrayConfig(
     // System DNS must reach the configured resolver before process/LAN bypass.
     { type: "field", inboundTag: ["levik-tun-in"], port: "53", outboundTag: "levik-dns-out" },
     { type: "field", inboundTag: ["levik-dns"], outboundTag: server.tag },
-    ...(gaming && settings.gameMultipath ? [
+    ...(gaming ? [
       { type: "field", inboundTag: [GAME_DATA_PROBE_TAG], ip: ["1.1.1.1", "8.8.8.8"], port: "53", network: "udp", outboundTag: GAME_MULTIPATH },
       { type: "field", inboundTag: [GAME_DATA_PROBE_TAG], outboundTag: "levik-block" },
     ] : []),
+    ...(gaming ? [
+      { type: "field", inboundTag: [GAME_DIRECT_TAG], ip: LOCAL_CIDRS, outboundTag: "levik-block" },
+      { type: "field", inboundTag: [GAME_DIRECT_TAG], ip: ["0.0.0.0/0"], port: "1-52,54-852,854-65535", network: "udp", outboundTag: "direct" },
+      { type: "field", inboundTag: [GAME_DIRECT_TAG], outboundTag: "levik-block" },
+    ] : []),
     ...games.flatMap((_game, index) => [
-      ...(settings.gameMultipath ? [{ type: "field", inboundTag: [gameProbeTag(index)], ip: ["127.0.0.1"], port: String(RELAY_PORT), network: "udp", outboundTag: gameTag(index) }] : []),
+      ...(gaming ? [{ type: "field", inboundTag: [gameProbeTag(index)], ip: ["127.0.0.1"], port: String(RELAY_PORT), network: "udp", outboundTag: gameTag(index) }] : []),
       { type: "field", inboundTag: [gameProbeTag(index)], ip: ["1.1.1.1", "8.8.8.8"], port: "53", network: "udp", outboundTag: gameTag(index) },
       { type: "field", inboundTag: [gameProbeTag(index)], outboundTag: "levik-block" },
     ]),
     ...(gameRules.length ? [{ type: "field", ip: LOCAL_CIDRS, outboundTag: "direct" }] : []),
     // Explicit Game selection wins over process bypass and regional direct rules.
-    ...(gaming && settings.gameMultipath && gameRules.length ? [{ type: "field", process: gameRules, ip: ["0.0.0.0/0"], network: "udp", balancerTag: GAME_UDP_BALANCER, ruleTag: "game-multipath" }] : []),
+    ...(gaming && gameRules.length ? [{ type: "field", process: gameRules, ip: ["0.0.0.0/0"], network: "udp", balancerTag: GAME_UDP_BALANCER, ruleTag: "game-multipath" }] : []),
     ...(gameRules.length ? [{ type: "field", process: gameRules, network: "tcp,udp",
       ...(gaming ? { balancerTag: GAME_BALANCER } : { outboundTag: "levik-block" }), ruleTag: "game" }] : []),
     ...(processBypass
@@ -118,9 +125,12 @@ export function buildXrayConfig(
     inbounds: [tunInbound(settings.dnsServer), ...gaming ? games.map((_game, index) => ({
       tag: gameProbeTag(index), listen: "127.0.0.1", port: GAME_PROBE_PORT + index,
       protocol: "socks", settings: { auth: "password", accounts: [{ user: GAME_PROBE_USER, pass: gameProbePassword }], udp: true, ip: "127.0.0.1" },
-    })) : [], ...(gaming && settings.gameMultipath ? [{
+    })) : [], ...(gaming ? [{
       tag: GAME_DATA_PROBE_TAG, listen: "127.0.0.1", port: GAME_DATA_PROBE_PORT,
       protocol: "socks", settings: { auth: "password", accounts: [{ user: GAME_PROBE_USER, pass: gameProbePassword }], udp: true, ip: "127.0.0.1" },
+    }, {
+      tag: GAME_DIRECT_TAG, listen: "127.0.0.1", port: GAME_DIRECT_PORT, protocol: "socks",
+      settings: { auth: "password", accounts: [{ user: GAME_PROBE_USER, pass: gameProbePassword }], udp: true, ip: "127.0.0.1" },
     }] : []), {
       tag: TUNNEL_HEALTH_TAG, listen: "127.0.0.1", port: TUNNEL_HEALTH_PORT,
       protocol: "http", settings: { allowTransparent: false },
@@ -130,7 +140,7 @@ export function buildXrayConfig(
       ...gaming ? games.map((game, index) => game.tuic ? tuicLocalOutbound(gameTag(index))
         : ({ ...withBootstrapResolution(withAlternateXhttpMux(game.outbound)), tag: gameTag(index) })) : [],
       ...(gaming ? [{ tag: GAME_BLOCK, protocol: "blackhole", settings: {} }] : []),
-      ...(gaming && settings.gameMultipath ? [{ ...tuicLocalOutbound(GAME_MULTIPATH), mux: { enabled: false, xudpConcurrency: -1 } }] : []),
+      ...(gaming ? [{ ...tuicLocalOutbound(GAME_MULTIPATH), mux: { enabled: false, xudpConcurrency: -1 } }] : []),
       // The pinned core answers non-address queries immediately with NODATA.
       { tag: "levik-dns-out", protocol: "dns", settings: {} },
       { tag: "direct", protocol: "freedom", settings: { domainStrategy: "UseIP" } },
@@ -151,7 +161,7 @@ export function buildXrayConfig(
     routing: { domainStrategy: "IPIfNonMatch", domainMatcher: "hybrid", rules,
       ...(gaming ? { balancers: [
         { tag: GAME_BALANCER, selector: [GAME_BLOCK], strategy: { type: "random" } },
-        ...(settings.gameMultipath ? [{ tag: GAME_UDP_BALANCER, selector: [GAME_BLOCK], strategy: { type: "random" } }] : []),
+        ...(gaming ? [{ tag: GAME_UDP_BALANCER, selector: [GAME_BLOCK], strategy: { type: "random" } }] : []),
       ] } : {}),
     },
     policy: { system: { statsInboundDownlink: true, statsInboundUplink: true, statsOutboundDownlink: true, statsOutboundUplink: true } },

@@ -71,10 +71,14 @@ export function cabinetFallbackUrl(target: CabinetTarget): string {
   return `${serviceEndpoints().webOrigin}${target}`;
 }
 
-/** Links the app opens in the browser: the Levik website and Telegram only. */
+/** Fixed license links are the only exception to Levik/Telegram destinations. */
+const DATA_LICENSE_LINKS = new Set(["https://db-ip.com/db/lite.php", "https://creativecommons.org/licenses/by/4.0/"]);
+
+/** Links the app opens in the browser, including two exact data-attribution pages. */
 export function isAllowedExternalUrl(value: string): boolean {
   try {
     const url = new URL(value);
+    if (DATA_LICENSE_LINKS.has(url.href)) return true;
     const host = url.hostname.replace(/^www\./, "");
     return (url.protocol === "https:" && (websiteHosts().has(host) || url.hostname === "t.me")) || url.protocol === "tg:";
   } catch {

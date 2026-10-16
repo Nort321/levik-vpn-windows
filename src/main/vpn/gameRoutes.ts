@@ -2,13 +2,17 @@ import { createSocket } from "node:dgram";
 import { Socket } from "node:net";
 import { randomBytes } from "node:crypto";
 import { performance } from "node:perf_hooks";
+import { openRelayPath } from "./multipath/socks";
+import { decode, encode, Kind } from "./multipath/wire";
+import { GAME_POLICY } from "./gameEngine";
 import type { GameRouteQuality, TunnelServer } from "../../shared/contracts";
 
 export const GAME_BALANCER = "levik-game";
 export const GAME_BLOCK = "levik-game-block";
-export const GAME_PROBE_PORT = 47210;
+export const GAME_PROBE_PORT = 48000;
 export const GAME_DATA_PROBE_PORT = 47280;
 export const GAME_DATA_PROBE_TAG = "levik-game-data-check";
+export const GAME_DIRECT_PORT = 47279;
 export const GAME_PROBE_USER = "levik-game";
 export const gameTag = (index: number): string => `levik-game-route-${index}`;
 export const gameProbeTag = (index: number): string => `levik-game-probe-${index}`;
@@ -34,16 +38,41 @@ export function bestGameRoute(servers: TunnelServer[], quality: Record<string, G
   const score = (server: TunnelServer): number => {
     const q = quality[server.id];
     if (!q || q.latencyMs === null || q.lossPercent > 25 || q.samples < SAMPLE_COUNT) return Infinity;
-    return q.latencyMs + 20 * q.lossPercent;
+    return q.latencyMs + GAME_POLICY.jitterWeight * (q.jitterMs ?? 0) + GAME_POLICY.lossWeightMs * q.lossPercent;
   };
   return servers.filter((server) => Number.isFinite(score(server)))
     .sort((a, b) => score(a) - score(b) || (quality[a.id]?.jitterMs ?? Infinity) - (quality[b.id]?.jitterMs ?? Infinity))[0] ?? null;
 }
 
+/** A is an authenticated echo to the relay, not an arbitrary public resolver. */
+export async function measureGameRoute(port: number, password: string, signal: AbortSignal): Promise<GameRouteQuality> {
+  const session = randomBytes(32); const samples: Array<number | null> = [];
+  let settle: ((latency: number | null) => void) | null = null; let sentAt = 0; let sequence = 0;
+  let path: Awaited<ReturnType<typeof openRelayPath>> | null = null;
+  try {
+    path = await openRelayPath(port, password, (data) => {
+      const packet = decode(data);
+      if (packet?.kind === Kind.Pong && packet.sequence === sequence && packet.session.equals(session) && packet.payload.length === 16) settle?.(performance.now() - sentAt);
+    }, signal);
+    for (sequence = 0; sequence < SAMPLE_COUNT && !signal.aborted; sequence++) {
+      samples.push(await new Promise<number | null>((resolve) => {
+        const finish = (latency: number | null): void => { clearTimeout(timer); signal.removeEventListener("abort", aborted); settle = null; resolve(latency); };
+        const aborted = (): void => finish(null);
+        const timer = setTimeout(() => finish(null), SAMPLE_TIMEOUT_MS); settle = finish;
+        signal.addEventListener("abort", aborted, { once: true }); sentAt = performance.now();
+        path!.send(encode({ kind: Kind.Ping, path: 0, session, flow: Buffer.alloc(8), sequence, address: "0.0.0.0", port: 0, payload: Buffer.from([0]) }));
+      }));
+    }
+  } catch { /* An unavailable echo is unknown A, never a successful match probe. */ }
+  finally { path?.close(); }
+  while (samples.length < SAMPLE_COUNT) samples.push(null);
+  return summarizeGameSamples(samples);
+}
+
 /** Measures real UDP DNS round trips through one authenticated, loopback SOCKS inbound.
  * These are control-point measurements, never presented as a game's match ping.
  */
-export async function measureGameRoute(port: number, password: string, signal: AbortSignal, payloadBytes = 0): Promise<GameRouteQuality> {
+export async function measureGameDataRoute(port: number, password: string, signal: AbortSignal, payloadBytes = 0): Promise<GameRouteQuality> {
   // Separate associations also prevent destination aliasing in UDP transports.
   const samples = await Promise.all([[1, 1, 1, 1], [8, 8, 8, 8]].map((address) => measureGameTarget(port, password, signal, address, payloadBytes)));
   const quality = summarizeGameSamples(samples.flat());

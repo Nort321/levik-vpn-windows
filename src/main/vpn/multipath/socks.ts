@@ -5,7 +5,7 @@ import { RELAY_PORT } from "./wire";
 
 export interface RelayPath { readonly closed?: boolean; send(data: Buffer): void; close(): void }
 export async function openRelayPath(port: number, password: string, receive: (data: Buffer) => void,
-  signal: AbortSignal): Promise<RelayPath> {
+  signal: AbortSignal, target = { address: "127.0.0.1", port: RELAY_PORT }): Promise<RelayPath> {
   const tcp = new Socket(); const udp = createSocket("udp4");
   let buffer = Buffer.alloc(0); let wake: (() => void) | undefined; let closed = false;
   const close = (): void => {
@@ -37,7 +37,7 @@ export async function openRelayPath(port: number, password: string, receive: (da
       udp.once("error", reject); udp.once("close", () => reject(new Error("Game path closed")));
       udp.connect(reply.readUInt16BE(8), "127.0.0.1", () => { udp.removeListener("error", reject); resolve(); });
     });
-    const header = Buffer.from([0, 0, 0, 1, 127, 0, 0, 1, RELAY_PORT >> 8, RELAY_PORT & 255]);
+    const header = Buffer.from([0, 0, 0, 1, ...target.address.split(".").map(Number), target.port >> 8, target.port & 255]);
     udp.on("message", (data) => { if (data.length >= 10 && data.subarray(0, 10).equals(header)) receive(data.subarray(10)); });
     return { get closed() { return closed; }, send: (data) => { if (!closed) udp.send(Buffer.concat([header, data]), () => {}); }, close };
   } catch (error) { close(); throw error; }

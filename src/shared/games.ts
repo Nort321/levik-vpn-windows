@@ -1,7 +1,7 @@
 import { normalizeProcessSelection } from "./processes";
 import type { AppSettings } from "./contracts";
 
-export const GAMES = [
+const CATALOG = [
   { id: "valorant", name: "VALORANT", genre: "Тактический шутер", initials: "VA", processes: ["VALORANT.exe", "VALORANT-Win64-Shipping.exe"] },
   { id: "cs2", name: "Counter-Strike 2", genre: "Тактический шутер", initials: "CS", processes: ["cs2.exe"] },
   { id: "dota2", name: "Dota 2", genre: "MOBA", initials: "D2", processes: ["dota2.exe"] },
@@ -15,6 +15,14 @@ export const GAMES = [
   { id: "tarkov", name: "Escape from Tarkov", genre: "Тактический шутер", initials: "ET", processes: ["EscapeFromTarkov.exe"] },
   { id: "wot", name: "Мир танков", genre: "Командные сражения", initials: "MT", processes: ["WorldOfTanks.exe"] },
 ] as const;
+
+export type GameExitScope = "flow" | "session";
+export const GAMES = CATALOG.map((game) => ({ ...game, exitScope: "flow" as GameExitScope }));
+
+/** Unknown/custom games use per-flow selection; individual compatibility exceptions are explicit. */
+export function gameExitScope(settings: AppSettings): GameExitScope {
+  return GAMES.some((game) => settings.gameIds?.includes(game.id) && game.exitScope === "session") ? "session" : "flow";
+}
 
 export function normalizeGameIds(value: unknown): string[] {
   return Array.isArray(value) ? GAMES.filter((game) => value.includes(game.id)).map((game) => game.id) : [];

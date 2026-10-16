@@ -85,8 +85,14 @@ import {
 } from "./platform/favoriteNodes";
 import { avoidMaintenance, IdleMeter, maintenanceFor, maintenanceMove } from "./platform/maintenance";
 import { captivePortal, checkServices, diagnosisSummary, diagnosisVerdict, parseDiagnoseReport, vpnPhase } from "./platform/diagnosis";
-import { gameProcesses, normalizeGameIds } from "../shared/games";
-import { bestGameRoute, measureGameRoute, GAME_PROBE_PORT, GAME_DATA_PROBE_PORT, gameTag } from "./vpn/gameRoutes";
+import { gameExitScope, gameProcesses, GAMES, normalizeGameIds } from "../shared/games";
+import { discoverInstalledGames } from "./windows/installedGames";
+import { listWindowsProcesses } from "./windows/processes";
+import { measureDirectGameTargets, physicalGameSourceAddress } from "./windows/gameProbe";
+import { GameHistory } from "./vpn/gameHistory";
+import { TelemetryClient } from "./telemetry/telemetryClient";
+import type { ProbeMeasurement } from "./vpn/multipath/wire";
+import { bestGameRoute, measureGameDataRoute, GAME_PROBE_PORT, GAME_DATA_PROBE_PORT, GAME_DIRECT_PORT, gameTag } from "./vpn/gameRoutes";
 import {
   allowedFromFamily,
   createReplyKey,
@@ -138,6 +144,8 @@ const DEFAULT_SETTINGS: AppSettings = {
   gameProcesses: [],
   gameRouteId: null,
   gameMultipath: false,
+  gameProtection: true,
+  gameRegionTelemetry: false,
   routingMode: "global",
   automaticServer: true,
   autoReconnect: true,
@@ -164,7 +172,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   sleepAtHome: true,
 };
 
-const SETTINGS_SCHEMA_VERSION = 2;
+const SETTINGS_SCHEMA_VERSION = 3;
 
 type PersistedSettings = Partial<AppSettings> & {
   settingsSchemaVersion?: number;
@@ -176,6 +184,17 @@ export class AppController extends EventEmitter<AppControllerEvents> {
   private gameProbePromise: Promise<void> | null = null;
   private gameMonitor: ReturnType<typeof setInterval> | null = null;
   private gameValidatedAt = 0;
+  private gamePlaying = false;
+  private currentGameId = "custom";
+  private gameProcessCheckAt = 0;
+  private gameProcessCheckRunning = false;
+  private gameLastHistoryKey: string | null = null;
+  private gameLastRegionReportAt = 0;
+  private readonly gameHistory = new GameHistory(join(app.getPath("userData"), "game-history.json"));
+  private readonly gameRegionTelemetry = new TelemetryClient();
+  private pendingGameProfile: PreparedTunnelProfile | null = null;
+  private applyingPendingGameProfile = false;
+  private enforcingGameExpiry = false;
   private readonly secureStore = new SecureStore();
   private readonly xray = new XrayManager();
   private readonly dnsLeakProtection = new DnsLeakProtection(this.secureStore);
@@ -342,6 +361,8 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     this.accessToken = await this.loadString("access_token");
     this.state.sessionAvailable = this.accessToken !== null;
     this.state.settings = await this.loadSettings();
+    await this.gameHistory.load();
+    if (process.platform === "win32") void discoverInstalledGames().then((installedGames) => this.updateGame({ installedGames })).catch(() => {});
     await this.loadSyncState();
     await this.notices.load();
     this.remoteStored = await this.remoteConfigStore.load();
@@ -365,13 +386,15 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     }, 60_000);
     this.profile = await this.loadProfile();
     if (this.profile) {
+      await this.migrateGamePreference(this.profile);
       // Keep the Game switch reachable during an API outage so the user can
       // disable it and connect with the ordinary cached profile. Connecting
       // with Game still requires a fresh server-side profile below.
       const cachedGame = this.profile.game;
       this.updateGame({ available: cachedGame?.enabled === true && this.state.sessionAvailable
         && (!this.profile.subscriptionExpiresAt || Date.parse(this.profile.subscriptionExpiresAt) > Date.now()),
-        routes: (cachedGame?.servers ?? []).map(({ id, name, countryCode }) => ({ id, name, countryCode })),
+        nodes: (cachedGame?.nodes ?? []).map(({ nodeId, name, countryCode, state }) => ({ nodeId, name, countryCode, state })),
+        routes: (cachedGame?.servers ?? []).map((server) => ({ id: server.id, name: server.name, countryCode: server.countryCode, ...(server.nodeId ? { nodeId: server.nodeId } : {}) })),
       });
       this.state.servers = this.profile.servers;
       this.state.selectedSubscriptionId = this.profile.subscriptionId;
@@ -652,12 +675,15 @@ export class AppController extends EventEmitter<AppControllerEvents> {
   async updateSettings(patch: Partial<AppSettings>, origin: "user" | "sync" = "user"): Promise<void> {
     const previous = this.state.settings;
     const next = validateSettings({ ...previous, ...patch });
-    if (next.gameEnabled && (patch.gameEnabled === true || patch.gameMultipath === true || patch.gameIds || patch.gameProcesses || patch.gameRouteId)) {
+    if (next.gameEnabled && (patch.gameEnabled === true || patch.gameProtection === true || patch.gameIds || patch.gameProcesses || patch.gameRouteId)) {
       if (!this.profile?.game?.enabled || !this.state.game?.available) throw new Error("Game Squad недоступен для выбранной подписки");
       if (!gameProcesses(next).length) throw new Error("Сначала выберите игру");
-      if (next.gameRouteId && !this.profile.game.servers.some((server) => server.id === next.gameRouteId)) throw new Error("Игровой маршрут недоступен");
+      if (next.gameRouteId && !this.profile.game.servers.some((server) => server.id === next.gameRouteId || server.nodeId === next.gameRouteId)) throw new Error("Игровой узел недоступен");
+      if (patch.gameRouteId && this.profile.game.nodes?.some((node) => node.nodeId === next.gameRouteId && node.state !== "enabled")) throw new Error("Игровой узел на обслуживании. Выберите другой выход.");
     }
-    const reconnect = this.connectionRequested() && affectsTunnel(previous, next);
+    const gameRulesChanged = gameProcesses(previous).join("\0") !== gameProcesses(next).join("\0");
+    const hotGameRules = previous.gameEnabled === true && next.gameEnabled === true && this.state.status === "connected" && !this.state.busy;
+    let reconnect = this.connectionRequested() && (affectsTunnel(previous, next) || (gameRulesChanged && !hotGameRules));
     const generation = this.connectionGeneration;
     this.state.settings = next;
     await this.secureStore.put("settings", Buffer.from(JSON.stringify(serializeSettings(next))));
@@ -673,6 +699,19 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     if (!previous.automaticServer && next.automaticServer) void this.pingServers();
     if (previous.killSwitch && !next.killSwitch) await this.killSwitch.disable();
     if (previous.preventDnsLeaks && !next.preventDnsLeaks) await this.dnsLeakProtection.disable();
+    if (!reconnect && hotGameRules && gameRulesChanged && generation === this.connectionGeneration) {
+      try { await this.xray.updateGameProcesses(next); }
+      catch {
+        this.updateGame({ message: "Ядро не применило новые игровые правила. Переподключаем VPN, чтобы добавить выбранные игры." });
+        reconnect = true;
+      }
+    }
+    if (!reconnect && hotGameRules && generation === this.connectionGeneration) {
+      const preference = next.gameRouteId;
+      this.xray.updateGameOptions({ protection: next.gameProtection !== false,
+        preferredExitId: this.profile?.game?.servers.find((server) => server.id === preference)?.nodeId ?? preference ?? null,
+        exitScope: gameExitScope(next) });
+    }
     if (reconnect && generation === this.connectionGeneration) {
       await this.stopTunnelForReplacement();
       if (generation + 1 === this.connectionGeneration) await this.connect();
@@ -725,7 +764,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     return this.pingPromise;
   }
 
-  async measureGameRoutes(): Promise<void> {
+  async measureGameRoutes(forGameStart = false): Promise<void> {
     if (this.gameProbePromise) return this.gameProbePromise;
     const profile = this.profile;
     const game = this.state.game;
@@ -740,32 +779,32 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     this.updateGame({ phase: "probing", message: null });
     this.gameProbePromise = (async () => {
       const quality: NonNullable<AppSnapshot["game"]>["quality"] = {};
-      // Bound CPU/socket load even if the squad grows.
-      let next = 0;
-      await Promise.all(Array.from({ length: Math.min(4, servers.length) }, async () => {
-        while (next < servers.length && current()) {
-          const index = next++;
-          const server = servers[index]!;
-          quality[server.id] = await measureGameRoute(GAME_PROBE_PORT + index, password, abort.signal);
-        }
-      }));
+      this.xray.refreshGameMeasurements();
+      const measuredRoutes = this.xray.gameRouteQualities;
+      servers.forEach((server, index) => {
+        const measured = measuredRoutes[index];
+        if (measured) quality[server.id] = measured;
+      });
       if (!current()) return;
-      const best = bestGameRoute(servers, quality);
+      const enabled = servers.filter((server) => !profile.game?.nodes?.some((node) => node.nodeId === server.nodeId && node.state !== "enabled"));
+      const best = bestGameRoute(enabled, quality);
       const activeId = this.state.game?.activeRouteId;
-      // Keep the current game route for the whole connection. A scan is never a
-      // reason to change the public address of an ongoing match.
-      const selected = activeId ? servers.find((server) => server.id === activeId)
-        : this.state.settings.gameRouteId ? servers.find((server) => server.id === this.state.settings.gameRouteId) : best;
+      // Ordinary scans keep the TCP exit. A newly observed game can select it
+      // again only before UDP flows have pinned that process session's exit.
+      const selectAtStart = forGameStart && (this.xray.gameRuntimeSnapshot?.activeFlowCount ?? 0) === 0;
+      const pinnedId = selectAtStart ? null : activeId;
+      const historyId = this.gameHistory.preferredExit(this.currentGameId);
+      const selected = pinnedId ? servers.find((server) => server.id === pinnedId)
+        : this.state.settings.gameRouteId ? enabled.find((server) => server.id === this.state.settings.gameRouteId || server.nodeId === this.state.settings.gameRouteId)
+        : enabled.find((server) => server.nodeId === historyId && quality[server.id]?.latencyMs != null && (quality[server.id]?.lossPercent ?? 100) <= 25) ?? best;
       const measured = selected ? quality[selected.id] : null;
       const healthy = measured?.latencyMs !== null && measured?.latencyMs !== undefined && measured.lossPercent <= 25;
-      if (!activeId && selected && healthy) {
+      if ((!activeId || selectAtStart) && selected && healthy) {
         await this.xray.selectGameRoute(servers.indexOf(selected));
         if (!current()) return;
       }
-      const history = Object.fromEntries(servers.map((server) => [server.id,
-        [...(this.state.game?.history?.[server.id] ?? []), quality[server.id]!].slice(-60)]));
-      this.updateGame({ quality, history, recommendedRouteId: best?.id ?? null,
-        activeRouteId: activeId ?? (healthy ? selected?.id ?? null : null),
+      this.updateGame({ quality, recommendedRouteId: best?.id ?? null,
+        activeRouteId: pinnedId ?? (healthy ? selected?.id ?? null : null),
         phase: healthy ? "ready" : "degraded",
         message: healthy ? null : activeId
           ? "Игровой маршрут нестабилен. Завершите матч и переподключите VPN для повторного выбора."
@@ -784,11 +823,22 @@ export class AppController extends EventEmitter<AppControllerEvents> {
       recommendedRouteId: null, phase: "idle", message: null, ...this.state.game, ...patch } });
   }
 
+  private async migrateGamePreference(profile: PreparedTunnelProfile): Promise<void> {
+    const previous = this.state.settings.gameRouteId;
+    const nodeId = profile.game?.servers.find((server) => server.id === previous)?.nodeId;
+    if (nodeId && nodeId !== previous) {
+      this.state.settings = { ...this.state.settings, gameRouteId: nodeId };
+      await this.secureStore.put("settings", Buffer.from(JSON.stringify(serializeSettings(this.state.settings))));
+    }
+  }
+
   private cancelGameProbes(): void {
     this.gameProbeAbort?.abort();
     this.gameProbeAbort = null;
     this.gameProbePromise = null;
-    if (this.state.game) this.updateGame({ activeRouteId: null, phase: "idle", message: null, history: {}, multipath: null });
+    this.gameLastHistoryKey = null;
+    this.pendingGameProfile = null;
+    if (this.state.game) this.updateGame({ activeRouteId: null, phase: "idle", message: null, multipath: null, runtime: null });
   }
 
   async revokeDevice(subscriptionId: string, deviceId: string): Promise<void> {
@@ -961,34 +1011,68 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     const plaintext = decryptTunnelProfile(this.identity, response.profile);
     try {
       const profile = prepareTunnelProfile(plaintext, subscriptionId);
-      const oldGame = JSON.stringify(this.profile?.game ?? null);
-      const replacingGame = this.connectionRequested() && this.state.settings.gameEnabled
-        && oldGame !== JSON.stringify(profile.game ?? null);
-      if (replacingGame) await this.stopTunnelForReplacement();
-      this.profile = profile;
-      this.gameValidatedAt = Date.now();
-      const routeRemoved = this.state.settings.gameRouteId && !profile.game?.servers.some((server) => server.id === this.state.settings.gameRouteId);
-      if ((!profile.game?.enabled && this.state.settings.gameEnabled) || routeRemoved) {
-        this.state.settings = { ...this.state.settings, gameEnabled: profile.game?.enabled === true && this.state.settings.gameEnabled === true, gameRouteId: null };
-        await this.secureStore.put("settings", Buffer.from(JSON.stringify(serializeSettings(this.state.settings))));
-      }
-      this.updateGame({ available: profile.game?.enabled === true,
-        routes: (profile.game?.servers ?? []).map(({ id, name, countryCode }) => ({ id, name, countryCode })),
-        ...(oldGame !== JSON.stringify(profile.game ?? null) ? { quality: {}, activeRouteId: null, recommendedRouteId: null, phase: "idle" as const } : {}),
-      });
-      const selected = this.state.selectedServerId;
-      const serverId = profile.servers.some((item) => item.id === selected)
-        ? selected
-        : this.bestServer(profile.servers)?.id ?? null;
-      await this.secureStore.put("tunnel_profile", Buffer.from(JSON.stringify(profile)));
-      if (serverId) await this.secureStore.put("selected_server", Buffer.from(serverId));
-      this.patch({ servers: profile.servers, serverLatencies: {}, selectedServerId: serverId, selectedSubscriptionId: subscriptionId });
-      await this.reconcileFavorites();
-      void this.pingServers();
-      if (replacingGame) await this.connect();
+      await this.applyTunnelProfile(profile);
     } finally {
       plaintext.fill(0);
     }
+  }
+
+  private async applyTunnelProfile(profile: PreparedTunnelProfile): Promise<void> {
+    if (profile.game?.enabled && profile.subscriptionExpiresAt && !(Date.parse(profile.subscriptionExpiresAt) > Date.now())) {
+      profile = { ...profile, game: { ...profile.game, enabled: false } };
+    }
+    const oldGame = JSON.stringify(this.profile?.game ?? null);
+    const gameTransportChanged = this.profile?.game?.enabled !== profile.game?.enabled
+      || !sameServers(this.profile?.game?.servers ?? [], profile.game?.servers ?? [])
+      || (this.profile?.game?.servers ?? []).some((server, index) => server.nodeId !== profile.game?.servers[index]?.nodeId);
+    const runtime = this.xray.gameRuntimeSnapshot;
+    if (gameTransportChanged && this.state.settings.gameEnabled && this.connectionRequested()
+      && profile.game?.enabled && this.profile?.subscriptionId === profile.subscriptionId
+      && (!profile.subscriptionExpiresAt || Date.parse(profile.subscriptionExpiresAt) > Date.now())
+      && ((runtime?.activeFlowCount ?? 0) > 0 || runtime?.currentMatch || !this.xray.pauseNewGameFlowsIfIdle())) {
+      this.pendingGameProfile = profile;
+      this.gameValidatedAt = Date.now();
+      const nodes = profile.game.nodes ?? [];
+      const liveNodes = [...nodes, ...(this.profile.game?.nodes ?? []).filter((old) => !nodes.some((node) => node.nodeId === old.nodeId))
+        .map((old) => ({ ...old, state: "draining" as const }))];
+      if (this.profile.game) this.profile = { ...this.profile, subscriptionExpiresAt: profile.subscriptionExpiresAt,
+        game: { ...this.profile.game, nodes: liveNodes } };
+      this.xray.updateGameOptions({ nodes: liveNodes });
+      await this.secureStore.put("tunnel_profile", Buffer.from(JSON.stringify(profile)));
+      this.updateGame({ nodes: liveNodes.map(({ nodeId, name, countryCode, state }) => ({ nodeId, name, countryCode, state })),
+        message: "Список игровых узлов обновлён. Новые подключения подготовятся после завершения текущих игровых потоков." });
+      return;
+    }
+    this.pendingGameProfile = null;
+    const replacingGame = this.connectionRequested() && this.state.settings.gameEnabled
+      && gameTransportChanged;
+    if (replacingGame) await this.stopTunnelForReplacement();
+    this.profile = profile;
+    this.gameValidatedAt = Date.now();
+    await this.migrateGamePreference(profile);
+    if (!replacingGame && this.state.settings.gameEnabled && this.xray.isRunning() && oldGame !== JSON.stringify(profile.game ?? null)) {
+      this.xray.updateGameOptions({ nodes: profile.game?.nodes ?? [] });
+    }
+    const routeRemoved = this.state.settings.gameRouteId && !profile.game?.servers.some((server) => server.id === this.state.settings.gameRouteId || server.nodeId === this.state.settings.gameRouteId);
+    if ((!profile.game?.enabled && this.state.settings.gameEnabled) || routeRemoved) {
+      this.state.settings = { ...this.state.settings, gameEnabled: profile.game?.enabled === true && this.state.settings.gameEnabled === true, gameRouteId: null };
+      await this.secureStore.put("settings", Buffer.from(JSON.stringify(serializeSettings(this.state.settings))));
+    }
+    this.updateGame({ available: profile.game?.enabled === true,
+      nodes: (profile.game?.nodes ?? []).map(({ nodeId, name, countryCode, state }) => ({ nodeId, name, countryCode, state })),
+      routes: (profile.game?.servers ?? []).map((server) => ({ id: server.id, name: server.name, countryCode: server.countryCode, ...(server.nodeId ? { nodeId: server.nodeId } : {}) })),
+      ...(gameTransportChanged ? { quality: {}, activeRouteId: null, recommendedRouteId: null, phase: "idle" as const } : {}),
+    });
+    const selected = this.state.selectedServerId;
+    const serverId = profile.servers.some((item) => item.id === selected)
+      ? selected
+      : this.bestServer(profile.servers)?.id ?? null;
+    await this.secureStore.put("tunnel_profile", Buffer.from(JSON.stringify(profile)));
+    if (serverId) await this.secureStore.put("selected_server", Buffer.from(serverId));
+    this.patch({ servers: profile.servers, serverLatencies: {}, selectedServerId: serverId, selectedSubscriptionId: profile.subscriptionId });
+    await this.reconcileFavorites();
+    void this.pingServers();
+    if (replacingGame) await this.connect();
   }
 
   private async backgroundTick(): Promise<void> {
@@ -1698,7 +1782,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     if (!raw) return DEFAULT_SETTINGS;
     try {
       const persisted = JSON.parse(raw.toString("utf8")) as PersistedSettings;
-      const migrated = persisted.settingsSchemaVersion === SETTINGS_SCHEMA_VERSION
+      const migrated = persisted.settingsSchemaVersion === SETTINGS_SCHEMA_VERSION || persisted.settingsSchemaVersion === 2
         ? persisted
         : { ...persisted, routingMode: "global" as const };
       const settings = validateSettings({ ...DEFAULT_SETTINGS, ...migrated });
@@ -1945,7 +2029,50 @@ export class AppController extends EventEmitter<AppControllerEvents> {
   }
 
   private handleTrafficStats(downloadBytes: number, uploadBytes: number): void {
-    if (this.state.settings.gameEnabled && this.state.settings.gameMultipath) this.updateGame({ multipath: this.xray.gameMultipathStats });
+    if (this.state.settings.gameEnabled && this.profile?.subscriptionExpiresAt
+      && !(Date.parse(this.profile.subscriptionExpiresAt) > Date.now()) && !this.enforcingGameExpiry) {
+      this.enforcingGameExpiry = true;
+      this.updateGame({ available: false, message: "Срок игрового доступа истёк. Game отключается." });
+      void this.updateSettings({ gameEnabled: false }, "sync").catch(async () => {
+        await this.xray.stop().catch(() => {});
+        this.patch({ status: "error", statusDetail: "Игровой доступ истёк. Обновите подписку и подключите VPN снова." });
+      }).finally(() => { this.enforcingGameExpiry = false; });
+    }
+    if (this.state.settings.gameEnabled) {
+      const runtime = this.xray.gameRuntimeSnapshot;
+      const routeQualities = this.xray.gameRouteQualities;
+      const quality = Object.fromEntries((this.profile?.game?.servers ?? []).flatMap((server, index) => {
+        const measured = routeQualities?.[index]; return measured ? [[server.id, measured]] : [];
+      }));
+      if (this.pendingGameProfile && !this.applyingPendingGameProfile && !this.state.busy
+        && (runtime?.activeFlowCount ?? 0) === 0 && !runtime?.currentMatch && this.xray.pauseNewGameFlowsIfIdle()) {
+        const pending = this.pendingGameProfile; this.pendingGameProfile = null;
+        this.applyingPendingGameProfile = true;
+        void this.applyTunnelProfile(pending).catch(() => {
+          this.xray.resumeNewGameFlows();
+          this.updateGame({ message: "Не удалось применить обновлённый список игровых узлов. Переподключите VPN." });
+        }).finally(() => { this.applyingPendingGameProfile = false; });
+      }
+      this.updateGame({ multipath: this.xray.gameMultipathStats, runtime: runtime ?? null, quality });
+      void this.checkPlayingGames();
+      if (runtime?.currentMatch && runtime.selectedExitId) {
+        const gameId = runtime.gameId ?? this.currentGameId;
+        const bestExitId = runtime.shadowAlternative?.nodeId ?? runtime.selectedExitId;
+        const comparison = runtime.exits.find((exit) => exit.nodeId === bestExitId);
+        const key = `${gameId}:${runtime.currentMatch.address}:${bestExitId}`;
+        if (comparison && comparison.confidence !== "access" && comparison.confidence !== "unavailable" && key !== this.gameLastHistoryKey) {
+          this.gameLastHistoryKey = key;
+          void this.gameHistory.record(gameId, runtime.currentMatch.address, runtime.currentMatch.region, bestExitId).catch(() => {});
+        }
+      }
+      const report = runtime?.matchReport;
+      const region = runtime?.lastMatch?.region;
+      if (app.isPackaged && this.state.settings.gameRegionTelemetry === true && report && report.endedAt > this.gameLastRegionReportAt
+        && region && /^[A-Z]{2}$/.test(region)) {
+        this.gameLastRegionReportAt = report.endedAt;
+        void this.gameRegionTelemetry.sendGameRegions([{ region, matches: 1 }]);
+      }
+    }
     if (downloadBytes < this.lastRawDownload) this.trafficDownloadOffset += this.lastRawDownload;
     if (uploadBytes < this.lastRawUpload) this.trafficUploadOffset += this.lastRawUpload;
     this.lastRawDownload = downloadBytes;
@@ -1969,47 +2096,92 @@ export class AppController extends EventEmitter<AppControllerEvents> {
       this.assertCurrentConnection(generation);
       if (this.state.settings.gameEnabled) {
         this.cancelGameProbes();
-        await this.measureGameRoutes();
         this.assertCurrentConnection(generation);
-        if (this.state.settings.gameMultipath && this.gamePassword) {
+        if (this.gamePassword) {
           const quality = this.state.game?.quality ?? {};
           const candidates = (this.profile?.game?.servers ?? []).map((server, index) => ({ server, index }))
             .filter(({ server }) => ["hysteria", "tuic", "vless"].includes(String(server.outbound.protocol)))
             .sort((a, b) => (quality[a.server.id]?.latencyMs ?? Infinity) - (quality[b.server.id]?.latencyMs ?? Infinity))
-            .map(({ index }) => ({ index, port: GAME_PROBE_PORT + index }));
+            .map(({ server, index }) => ({ index, port: GAME_PROBE_PORT + index, ...(server.nodeId ? { nodeId: server.nodeId } : {}) }));
           try {
-            await this.xray.connectGameMultipath(candidates, this.gamePassword);
+            const ids = this.state.settings.gameIds ?? [];
+            const gameId = ids.length === 1 && !this.state.settings.gameProcesses?.length ? ids[0]! : "custom";
+            this.currentGameId = gameId;
+            const preference = this.state.settings.gameRouteId;
+            const preferredExitId = this.profile?.game?.servers.find((server) => server.id === preference)?.nodeId ?? preference ?? null;
+            const source = physicalGameSourceAddress(this.xray.outboundInterfaceName);
+            await this.xray.connectGameMultipath(candidates, this.gamePassword, {
+              nodes: this.profile?.game?.nodes ?? [], preferredExitId, protection: this.state.settings.gameProtection !== false,
+              gameId, exitScope: gameExitScope(this.state.settings), history: this.gameHistory.snapshot(gameId),
+              directSocksPort: GAME_DIRECT_PORT,
+              ...(source ? { measureDirect: async (targets, signal): Promise<ProbeMeasurement[]> =>
+                (await measureDirectGameTargets(targets, source, signal)).map(({ address, port, quality: measurement }) => ({
+                  address, port, medianMs: measurement.latencyMs, p95Ms: measurement.p95Ms, jitterMs: measurement.jitterMs,
+                  lossPercent: measurement.lossPercent, method: measurement.method === "unknown" ? "unavailable" : measurement.method === "echo" ? "icmp" : measurement.method,
+                  sampleCount: measurement.samples, measuredAt: new Date(measurement.measuredAt).toISOString(),
+                })) } : {}),
+            });
             this.assertCurrentConnection(generation);
             const dataAbort = new AbortController();
             this.gameProbeAbort = dataAbort;
-            const dataCheck = await measureGameRoute(GAME_DATA_PROBE_PORT, this.gamePassword,
+            const dataCheck = await measureGameDataRoute(GAME_DATA_PROBE_PORT, this.gamePassword,
               AbortSignal.any([dataAbort.signal, AbortSignal.timeout(12_000)]), 1200).finally(() => {
                 if (this.gameProbeAbort === dataAbort) this.gameProbeAbort = null;
               });
             this.assertCurrentConnection(generation);
             if (dataCheck.latencyMs === null || dataCheck.lossPercent > 25) throw new Error("Game UDP validation failed");
-            const primary = this.xray.gameMultipathStats?.paths.filter((path) => path.responding)
-              .sort((a, b) => (a.latencyMs ?? Infinity) - (b.latencyMs ?? Infinity))[0];
+            const healthy = (this.profile?.game?.servers ?? []).flatMap((server, routeIndex) => {
+              const measured = this.xray.gameRouteQualities[routeIndex];
+              return measured?.latencyMs != null && measured.lossPercent <= 25
+                && !this.profile?.game?.nodes?.some((node) => node.nodeId === server.nodeId && node.state !== "enabled")
+                ? [{ routeIndex, latencyMs: measured.latencyMs }] : [];
+            }).sort((a, b) => a.latencyMs - b.latencyMs);
+            const tcpPreference = preferredExitId ?? this.gameHistory.preferredExit(gameId);
+            const primary = healthy.find((path) => this.profile?.game?.servers[path.routeIndex]?.nodeId === tcpPreference) ?? healthy[0];
             if (!primary) throw new Error("No Game path");
             await this.xray.selectGameRoute(primary.routeIndex);
             await this.xray.selectGameUdpRoute(null);
             this.updateGame({ activeRouteId: this.profile?.game?.servers[primary.routeIndex]?.id ?? null, phase: "ready", message: null });
           } catch {
             this.assertCurrentConnection(generation);
-            const fallback = this.profile?.game?.servers.findIndex((server) => server.id === this.state.game?.activeRouteId) ?? -1;
-            if (fallback >= 0) {
-              await this.xray.selectGameUdpRoute(fallback);
-              this.updateGame({ message: "Multipath не запустился. Игра работает через основной игровой туннель; повторная попытка — при следующем подключении." });
-            } else this.updateGame({ phase: "degraded", message: "Игровые маршруты недоступны. Переподключите VPN." });
+            // No bypass around the flow observer: otherwise an ongoing match
+            // could silently move to a different exit after a later retry.
+            this.updateGame({ phase: "degraded", message: "Игровой UDP не прошёл проверку. Завершите матч и переподключите VPN; обычный VPN работает." });
           }
           this.assertCurrentConnection(generation);
-          this.updateGame({ multipath: this.xray.gameMultipathStats });
+          this.updateGame({ multipath: this.xray.gameMultipathStats, runtime: this.xray.gameRuntimeSnapshot ?? null });
+          void this.checkPlayingGames(true);
         }
       }
     } catch (error) {
       await this.xray.stop();
       throw error;
     }
+  }
+
+  private async checkPlayingGames(force = false): Promise<void> {
+    if (process.platform !== "win32" || this.gameProcessCheckRunning || (!force && Date.now() - this.gameProcessCheckAt < 15_000)) return;
+    this.gameProcessCheckAt = Date.now(); this.gameProcessCheckRunning = true;
+    const generation = this.connectionGeneration;
+    try {
+      const selected = new Set(gameProcesses(this.state.settings).map((name) => name.toLowerCase()));
+      const processes = await listWindowsProcesses();
+      if (generation !== this.connectionGeneration || !this.state.settings.gameEnabled) return;
+      const playing = processes.some((entry) => entry.running && selected.has(entry.name.toLowerCase()));
+      const runningNames = new Set(processes.filter((entry) => entry.running).map((entry) => entry.name.toLowerCase()));
+      const activeGames = GAMES.filter((game) => this.state.settings.gameIds?.includes(game.id)
+        && game.processes.some((name) => runningNames.has(name.toLowerCase())));
+      const customRunning = this.state.settings.gameProcesses?.some((name) => runningNames.has(name.toLowerCase()));
+      const gameId = activeGames.length === 1 && !customRunning ? activeGames[0]!.id : "custom";
+      if (gameId !== this.currentGameId) {
+        this.currentGameId = gameId;
+        this.xray.updateGameOptions({ gameId, history: this.gameHistory.snapshot(gameId) });
+      }
+      this.xray.setGamePlaying(playing);
+      if (playing && !this.gamePlaying) void this.measureGameRoutes(true);
+      this.gamePlaying = playing;
+    } catch { /* Process list may be unavailable; traffic observation still works. */ }
+    finally { this.gameProcessCheckRunning = false; }
   }
 
   private startKillSwitchHealthMonitor(): void {
@@ -2326,8 +2498,10 @@ function validateSettings(value: AppSettings): AppSettings {
     gameEnabled: value.gameEnabled === true,
     gameIds: normalizeGameIds(value.gameIds),
     gameProcesses: normalizeProcessSelection(value.gameProcesses).slice(0, 32),
-    gameRouteId: typeof value.gameRouteId === "string" && /^[a-f0-9]{64}$/.test(value.gameRouteId) ? value.gameRouteId : null,
+    gameRouteId: typeof value.gameRouteId === "string" && /^[A-Za-z0-9_-]{1,64}$/.test(value.gameRouteId) ? value.gameRouteId : null,
     gameMultipath: value.gameMultipath === true,
+    gameProtection: value.gameProtection !== false,
+    gameRegionTelemetry: value.gameRegionTelemetry === true,
     automaticServer: Boolean(value.automaticServer),
     autoReconnect: Boolean(value.autoReconnect),
     killSwitch: Boolean(value.killSwitch),
@@ -2356,7 +2530,7 @@ function validateSettings(value: AppSettings): AppSettings {
 }
 
 function affectsTunnel(before: AppSettings, after: AppSettings): boolean {
-  if (before.gameEnabled !== after.gameEnabled || (after.gameEnabled && (before.gameMultipath !== after.gameMultipath || gameProcesses(before).join("\0") !== gameProcesses(after).join("\0")))) return true;
+  if (before.gameEnabled !== after.gameEnabled) return true;
   return before.routingMode !== after.routingMode || before.killSwitch !== after.killSwitch || before.useDoh !== after.useDoh || before.dnsServer !== after.dnsServer || before.preventDnsLeaks !== after.preventDnsLeaks || before.antiDpiEnabled !== after.antiDpiEnabled || before.antiDpiPackets !== after.antiDpiPackets || before.antiDpiLength !== after.antiDpiLength || before.antiDpiInterval !== after.antiDpiInterval || before.splitTunnelMode !== after.splitTunnelMode || before.splitTunnelProcesses.join("\0") !== after.splitTunnelProcesses.join("\0");
 }
 

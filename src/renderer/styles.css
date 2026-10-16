@@ -494,6 +494,21 @@ select option { color: var(--text); background-color: var(--select-bg); }
 .game-route-row > span { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
 .game-footnote { font-size: 11px; line-height: 1.7; color: var(--muted); margin: 18px 0 0; }
 .game-mode { margin-top: 20px; }
+.game-consent { display: flex; align-items: flex-start; gap: 12px; margin-top: 20px; color: var(--text); font-size: 13px; line-height: 1.6; cursor: pointer; }
+.game-consent input { flex: 0 0 18px; width: 18px; height: 18px; margin-top: 2px; accent-color: var(--blue); }
+.game-consent input:focus-visible { outline: 2px solid var(--blue-bright); outline-offset: 4px; }
+.game-consent small { display: block; color: var(--muted); font-size: 11px; }
+.game-hero .game-selection { margin-top: 10px; }
+.game-shadow, .game-upload-notice { padding: 12px; background: color-mix(in srgb, var(--blue) 9%, var(--surface)); color: var(--text); border-radius: 8px; font-size: 12px; line-height: 1.6; }
+.game-mesh { margin-top: 22px; overflow-x: auto; }
+.game-mesh h3 { font-size: 13px; }
+.game-mesh table { width: 100%; border-collapse: collapse; font-size: 11px; text-align: left; }
+.game-mesh caption { color: var(--muted); text-align: left; font-size: 10px; padding-bottom: 10px; }
+.game-mesh th, .game-mesh td { padding: 10px 8px; border-bottom: 1px solid var(--border); }
+.game-mesh tbody th { font-weight: 500; }
+.game-attribution-link { padding: 0; color: var(--blue-bright); background: none; border: 0; text-decoration: underline; font: inherit; cursor: pointer; }
+.game-attribution-link:focus-visible { outline: 2px solid var(--blue-bright); outline-offset: 3px; }
+.game-metrics strong { font-size: clamp(18px, 2.6vw, 30px); }
 .game-insights { margin-top: 18px; padding: 24px; overflow: hidden; }
 .game-live-label { padding: 6px 10px; border: 1px solid var(--border); border-radius: 20px; color: var(--muted); font-size: 10px; white-space: nowrap; }
 .game-flow { display: grid; grid-template-columns: 85px 1fr; gap: 24px; align-items: center; margin: 24px 0; }
