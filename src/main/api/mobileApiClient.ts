@@ -101,8 +101,9 @@ export class MobileApiClient {
     return this.request("GET", "/api/mobile/v1/road/exit", null, accessToken);
   }
 
-  setRoadExit(accessToken: string, enabled: boolean): Promise<RoadExitResponse> {
-    return this.request("POST", "/api/mobile/v1/road/exit", { enabled }, accessToken);
+  /** On with this computer's public exit key; off without one. */
+  setRoadExit(accessToken: string, key: string | null): Promise<RoadExitResponse> {
+    return this.request("POST", "/api/mobile/v1/road/exit", key ? { enabled: true, key } : { enabled: false }, accessToken);
   }
 
   async logout(accessToken: string): Promise<void> {

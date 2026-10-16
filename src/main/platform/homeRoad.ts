@@ -1,4 +1,5 @@
 import { spawn, type ChildProcess } from "node:child_process";
+import { createPrivateKey, createPublicKey, generateKeyPairSync } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { connect as netConnect, createServer, type Socket } from "node:net";
 import { networkInterfaces } from "node:os";
@@ -10,8 +11,9 @@ import type { RoadExitStatus, RoadMode } from "../../shared/contracts";
  * exit of the account. A second, local-only Xray accepts the VLESS streams of
  * the devices the owner allowed; the connector keeps a control WebSocket to
  * the Levik relay and, for each device connection the relay announces, opens
- * a data WebSocket and joins it to that Xray. The relay only joins the two
- * WebSockets; it does not look into the streams.
+ * a data WebSocket and joins it to that Xray. The devices encrypt the streams
+ * to this computer's key (VLESS Encryption, ML-KEM-768 and X25519): the relay
+ * joins two WebSockets it cannot read, the website knows the public key only.
  */
 
 export interface RoadExitConfig {
@@ -20,14 +22,26 @@ export interface RoadExitConfig {
   mode: RoadMode;
   lanAccess: boolean;
   vlessUuid: string;
+  /** The public key the website hands to the devices; null until this computer reported one. */
+  key: string | null;
   /** wss://…/road/x/<token>; data connections append "/<id>". */
   controlUrl: string;
   expiresAt: string;
 }
 
+/** The exit's X25519 key pair, base64url: the private half stays on this computer. */
+export interface RoadKey {
+  privateKey: string;
+  publicKey: string;
+}
+
 const EXIT_ID = /^[A-Za-z0-9_-]{22}$/;
 const STREAM_ID = /^[A-Za-z0-9_-]{8,64}$/;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+/** 32 bytes in base64url without padding. */
+const KEY = /^[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048]$/;
+/** PKCS#8 prefix of a raw X25519 private key. */
+const X25519_PKCS8 = Buffer.from("302e020100300506032b656e04220420", "hex");
 const MAX_STREAMS = 512;
 /** A device stream waits this long for the local Xray. */
 const LOCAL_CONNECT_MS = 5_000;
@@ -38,12 +52,13 @@ const RETRY_DELAYS_MS = [2_000, 5_000, 15_000, 30_000, 60_000];
 export function parseRoadExit(value: unknown, websiteHosts?: ReadonlySet<string>): RoadExitConfig | null {
   if (!value || typeof value !== "object") return null;
   const item = value as Record<string, unknown>;
-  const { exitId, name, mode, lanAccess, vlessUuid, controlUrl, expiresAt } = item;
+  const { exitId, name, mode, lanAccess, vlessUuid, key, controlUrl, expiresAt } = item;
   if (typeof exitId !== "string" || !EXIT_ID.test(exitId)) return null;
   if (typeof name !== "string" || name.length < 1 || name.length > 60) return null;
   if (mode !== "direct" && mode !== "vpn") return null;
   if (typeof lanAccess !== "boolean") return null;
   if (typeof vlessUuid !== "string" || !UUID.test(vlessUuid)) return null;
+  if (key !== null && (typeof key !== "string" || !KEY.test(key))) return null;
   if (typeof expiresAt !== "string" || Number.isNaN(Date.parse(expiresAt))) return null;
   if (typeof controlUrl !== "string" || controlUrl.length > 2_048) return null;
   let url: URL;
@@ -55,7 +70,29 @@ export function parseRoadExit(value: unknown, websiteHosts?: ReadonlySet<string>
   if (url.protocol !== "wss:" || url.port || url.search || url.hash || url.username || url.password) return null;
   if (!/^\/road\/x\/[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(url.pathname)) return null;
   if (websiteHosts && !websiteHosts.has(url.hostname)) return null;
-  return { exitId, name, mode, lanAccess, vlessUuid: vlessUuid.toLowerCase(), controlUrl: url.toString(), expiresAt };
+  return { exitId, name, mode, lanAccess, vlessUuid: vlessUuid.toLowerCase(), key, controlUrl: url.toString(), expiresAt };
+}
+
+/** A new key pair for this computer's exit. */
+export function createRoadKey(): RoadKey {
+  const { privateKey } = generateKeyPairSync("x25519");
+  const { d, x } = privateKey.export({ format: "jwk" });
+  if (typeof d !== "string" || typeof x !== "string") throw new Error("X25519 недоступен");
+  return { privateKey: d, publicKey: x };
+}
+
+/** The key pair of a stored private key; null for anything that is not one. */
+export function roadKeyFrom(privateKey: string): RoadKey | null {
+  if (!KEY.test(privateKey)) return null;
+  try {
+    const key = createPrivateKey({
+      key: Buffer.concat([X25519_PKCS8, Buffer.from(privateKey, "base64url")]), format: "der", type: "pkcs8",
+    });
+    const { x } = createPublicKey(key).export({ format: "jwk" });
+    return typeof x === "string" ? { privateKey, publicKey: x } : null;
+  } catch {
+    return null;
+  }
 }
 
 /** Never reachable through the exit: the computer itself. */
@@ -67,12 +104,14 @@ const HOME_NETWORK = [
 ];
 
 /**
- * The exit's Xray: VLESS on 127.0.0.1 only, out through the home connection.
- * `direct` binds to the physical interface, past this computer's own VPN.
+ * The exit's Xray: VLESS on 127.0.0.1 only, decrypted with this computer's
+ * key, out through the home connection. `direct` binds to the physical
+ * interface, past this computer's own VPN.
  */
 export function exitXrayConfig(input: {
   port: number;
   vlessUuid: string;
+  privateKey: string;
   mode: RoadMode;
   lanAccess: boolean;
   physicalInterface: string | null;
@@ -81,7 +120,8 @@ export function exitXrayConfig(input: {
     ? { streamSettings: { sockopt: { interface: input.physicalInterface } } }
     : {};
   return {
-    log: { loglevel: "warning", access: "none" },
+    // Errors only: nothing about the devices' destinations reaches the app's log.
+    log: { loglevel: "error", access: "none" },
     // DoH through the exit's own outbound: the answers fit the way out.
     dns: { servers: ["https://1.1.1.1/dns-query", "https://8.8.8.8/dns-query"], queryStrategy: "UseIP" },
     inbounds: [
@@ -90,7 +130,7 @@ export function exitXrayConfig(input: {
         listen: "127.0.0.1",
         port: input.port,
         protocol: "vless",
-        settings: { clients: [{ id: input.vlessUuid }], decryption: "none" },
+        settings: { clients: [{ id: input.vlessUuid }], decryption: `mlkem768x25519plus.native.600s.${input.privateKey}` },
         sniffing: { enabled: true, destOverride: ["http", "tls", "quic"], routeOnly: true },
       },
     ],
@@ -327,6 +367,8 @@ export class HomeRoadExit extends EventEmitter<ExitEvents> {
       socket?: RoadSocketFactory;
       /** The interface the home connection leaves by; the platform may know better than the heuristic. */
       findInterface?: () => Promise<string | null>;
+      /** This computer's exit key; the website must hand its public half to the devices. */
+      roadKey: () => Promise<RoadKey>;
     },
   ) {
     super();
@@ -384,20 +426,29 @@ export class HomeRoadExit extends EventEmitter<ExitEvents> {
     }
     this.setStatus("starting");
     try {
+      const key = await this.options.roadKey();
+      // Devices with another key could not reach this exit: better off than half on.
+      if (config.key !== key.publicKey) throw new Error("Ключ выхода ещё не на сайте");
       const port = await freePort();
       const xrayConfig = exitXrayConfig({
-        port, vlessUuid: config.vlessUuid, mode: config.mode, lanAccess: config.lanAccess, physicalInterface: iface,
+        port, vlessUuid: config.vlessUuid, privateKey: key.privateKey,
+        mode: config.mode, lanAccess: config.lanAccess, physicalInterface: iface,
       });
-      // The config (with the exit's UUID) goes through stdin, never to disk.
+      // The config (with the exit's UUID and private key) goes through stdin, never to disk.
       const child = spawn(this.options.xrayPath(), ["run", "-format", "json", "-config", "stdin:"], {
         stdio: ["pipe", "ignore", "pipe"], windowsHide: true,
       });
       this.process = child;
       child.stdin?.on("error", () => {});
       child.stdin?.end(JSON.stringify(xrayConfig));
+      // Only why it stopped is logged: while it runs, nothing about the devices' traffic is kept.
+      let last: string[] = [];
       child.stderr?.setEncoding("utf8");
-      child.stderr?.on("data", (line: string) => this.options.log?.(`[home-road] ${line.trim().slice(0, 300)}`));
+      child.stderr?.on("data", (chunk: string) => {
+        last = [...last, ...chunk.split("\n").map((line) => line.trim()).filter(Boolean)].slice(-3);
+      });
       child.once("exit", (code) => {
+        for (const line of last) this.options.log?.(`[home-road] ${line.slice(0, 300)}`);
         if (this.process !== child) return;
         this.process = null;
         this.connector?.stop();

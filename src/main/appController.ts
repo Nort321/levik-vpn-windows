@@ -45,7 +45,7 @@ import { supportReportText } from "./diagnostics/supportReport";
 import type { AttemptCause, AttemptStage, EndBy, PowerState, SessionSettings, SessionTrigger } from "./telemetry/sessionRecorder";
 import { cabinetFallbackUrl, isAllowedExternalUrl, isHandoffUrl } from "./platform/links";
 import { serviceEndpoints, ServiceEndpointsStore, websiteHosts } from "./platform/serviceEndpoints";
-import { HomeRoadExit, isHomeRoadServer, parseRoadExit } from "./platform/homeRoad";
+import { createRoadKey, HomeRoadExit, isHomeRoadServer, parseRoadExit, roadKeyFrom, type RoadKey } from "./platform/homeRoad";
 import { findWindowsOutboundInterface } from "./windows/outboundInterface";
 import { DEFAULT_API_ORIGIN } from "./api/apiEndpoints";
 import { parseAccountNotices } from "./platform/accountNotices";
@@ -186,9 +186,11 @@ export class AppController extends EventEmitter<AppControllerEvents> {
   private readonly homeRoad = new HomeRoadExit({
     xrayPath: () => this.xray.executablePath(),
     log: (line) => this.diskLog?.write(line),
+    roadKey: () => this.homeRoadKey(),
     findInterface: async () => (await findWindowsOutboundInterface()).name,
   });
   private homeRoadAvailable = false;
+  private homeRoadKeyPair: Promise<RoadKey> | null = null;
   private homeRoadChain: Promise<void> = Promise.resolve();
   private lastHomeRoadAt = 0;
   private readonly updater: AppUpdater | null;
@@ -1083,7 +1085,8 @@ export class AppController extends EventEmitter<AppControllerEvents> {
   /** «Пускать ко мне домой», docs/app-platform.md "Home road". */
   async setHomeRoad(enabled: boolean): Promise<void> {
     const task = this.homeRoadChain.then(async () => {
-      const response = await this.withSession((token) => this.api.setRoadExit(token, enabled));
+      const key = enabled ? (await this.homeRoadKey()).publicKey : null;
+      const response = await this.withSession((token) => this.api.setRoadExit(token, key));
       await this.applyHomeRoad(response);
     });
     this.homeRoadChain = task.catch(() => {});
@@ -1102,13 +1105,21 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     await this.applyHomeRoad(await this.withSession((token) => this.api.roadExit(token)));
   }
 
-  private async applyHomeRoad(response: RoadExitResponse): Promise<void> {
+  private async applyHomeRoad(response: RoadExitResponse, rekeyed = false): Promise<void> {
     if (!this.accessToken) return;
     this.lastHomeRoadAt = Date.now();
     this.homeRoadAvailable = response.available === true;
     const hosts = new Set([...websiteHosts(), ...serviceEndpoints().apiOrigins.map((origin) => new URL(origin).hostname)]);
     const config = response.exit == null ? null : parseRoadExit(response.exit, hosts);
     if (response.exit != null && !config) this.addLog("Дорога домой: сайт прислал выход, который приложение не принимает");
+    if (config && !rekeyed) {
+      const key = await this.homeRoadKey();
+      if (config.key !== key.publicKey) {
+        // A new install or a new key: the website learns the public half, the devices' links follow.
+        await this.applyHomeRoad(await this.withSession((token) => this.api.setRoadExit(token, key.publicKey)), true);
+        return;
+      }
+    }
     await this.homeRoad.apply(config);
     this.patch({ homeRoad: this.homeRoadSnapshot() });
   }
@@ -1120,6 +1131,25 @@ export class AppController extends EventEmitter<AppControllerEvents> {
       const config = this.homeRoad.config;
       if (config?.mode === "direct") await this.homeRoad.apply(config);
     }).catch(() => {});
+  }
+
+  /** This computer's exit key: made once, kept in the secure store; the website gets the public half only. */
+  private homeRoadKey(): Promise<RoadKey> {
+    if (!this.homeRoadKeyPair) {
+      const pair = (async () => {
+        const stored = await this.secureStore.get("home_road_key");
+        const restored = stored ? roadKeyFrom(stored.toString("utf8")) : null;
+        if (restored) return restored;
+        const created = createRoadKey();
+        await this.secureStore.put("home_road_key", Buffer.from(created.privateKey));
+        return created;
+      })();
+      this.homeRoadKeyPair = pair;
+      pair.catch(() => {
+        if (this.homeRoadKeyPair === pair) this.homeRoadKeyPair = null;
+      });
+    }
+    return this.homeRoadKeyPair;
   }
 
   private homeRoadSnapshot(): HomeRoadSnapshot | null {
@@ -1721,8 +1751,11 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     }
     if (this.settingsPushTimer) clearTimeout(this.settingsPushTimer);
     this.settingsPushTimer = null;
+    // The next account's exit gets a key of its own.
+    this.homeRoadKeyPair = null;
     await Promise.all([
       this.secureStore.remove("access_token"),
+      this.secureStore.remove("home_road_key"),
       this.secureStore.remove("tunnel_profile"),
       this.secureStore.remove("selected_server"),
       this.secureStore.remove("settings_sync"),

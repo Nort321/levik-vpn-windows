@@ -4,11 +4,13 @@ import type { NetworkInterfaceInfo } from "node:os";
 import { afterEach, describe, expect, it } from "vitest";
 
 import {
+  createRoadKey,
   exitXrayConfig,
   isHomeRoadServer,
   parseRoadExit,
   physicalInterface,
   RoadConnector,
+  roadKeyFrom,
 } from "../src/main/platform/homeRoad";
 import type { RoadSocket } from "../src/main/platform/homeRoad";
 
@@ -19,6 +21,7 @@ const exit = {
   mode: "direct",
   lanAccess: false,
   vlessUuid: "7A1B2C3D-4E5F-4A6B-8C7D-9E0F1A2B3C4D",
+  key: "xaZp27rLapm8s6kvmxgRySzd84PqE2054hk2HFRLTRs",
   controlUrl: `wss://api.cloudnote-sync.xyz/road/x/${token}`,
   expiresAt: "2026-11-15T00:00:00.000Z",
 };
@@ -27,6 +30,8 @@ const hosts = new Set(["api.cloudnote-sync.xyz", "leviknet.org"]);
 describe("the website's exit", () => {
   it("is taken as it is when every field is right", () => {
     expect(parseRoadExit(exit, hosts)).toEqual({ ...exit, vlessUuid: exit.vlessUuid.toLowerCase() });
+    // Before this computer reported its key, the website has none.
+    expect(parseRoadExit({ ...exit, key: null }, hosts)?.key).toBeNull();
   });
 
   it("turns the exit off for anything unexpected", () => {
@@ -39,6 +44,9 @@ describe("the website's exit", () => {
       { mode: "lan" },
       { lanAccess: "yes" },
       { vlessUuid: "not-a-uuid" },
+      { key: "short" },
+      { key: `${exit.key.slice(0, 42)}B` },
+      { key: undefined },
       { exitId: "short" },
       { name: "" },
       { expiresAt: "soon" },
@@ -50,8 +58,21 @@ describe("the website's exit", () => {
   });
 });
 
+describe("the exit's key", () => {
+  it("is an X25519 pair whose public half follows from the stored private half", () => {
+    const key = createRoadKey();
+    expect(key.privateKey).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    expect(key.publicKey).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    expect(roadKeyFrom(key.privateKey)).toEqual(key);
+    expect(createRoadKey().publicKey).not.toBe(key.publicKey);
+    // As `xray x25519 -i` derives it.
+    expect(roadKeyFrom("8LyO3Zux_-QA5HP-P0jODnhhQhLVlm82c_KNPbrenE4")?.publicKey).toBe("xaZp27rLapm8s6kvmxgRySzd84PqE2054hk2HFRLTRs");
+    expect(roadKeyFrom("not a key")).toBeNull();
+  });
+});
+
 describe("the exit's Xray", () => {
-  const base = { port: 41000, vlessUuid: exit.vlessUuid.toLowerCase(), physicalInterface: "en0" };
+  const base = { port: 41000, vlessUuid: exit.vlessUuid.toLowerCase(), privateKey: "8LyO3Zux_-QA5HP-P0jODnhhQhLVlm82c_KNPbrenE4", physicalInterface: "en0" };
 
   function rules(config: Record<string, unknown>): Array<Record<string, unknown>> {
     return (config.routing as { rules: Array<Record<string, unknown>> }).rules;
@@ -61,6 +82,12 @@ describe("the exit's Xray", () => {
     const config = exitXrayConfig({ ...base, mode: "direct", lanAccess: false });
     const [inbound] = config.inbounds as Array<Record<string, unknown>>;
     expect(inbound).toMatchObject({ listen: "127.0.0.1", port: 41000, protocol: "vless" });
+    // Only devices that encrypt to this computer's key get through.
+    expect(inbound?.settings).toEqual({
+      clients: [{ id: exit.vlessUuid.toLowerCase() }],
+      decryption: "mlkem768x25519plus.native.600s.8LyO3Zux_-QA5HP-P0jODnhhQhLVlm82c_KNPbrenE4",
+    });
+    expect(config.log).toEqual({ loglevel: "error", access: "none" });
     const [home] = config.outbounds as Array<Record<string, unknown>>;
     expect(home).toMatchObject({ protocol: "freedom", streamSettings: { sockopt: { interface: "en0" } } });
     // The home network and the computer itself stay closed without network access.

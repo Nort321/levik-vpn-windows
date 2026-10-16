@@ -58,6 +58,18 @@ describe("Windows tunnel profile", () => {
     }));
   });
 
+  it("keeps the end-to-end encryption of a «🏠» home road link", () => {
+    const key = "xaZp27rLapm8s6kvmxgRySzd84PqE2054hk2HFRLTRs";
+    const path = "/road/c/eyJ2IjoxfQ.awxffJnVDuNrf_EA9LdiwC8AKM";
+    const link = `vless://7a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d@api.cloudnote-sync.xyz:443?encryption=mlkem768x25519plus.native.0rtt.${key}&security=tls&sni=api.cloudnote-sync.xyz&alpn=http%2F1.1&fp=chrome&type=ws&host=api.cloudnote-sync.xyz&path=${encodeURIComponent(path)}#${encodeURIComponent("🏠 Домашний ПК")}`;
+    const profile = { version: 1, profileId: "p", subscriptionId: "one", issuedAt: new Date().toISOString(), source: { mediaType: "text/plain", content: link } };
+    const [server] = prepareTunnelProfile(Buffer.from(JSON.stringify(profile)), "one").servers;
+    expect(server?.name).toBe("🏠 Домашний ПК");
+    const settings = server?.outbound.settings as { vnext: Array<{ users: Array<Record<string, unknown>> }> };
+    expect(settings.vnext[0]?.users[0]).toEqual({ id: "7a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d", encryption: `mlkem768x25519plus.native.0rtt.${key}` });
+    expect(server?.outbound.streamSettings).toMatchObject({ network: "ws", security: "tls", wsSettings: { path } });
+  });
+
   it("rejects a profile issued for another subscription", () => {
     const profile = { version: 1, profileId: "p", subscriptionId: "one", issuedAt: new Date().toISOString(), source: { mediaType: "text/plain", content: "vless://11111111-1111-4111-8111-111111111111@example.com:443#Server" } };
     expect(() => prepareTunnelProfile(Buffer.from(JSON.stringify(profile)), "two")).toThrow(/подписке/);
