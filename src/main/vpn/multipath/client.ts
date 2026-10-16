@@ -36,7 +36,9 @@ interface Flow { id: string; connection: Connection; address: string; port: numb
   pending: Buffer[]; hold: Hold | null; held: boolean; kind: FlowKind; latencyHistory: number[]; lowerBoundSamples: boolean; evidence: DeliveryEvidence; gameId: string;
   decision: (GameRouteDecision & { selectedAt: number }) | null; protectionRequested: boolean; maxPathCount: number; noPathSince: number | null;
   /** Last second with match-rate traffic; a long-quiet flow may follow a better exit. */
-  lastBusyAt: number; sentAtTick: number; reopenReason: string | null; finished: boolean }
+  lastBusyAt: number; sentAtTick: number; reopenReason: string | null; finished: boolean;
+  /** Once a flow carried match-rate traffic it is a game connection: it never moves to another exit while alive. */
+  busy: boolean }
 const emptyOptions = (): GameRuntimeOptions => ({ nodes: [], preferredExitId: null, protection: true, exitScope: "flow" });
 const NO_CAPS: RelayCapabilities = parseCapabilities({});
 const ACTIVE_MATCH_MS = 5_000;
@@ -46,6 +48,9 @@ const REGIONS_INTERVAL_MS = 30_000;
 /** UDP observation, selection and replication share one bridge in both protection modes. */
 export class GameMultipath {
   constructor(private counting = true) {}
+  private log: (line: string) => void = () => {};
+  /** Flow re-decisions go to the app log: they explain a game's disconnects. */
+  setLogger(log: (line: string) => void): void { this.log = log; }
   startCounting(): void { this.counting = true; }
   private readonly session = newSession(randomBytes(8));
   private readonly exitSessions = new Map<string, Buffer>();
@@ -190,6 +195,12 @@ export class GameMultipath {
     return this.paths.filter((path) => path?.accepted && path.active && path.exitNodeId === wire.exitId && path.instance === wire.instance
       && !path.transport.closed && this.fresh(path));
   }
+  /** Every usable path to the wire's exit process, active or not. */
+  private exitPaths(wire: Wire | null): Path[] {
+    if (!wire) return [];
+    return this.paths.filter((path): path is Path => Boolean(path?.accepted && path.exitNodeId === wire.exitId && path.instance === wire.instance
+      && !path.transport.closed));
+  }
   private livePaths(exitId: string): Path[] {
     return this.paths.filter((path) => path?.accepted && path.exitNodeId === exitId && !path.transport.closed && this.fresh(path)
       && path.instance !== null);
@@ -257,7 +268,7 @@ export class GameMultipath {
           flow = { id: randomBytes(8).toString("hex"), connection, ...target, counted: this.counting, startedAt: Date.now(), touched: Date.now(), sent: 0, received: 0,
             exitId: "", instance: null, wire: null, direct: null, pending: [], hold: null, held: false, kind: "service", latencyHistory: [], lowerBoundSamples: false,
             evidence: new DeliveryEvidence(), gameId: this.options.gameId ?? "custom", finished: false, decision: null,
-            protectionRequested: this.options.protection, maxPathCount: 0, noPathSince: null, lastBusyAt: Date.now(), sentAtTick: 0, reopenReason: null };
+            protectionRequested: this.options.protection, maxPathCount: 0, noPathSince: null, lastBusyAt: Date.now(), sentAtTick: 0, reopenReason: null, busy: false };
           connection.flows.set(key, flow); this.flows.set(flow.id, flow);
         }
         connection.touched = Date.now();
@@ -342,6 +353,7 @@ export class GameMultipath {
     flow.direct?.close(); flow.direct = null;
   }
   private reopen(flow: Flow, reason: string): void {
+    this.log(`Game: поток ${flow.kind === "match" ? "матча" : "игры"} открыт заново (${flow.exitId || "без выхода"}): ${reason}`);
     this.finishFlow(flow, false); this.detach(flow);
     flow.exitId = ""; flow.instance = null; flow.noPathSince = null; flow.pending = []; flow.held = true; flow.finished = false;
     flow.decision = null; flow.reopenReason = reason; flow.lastBusyAt = Date.now();
@@ -453,7 +465,7 @@ export class GameMultipath {
         }
         if (flow.latencyHistory.length > 3600) flow.latencyHistory.shift();
       }
-      if (flow.sent - flow.sentAtTick >= GAME_POLICY.matchPacketsPerSecond) flow.lastBusyAt = now;
+      if (flow.sent - flow.sentAtTick >= GAME_POLICY.matchPacketsPerSecond) { flow.lastBusyAt = now; flow.busy = true; }
       flow.sentAtTick = flow.sent;
       if (now - flow.touched > 60_000) { this.dropFlow(flow); continue; }
       this.checkPinnedExit(flow, now);
@@ -494,17 +506,18 @@ export class GameMultipath {
    * better measured exit; match flows never move while alive. */
   private checkPinnedExit(flow: Flow, now: number): void {
     if (!flow.exitId || flow.hold) return;
-    // Fast pings answer every 200 ms, so a path silent for pathSilentMs is already gone.
+    // Any reply (pong or game data) on any path of the exit keeps it alive; a new
+    // exit means a new source address, which a game server treats as a disconnect.
     const alive = flow.exitId === "direct" ? Boolean(flow.direct && !flow.direct.closed) || flow.pending.length > 0
-      : this.activePaths(flow.wire).some((path) => performance.now() - path.lastReply < GAME_POLICY.pathSilentMs);
+      : this.exitPaths(flow.wire).some((path) => performance.now() - path.lastReply < GAME_POLICY.pathSilentMs);
+    const game = flow.kind === "match" || flow.busy;
     if (alive) flow.noPathSince = null;
     else if (flow.noPathSince === null) flow.noPathSince = now;
-    else if (now - flow.noPathSince >= GAME_POLICY.deadExitMs) {
+    else if (now - flow.noPathSince >= (game ? GAME_POLICY.deadMatchExitMs : GAME_POLICY.deadExitMs)) {
       this.reopen(flow, "Выход перестал отвечать; поток открыт заново через доступный выход"); return;
     }
-    // Only quiet flows move: relay/lobby pings, or a match socket long after its match ended.
-    const quietFor = now - flow.lastBusyAt;
-    if (quietFor < (flow.kind === "match" ? GAME_POLICY.migrateAfterMatchMs : GAME_POLICY.migrateQuietMs) || now - flow.startedAt < GAME_POLICY.migrateQuietMs
+    // Only ping-like flows move (relay/lobby pings): moving a game connection disconnects it.
+    if (game || now - flow.lastBusyAt < GAME_POLICY.migrateQuietMs || now - flow.startedAt < GAME_POLICY.migrateQuietMs
       || !flow.counted || flow.exitId === "direct" || this.options.exitScope !== "flow" || this.options.preferredExitId || flow.decision?.source === "manual") return;
     const estimates = this.estimates(flow, true);
     const current = estimates.find((item) => item.nodeId === flow.exitId);
@@ -597,7 +610,11 @@ export class GameMultipath {
       return;
     }
     const wire = flow.wire; if (!wire || wire.sequence >= 0xffffffff) return;
-    const paths = this.activePaths(wire); flow.maxPathCount = Math.max(flow.maxPathCount, paths.length);
+    // With no active path (all missing pings for a moment) the game keeps using the
+    // path that answered last instead of losing its packets.
+    const active = this.activePaths(wire);
+    const paths = active.length ? active : this.exitPaths(wire).sort((a, b) => b.lastReply - a.lastReply).slice(0, 1);
+    flow.maxPathCount = Math.max(flow.maxPathCount, active.length);
     if (!paths.length) return;
     const sequence = wire.sequence++;
     const packet: Packet = { kind: Kind.Up, path: 0, session: wire.session ?? this.session, flow: wire.id, sequence, address: flow.address, port: flow.port, payload };
@@ -766,6 +783,13 @@ export class GameMultipath {
         // A copy over the same entry node shares its route: send it a little later.
         path.spread = Boolean(primary && path !== primary && path.entryNodeId === primary.entryNodeId);
       }
+    }
+    // The relay answers a game only over active paths: an exit that carries flows
+    // keeps its most recently answering path active even while every path misses pings.
+    for (const wire of this.wires.values()) {
+      const paths = this.exitPaths(wire);
+      if (!paths.length || paths.some((path) => path.active)) continue;
+      paths.sort((a, b) => b.lastReply - a.lastReply)[0]!.active = true;
     }
     for (const path of this.paths) if (path && path.active !== previous.has(path)) path.misses = 0;
   }

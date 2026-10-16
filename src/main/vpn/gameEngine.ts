@@ -16,11 +16,12 @@ export const GAME_POLICY = Object.freeze({ window: 60, minimumSamples: 5, jitter
   fastPingIntervalMs: 200, fastAlpha: 0.25, fastLossAlpha: 0.1, fastLossWeightMs: 1,
   /** UDP carried in a TCP/HTTP stream stalls for a retransmission on loss. */
   reliablePenaltyMs: 40, winsTieMs: 2,
-  /** No live path to a pinned exit for this long: the match is lost, so the flow is re-decided. */
-  deadExitMs: 8_000,
+  /** No reply on any path of a pinned exit for this long: the exit is gone, so the flow is re-decided.
+   * A game connection waits longer: re-deciding changes its source address, which ends the match. */
+  deadExitMs: 8_000, deadMatchExitMs: 20_000,
   pathSilentMs: 1_500,
-  /** A non-match flow (lobby/relay pings) may move when a measured exit is better by this much. */
-  migrateMinGainMs: 5, migrateQuietMs: 10_000, migrateAfterMatchMs: 60_000,
+  /** A ping-like flow (lobby/relay pings) may move when a measured exit is better by this much. */
+  migrateMinGainMs: 5, migrateQuietMs: 10_000,
   /** First packet of a new destination waits for cached B from nodes at most this long. */
   holdMinMs: 40, holdMaxMs: 200, holdMaxPackets: 16 });
 

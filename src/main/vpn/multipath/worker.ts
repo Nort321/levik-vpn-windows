@@ -14,6 +14,7 @@ try { setPriority(0, constants.priority.PRIORITY_HIGH); } catch { /* Normal prio
 
 const plane = new GameMultipath(false);
 const emit = (event: DataPlaneEvent): void => parent.postMessage(event);
+plane.setLogger((line) => emit({ type: "log", line }));
 const measurements = new Map<number, (results: ProbeMeasurement[]) => void>();
 let measureId = 0;
 /** Direct measurements need the physical adapter helpers that live in main. */

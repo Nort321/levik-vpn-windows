@@ -127,8 +127,13 @@ export async function startRelay(options: RelayOptions = {}) {
   };
   /** Down copies go to every active path; a "spread" path gets its copy a little later. */
   const sendDown = (session: Session, flow: Flow, kind: Kind.Down | Kind.Parity, sequence: number, address: string, port: number, payload: Buffer, now: number): void => {
-    const activePaths: Array<[number, Endpoint]> = [];
-    for (const entry of session.paths) if (entry[1].active && entry[1].exitNodeId === nodeId && now - entry[1].touched < 10_000) activePaths.push(entry);
+    const activePaths: Array<[number, Endpoint]> = []; let latest: [number, Endpoint] | null = null;
+    for (const entry of session.paths) if (entry[1].exitNodeId === nodeId && now - entry[1].touched < 10_000) {
+      if (entry[1].active) activePaths.push(entry);
+      if (!latest || entry[1].touched > latest[1].touched) latest = entry;
+    }
+    // A game never goes silent while one of its paths is alive: answer over the one used last.
+    if (!activePaths.length && latest) activePaths.push(latest);
     if (!activePaths.length || !charge(session, (payload.length + HEADER_V3) * activePaths.length, now)) return;
     // Parity rides on one path only: the last active one, which is a backup when two or more exist.
     const targets = kind === Kind.Parity ? activePaths.slice(-1) : activePaths;
@@ -176,7 +181,8 @@ export async function startRelay(options: RelayOptions = {}) {
     const flags = packet.kind === Kind.Ping ? packet.payload[0] ?? 0 : 0;
     const previous = session.paths.get(packet.path);
     const endpoint: Endpoint = { address: remote.address, port: remote.port, touched: now,
-      active: packet.kind === Kind.Up || packet.kind === Kind.Parity ? previous?.active ?? true : (flags & PING_ACTIVE) !== 0,
+      // Game data arrives only over paths the client wants answered; a later ping without the flag turns a backup off.
+      active: packet.kind === Kind.Up || packet.kind === Kind.Parity ? true : (flags & PING_ACTIVE) !== 0,
       spread: packet.kind === Kind.Ping ? (flags & PING_SPREAD) !== 0 : previous?.spread ?? false,
       mesh: fromMesh, exitNodeId: packet.exitNodeId || nodeId, version: packet.version ?? 0 };
     if (packet.kind === Kind.Ping) session.fec = (flags & PING_FEC) !== 0;

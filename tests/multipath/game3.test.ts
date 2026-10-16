@@ -170,3 +170,37 @@ it("moves a flow off an exit that stopped answering", async () => {
     expect(server.payloads.at(-1)).toMatch(/^waiting-/);
   } finally { game?.socket.destroy(); await client.stop(); for (const index of open) await relays[index]!.close(); await server.close(); }
 }, 30_000);
+
+it("keeps a match on its exit and its packets flowing while its only path stalls", async () => {
+  const exits = ["exit-a", "exit-b"]; const tags = tagResolver(exits);
+  const relays = await Promise.all(exits.map((nodeId) => startRelay({ port: 0, nodeId, allowTestLoopback: true })));
+  relays.forEach((relay, index) => network.relayPorts.set(index + 1, relay.port));
+  const server = await Server.start(); const client = new GameMultipath(); client.setPlaying(true);
+  const lines: string[] = []; client.setLogger((line) => lines.push(line));
+  let game: GameSocket | undefined;
+  try {
+    const listener = await client.listen();
+    await client.connect(exits.map((nodeId, index) => ({ index, port: index + 1, nodeId })), "test",
+      { nodes: exits.map((nodeId) => ({ ...nodes[0]!, nodeId })), protection: true, preferredExitId: null, exitScope: "flow" });
+    await pause(400);
+    game = await GameSocket.open(listener);
+    let sequence = 0; const play = (): void => { game!.send(server.port, `tick-${sequence++}`); };
+    // A match: 25 packets per second for longer than the classification age.
+    for (let tick = 0; tick < 175; tick++) { play(); await pause(40); }
+    const used = relays.findIndex((relay) => relay.counts.forwarded > 0); const exit = exits[used]!;
+    // Like a TCP transport on retransmission: nothing comes back from that exit for 10 s.
+    network.drop = (direction, data) => direction === "down" && decode(data, tags)?.exitNodeId === exit;
+    const before = server.payloads.length;
+    for (let tick = 0; tick < 250; tick++) { play(); await pause(40); }
+    // Upstream never stopped, even with every ping of the only path missed.
+    expect(server.payloads.length - before).toBeGreaterThan(200);
+    network.drop = () => false;
+    const replies = game.replies.length;
+    for (let tick = 0; tick < 50; tick++) { play(); await pause(40); }
+    expect(game.replies.length).toBeGreaterThan(replies + 20);
+    // Same exit, same source address for the whole match: no disconnect.
+    expect(server.sources.size).toBe(1);
+    expect(relays[1 - used]!.counts.forwarded).toBe(0);
+    expect(lines.filter((line) => line.includes("открыт заново"))).toEqual([]);
+  } finally { game?.socket.destroy(); await client.stop(); await Promise.all(relays.map((relay) => relay.close())); await server.close(); }
+}, 40_000);

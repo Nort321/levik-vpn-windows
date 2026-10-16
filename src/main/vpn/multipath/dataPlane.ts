@@ -43,6 +43,7 @@ export type DataPlaneEvent =
   | { type: "result"; id: number; ok: false }
   | { type: "state"; snapshot: GameMultipathStats; runtime: GameRuntimeSnapshot; qualities: Record<number, GameRouteQuality>; idle: boolean }
   | { type: "measure"; id: number; targets: ProbeTarget[] }
-  | { type: "measure-abort"; id: number };
+  | { type: "measure-abort"; id: number }
+  | { type: "log"; line: string };
 
 export const STATE_INTERVAL_MS = 250;

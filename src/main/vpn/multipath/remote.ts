@@ -39,7 +39,7 @@ export class RemoteGameDataPlane implements GameDataPlane {
     const plane = new RemoteGameDataPlane(join(__dirname, "gameDataPlane.js"), log);
     try { await plane.spawn(); return plane; } catch {
       plane.stopped = true; plane.discard(); log("Game: отдельный процесс маршрутизации недоступен; пакеты обрабатываются в основном процессе");
-      return new GameMultipath(false);
+      const local = new GameMultipath(false); local.setLogger(log); return local;
     }
   }
 
@@ -81,7 +81,8 @@ export class RemoteGameDataPlane implements GameDataPlane {
       });
       return;
     }
-    if (event.type === "measure-abort") { this.measurements.get(event.id)?.abort(); this.measurements.delete(event.id); }
+    if (event.type === "measure-abort") { this.measurements.get(event.id)?.abort(); this.measurements.delete(event.id); return; }
+    if (event.type === "log") this.log(event.line);
   }
 
   /** A crash re-creates the same loopback identity; Xray keeps sending to it. */
