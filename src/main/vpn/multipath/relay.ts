@@ -74,6 +74,7 @@ export async function startRelay(options: RelayOptions = {}) {
     try {
       const result = options.probeSocket ? await probeService(options.probeSocket, request) : null;
       if (closing || !sessions.has(packet.session.toString("hex"))) return;
+      const serviceAvailable = Boolean(result && !result.error);
       let payload: unknown;
       if (packet.kind === Kind.NodeInfo) {
         const load = isRecord(result?.load) ? result.load : {};
@@ -82,16 +83,18 @@ export async function startRelay(options: RelayOptions = {}) {
           activeSessions: sessions.size, activeFlows: flowCount,
           networkRxBytesPerSecond: typeof load.networkRxBytesPerSecond === "number" && Number.isFinite(load.networkRxBytesPerSecond) ? Math.max(0, load.networkRxBytesPerSecond) : 0,
           networkTxBytesPerSecond: typeof load.networkTxBytesPerSecond === "number" && Number.isFinite(load.networkTxBytesPerSecond) ? Math.max(0, load.networkTxBytesPerSecond) : 0 },
-          capabilities: { probe: Boolean(result && options.probeSocket), mesh: Boolean(meshSocket) } };
+          capabilities: { probe: Boolean(serviceAvailable && result?.nodeId === nodeId
+            && isRecord(result?.capabilities) && result.capabilities.probe === true), mesh: Boolean(meshSocket) } };
       } else if (packet.kind === Kind.ProbeRequest) {
         const allowed = new Set(session.targets);
-        const results = Array.isArray(result?.results) ? result.results.map(parseMeasurement)
+        const results = serviceAvailable && Array.isArray(result?.results) ? result.results.map(parseMeasurement)
           .filter((item) => item !== null && allowed.has(`${item.address}:${item.port}`)).slice(0, 32) : [];
         // Split replies so a batch with offline labels cannot exceed the
         // control-frame budget. All frames retain the request sequence.
         for (let index = 0; index < Math.max(1, results.length); index += 8) send(encode({ ...packet,
           kind: Kind.ProbeResult, exitNodeId: nodeId, instance,
-          payload: controlPayload({ version: 2, results: results.slice(index, index + 8) }) }), endpoint);
+          payload: controlPayload({ version: 2, status: serviceAvailable && Array.isArray(result?.results) ? "ok" : "service-unavailable",
+            results: results.slice(index, index + 8) }) }), endpoint);
         return;
       } else {
         payload = { version: 2, nodeId, cursor: request.cursor ?? 0, ...(Number.isInteger(result?.nextCursor) ? { nextCursor: result!.nextCursor } : {}), neighbors: Array.isArray(result?.neighbors) ? result.neighbors.filter((item: unknown) =>

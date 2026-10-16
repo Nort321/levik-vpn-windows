@@ -360,7 +360,16 @@ export interface GameExitComparison {
   jitterMs: number | null;
   lossPercent: number | null;
   confidence: "exact" | "subnet" | "operator" | "region" | "access" | "unavailable";
+  evidence?: "endpoint" | "lower-bound" | "access" | "unavailable";
+  egressStatus?: "ready" | "legacy" | "service-unavailable" | "collecting" | "unavailable" | "stale";
   approximate: boolean;
+  reason: string;
+}
+
+export interface GameRouteDecision {
+  exitId: string;
+  exitName: string;
+  source: "manual" | "history" | "measured" | "access" | "session";
   reason: string;
 }
 
@@ -376,6 +385,13 @@ export interface GameMatchReport {
   rescuedPackets: number;
   receivedPackets: number;
   approximate: boolean;
+  gameId?: string;
+  server?: GameMatchServer;
+  exitId?: string;
+  exitName?: string;
+  routeDecision?: GameRouteDecision;
+  protection?: { enabled: boolean; pathCount: number };
+  lowerBound?: boolean;
 }
 
 export interface GameRuntimeSnapshot {
@@ -386,11 +402,15 @@ export interface GameRuntimeSnapshot {
   exits: GameExitComparison[];
   selectedExitId: string | null;
   selectionReason: string | null;
+  routeDecision?: (GameRouteDecision & { selectedAt: number }) | null;
+  nextRouteDecision?: GameRouteDecision | null;
+  activeMatchFlowCount?: number;
+  mixedMatchExits?: boolean;
   ingressPaths: Array<{ routeId: string; entryNodeId: string; exitNodeId: string; latencyMs: number | null; active: boolean }>;
-  protection: { enabled: boolean; limitedByUpload: boolean; reason: string | null };
+  protection: { enabled: boolean; limitedByUpload: boolean; reason: string | null; effective?: boolean; pathCount?: number };
   shadowAlternative: { nodeId: string; name: string; savingMs: number } | null;
   matchReport: GameMatchReport | null;
-  estimateHistory: Array<{ measuredAt: number; latencyMs: number | null; approximate: boolean }>;
+  estimateHistory: Array<{ measuredAt: number; latencyMs: number | null; approximate: boolean; lowerBound?: boolean }>;
   compatibility: "full" | "legacy";
   meshRows?: Array<{ nodeId: string; neighbors: Array<{ nodeId: string; quality: GameMeasurement }> }>;
 }

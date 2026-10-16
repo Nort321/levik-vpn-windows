@@ -491,7 +491,8 @@ select option { color: var(--text); background-color: var(--select-bg); }
 .game-route-title > svg { width: 20px; height: 20px; color: var(--blue-bright); flex-shrink: 0; }
 .game-route-title strong { font-weight: 550; }
 .game-route-row small { display: block; font-size: 11px; color: var(--muted); margin-top: 5px; }
-.game-route-row > span { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.game-route-row > span { flex: 0 0 185px; text-align: right; font-variant-numeric: tabular-nums; }
+.game-route-row > span > strong { display: block; font-weight: 550; white-space: nowrap; }
 .game-footnote { font-size: 11px; line-height: 1.7; color: var(--muted); margin: 18px 0 0; }
 .game-mode { margin-top: 20px; }
 .game-consent { display: flex; align-items: flex-start; gap: 12px; margin-top: 20px; color: var(--text); font-size: 13px; line-height: 1.6; cursor: pointer; }
@@ -510,7 +511,7 @@ select option { color: var(--text); background-color: var(--select-bg); }
 .game-attribution-link:focus-visible { outline: 2px solid var(--blue-bright); outline-offset: 3px; }
 .game-metrics strong { font-size: clamp(18px, 2.6vw, 30px); }
 .game-insights { margin-top: 18px; padding: 24px; overflow: hidden; }
-.game-live-label { padding: 6px 10px; border: 1px solid var(--border); border-radius: 20px; color: var(--muted); font-size: 10px; white-space: nowrap; }
+.game-live-label { max-width: 100%; padding: 6px 10px; border: 1px solid var(--border); border-radius: 20px; color: var(--muted); font-size: 10px; overflow-wrap: anywhere; }
 .game-flow { display: grid; grid-template-columns: 85px 1fr; gap: 24px; align-items: center; margin: 24px 0; }
 .game-flow-origin { display: grid; justify-items: center; gap: 10px; font-size: 12px; }
 .game-flow-origin > svg { width: 32px; height: 32px; color: var(--blue-bright); }
@@ -553,6 +554,8 @@ select option { color: var(--text); background-color: var(--select-bg); }
   .game-hero-bottom, .game-section-header { align-items: flex-start; flex-direction: column; }
   .game-metrics { gap: 10px; }
   .game-metrics > div { padding-left: 10px; }
+  .game-route-row { align-items: flex-start; }
+  .game-route-row > span { flex-basis: 140px; }
 }
 
 .section-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }

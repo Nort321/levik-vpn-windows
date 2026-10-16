@@ -43,6 +43,41 @@ it("allows a measured physical direct exit", () => {
   const direct = estimateExit({ nodeId: "direct", state: "enabled", access: null, egress: [], direct: metric(5) }, target, [], now);
   expect(chooseExit([estimateExit(node("vpn", 20, 20), target, [], now), direct])?.nodeId).toBe("direct");
 });
+it.each(["direct", "vpn"] as const)("prefers completed endpoint measurements over a faster %s TTL lower bound", (lowerBoundExit) => {
+  const target = { address: "1.1.1.1", port: 7000 };
+  const vpn = node("vpn", 1, lowerBoundExit === "vpn" ? 1 : 40);
+  const directMetric = metric(lowerBoundExit === "direct" ? 1 : 40);
+  if (lowerBoundExit === "direct") directMetric.method = "ttl-hop";
+  else vpn.egress[0]!.metric.method = "ttl-hop";
+  const estimates = [estimateExit(vpn, target, [], now),
+    estimateExit({ nodeId: "direct", state: "enabled", access: null, egress: [], direct: directMetric }, target, [], now)];
+  const lowerBound = estimates.find((item) => item.nodeId === lowerBoundExit)!;
+  expect(lowerBound).toMatchObject({ confidence: "exact", evidence: "lower-bound", approximate: true });
+  expect(chooseExit(estimates, lowerBoundExit)).toMatchObject({ nodeId: lowerBoundExit === "direct" ? "vpn" : "direct", evidence: "endpoint" });
+  expect(chooseExit(estimates, null, lowerBoundExit)?.nodeId).toBe(lowerBoundExit);
+});
+it("keeps lower-bound selection as an explicit fallback when both routes stop at a router", () => {
+  const target = { address: "1.1.1.1", port: 7000 };
+  const vpn = node("vpn", 10, 20); vpn.egress[0]!.metric.method = "ttl-hop";
+  const estimates = [estimateExit(vpn, target, [], now),
+    estimateExit({ nodeId: "direct", state: "enabled", access: null, egress: [], direct: { ...metric(5), method: "ttl-hop" } }, target, [], now)];
+  expect(chooseExit(estimates)).toMatchObject({ nodeId: "direct", evidence: "lower-bound" });
+  expect(chooseExit(estimates, null, "vpn")).toMatchObject({ nodeId: "vpn", evidence: "lower-bound" });
+});
+it("uses access-only fallback when no B is measured and ignores an unavailable manual exit", () => {
+  const target = { address: "1.1.1.1", port: 7000 };
+  const estimates = [node("near", 5, 10), node("far", 30, 1)].map((candidate) => estimateExit({ ...candidate, egress: [] }, target, [], now));
+  const unavailable = estimateExit({ ...node("unavailable", 1, 1), state: "disabled" }, target, [], now);
+  expect(chooseExit([...estimates, unavailable], null, "unavailable")).toMatchObject({ nodeId: "near", confidence: "access", evidence: "access" });
+  expect(chooseExit(estimates, null, "far")?.nodeId).toBe("far");
+});
+it("does not confuse an exact-target lower bound with completed subnet evidence", () => {
+  const target = { address: "1.1.1.1", port: 7000 };
+  const ttl = node("ttl", 1, 1); ttl.egress[0]!.metric.method = "ttl-hop";
+  const subnet = node("subnet", 20, 20); subnet.egress[0]!.metric.scope = "subnet";
+  expect(chooseExit([estimateExit(ttl, target, [], now), estimateExit(subnet, target, [], now)]))
+    .toMatchObject({ nodeId: "subnet", confidence: "subnet", evidence: "endpoint" });
+});
 it("keeps rolling loss proportional rather than assigning 250 ms for one missed probe", () => {
   const window = new QualityWindow(); for (let i = 0; i < 8; i++) window.push(i === 3 ? null : 20, now + i);
   const result = window.snapshot(now + 8); expect(result.lossPercent).toBe(12.5);
@@ -88,7 +123,7 @@ it("prefers independent entry nodes when more than one can reach the pinned exit
 it("keeps exact-target TTL uncertainty separate from subnet fallback", () => {
   const candidate = node("ttl", 10, 20);
   Object.assign(candidate.egress[0]!.metric, { method: "ttl-hop", approximate: true, scope: "target" });
-  expect(estimateExit(candidate, { address: "1.1.1.1", port: 7000 }, [], now)).toMatchObject({ confidence: "exact", approximate: true });
+  expect(estimateExit(candidate, { address: "1.1.1.1", port: 7000 }, [], now)).toMatchObject({ confidence: "exact", evidence: "lower-bound", approximate: true });
   candidate.egress[0]!.metric.scope = "subnet";
-  expect(estimateExit(candidate, { address: "1.1.1.1", port: 7000 }, [], now).confidence).toBe("subnet");
+  expect(estimateExit(candidate, { address: "1.1.1.1", port: 7000 }, [], now)).toMatchObject({ confidence: "subnet", evidence: "lower-bound" });
 });

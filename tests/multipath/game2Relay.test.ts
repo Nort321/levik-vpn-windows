@@ -45,7 +45,7 @@ async function udp(): Promise<Inbox> {
 async function closeUdp(socket: DatagramSocket): Promise<void> {
   await new Promise<void>((done) => { try { socket.close(() => done()); } catch { done(); } });
 }
-async function mockProbe() {
+async function mockProbe(error = false) {
   // Unix socket paths have a small platform limit; macOS tmpdir may be long.
   const directory = await mkdtemp(join(process.platform === "win32" ? tmpdir() : "/tmp", "lgp-"));
   const path = join(directory, "probe.sock");
@@ -59,8 +59,9 @@ async function mockProbe() {
       const value: unknown = JSON.parse(buffered.split("\n")[0]!);
       if (!isRecord(value)) { socket.destroy(); return; }
       calls.push(value);
+      if (error) { socket.end(JSON.stringify({ version: 2, error: "request rejected" }) + "\n"); return; }
       const targets = Array.isArray(value.targets) ? value.targets.filter(isRecord) : [];
-      socket.end(JSON.stringify({ version: 2, load: { cpuPercent: 12.5 }, neighbors: [], results: targets.map((target) => ({
+      socket.end(JSON.stringify({ version: 2, nodeId: "game-exit", capabilities: { probe: true }, load: { cpuPercent: 12.5 }, neighbors: [], results: targets.map((target) => ({
         address: target.address, port: target.port, medianMs: 20, p95Ms: 22, jitterMs: 1, lossPercent: 0,
         sampleCount: 5, measuredAt: new Date().toISOString(), method: "icmp",
       })) }) + "\n");
@@ -112,6 +113,23 @@ describe.skipIf(process.platform === "win32")("Game 2.0 relay and private measur
       expect(probe.calls).toHaveLength(0);
       expect(client.packets.filter((packet) => packet.kind === Kind.ProbeResult)).toHaveLength(0);
     } finally { await closeUdp(client.socket); await relay.close(); await probe.close(); }
+  });
+
+  it.each([false, true])("reports unavailable measurement service without hiding a working relay (error response: %s)", async (respondsWithError) => {
+    const probe = respondsWithError ? await mockProbe(true) : null;
+    const relay = await startRelay({ port: 0, nodeId: "game-exit", ...(probe ? { probeSocket: probe.path } : {}) });
+    const client = await udp();
+    const ping = { ...basePacket(), version: 2 as const, exitNodeId: "game-exit", hops: 0 };
+    try {
+      client.send(ping, relay.port); await client.take(Kind.Pong);
+      client.send({ ...ping, kind: Kind.NodeInfo, sequence: 1, payload: controlPayload({}) }, relay.port);
+      expect(parseControl((await client.take(Kind.NodeInfo, 1)).payload)).toMatchObject({ capabilities: { probe: false } });
+      client.send({ ...ping, kind: Kind.ProbeRequest, sequence: 2,
+        payload: controlPayload({ targets: [{ address: "8.8.8.8", port: 27015 }] }) }, relay.port);
+      expect(parseControl((await client.take(Kind.ProbeResult, 2)).payload)).toEqual({
+        version: 2, status: "service-unavailable", results: [],
+      });
+    } finally { await closeUdp(client.socket); await relay.close(); await probe?.close(); }
   });
 
   it("enforces the lifetime quota of 32 targets and rejects oversized batches", async () => {

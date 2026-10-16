@@ -7,7 +7,7 @@ import { decode, encode, Kind, MAX_PAYLOAD, MAX_PATHS, SequenceWindow, controlPa
   parseMeasurement, isRecord, publicIPv4, validNodeId, type Packet, type ProbeTarget, type ProbeMeasurement } from "./wire";
 import { QualityWindow, MeasurementHistory, chooseExit, chooseIngress, classifyFlow, estimateExit, GAME_POLICY, UploadQueueGuard, subnet24,
   type DestinationMetric, type FlowKind, type ExitCandidate, type Segment } from "../gameEngine";
-import type { GameMultipathStats, GameNode, GameRuntimeSnapshot, GameExitComparison, GameMatchReport, GameRouteQuality } from "../../../shared/contracts";
+import type { GameMultipathStats, GameNode, GameRuntimeSnapshot, GameExitComparison, GameMatchReport, GameRouteQuality, GameRouteDecision } from "../../../shared/contracts";
 
 export interface GameRuntimeOptions {
   nodes: GameNode[]; preferredExitId: string | null; protection: boolean; exitScope: "flow" | "session"; gameId?: string;
@@ -20,8 +20,11 @@ interface Path { index: number; slot: number; pathSlot: number; session: Buffer;
   entryNodeId: string; exitNodeId: string; modern: boolean; mesh: boolean; quality: QualityWindow; cpuPercent: number; networkBytesPerSecond: number; activeFlows: number; probe: boolean }
 interface Flow { socket: Socket; address: string; port: number; id: Buffer; sequence: number; seen: SequenceWindow; counted: boolean; xudp: boolean;
   startedAt: number; touched: number; sent: number; received: number; exitId: string; instance: string | null; direct: RelayPath | null;
-  pending: Buffer[]; kind: FlowKind; rescued: number; latencyHistory: number[]; evidence: DeliveryEvidence; gameId: string; cleanup: () => void; finished: boolean; session: Buffer | null }
+  pending: Buffer[]; kind: FlowKind; rescued: number; latencyHistory: number[]; lowerBoundSamples: boolean; evidence: DeliveryEvidence; gameId: string;
+  decision: (GameRouteDecision & { selectedAt: number }) | null; protectionRequested: boolean; maxPathCount: number;
+  cleanup: () => void; finished: boolean; session: Buffer | null }
 const emptyOptions = (): GameRuntimeOptions => ({ nodes: [], preferredExitId: null, protection: true, exitScope: "flow" });
+const ACTIVE_MATCH_MS = 5_000;
 
 /** UDP observation, selection and replication share one bridge in both protection modes. */
 export class GameMultipath {
@@ -45,9 +48,9 @@ export class GameMultipath {
   private relayInstance: string | null = null; private password = "";
   private options = emptyOptions(); private playing = false; private lastProbeAt = 0;
   private readonly destinations = new Map<string, ProbeTarget>();
-  private readonly observed = new Map<string, { target: ProbeTarget; at: number }>();
   private readonly meshRows = new Map<string, Array<{ nodeId: string; quality: Segment }>>();
   private readonly measurements = new Map<string, DestinationMetric[]>();
+  private readonly probeStates = new Map<string, "collecting" | "service-unavailable">();
   private readonly queries = new Map<string, { session: Buffer; targets: Set<string>; handshake: boolean }>();
   private readonly directMeasurements = new Map<string, Segment>();
   private readonly directHistory = new Map<string, MeasurementHistory>();
@@ -57,6 +60,7 @@ export class GameMultipath {
   private readonly uploadGuard = new UploadQueueGuard(); private uploadBytes = 0; private limitedByUpload = false;
   private lastMatch: GameRuntimeSnapshot["lastMatch"] = null; private matchReport: GameMatchReport | null = null;
   private readonly estimateHistory: GameRuntimeSnapshot["estimateHistory"] = [];
+  private estimateFlowId: string | null = null;
 
   private canonical(id: string): string {
     for (let i = 0; i < 4 && this.nodeAliases.has(id); i++) id = this.nodeAliases.get(id)!;
@@ -73,7 +77,10 @@ export class GameMultipath {
     if (this.sessionExit === previous) this.sessionExit = canonical;
     if (this.primaryExitId === previous) this.primaryExitId = canonical;
     const query = this.queries.get(previous); if (query && !this.queries.has(canonical)) this.queries.set(canonical, query);
-    for (const flow of this.flows.values()) if (flow.exitId === previous) flow.exitId = canonical;
+    for (const flow of this.flows.values()) if (flow.exitId === previous) {
+      flow.exitId = canonical;
+      if (flow.decision) flow.decision.exitId = canonical;
+    }
   }
   private normalizeSessions(): boolean {
     let changed = false;
@@ -138,32 +145,50 @@ export class GameMultipath {
         responding: p.accepted && performance.now() - p.lastReply < fresh, active: p.active, firstReplies: p.wins })),
       receivedPackets: this.received, duplicateReplies: this.duplicates, uploadedPackets: this.uploaded };
   }
+  private activeMatchFlows(): Flow[] {
+    const now = Date.now();
+    return [...this.flows.values()].filter((flow) => flow.counted && flow.kind === "match" && now - flow.touched < ACTIVE_MATCH_MS)
+      .sort((a, b) => b.received - a.received);
+  }
+  private activePaths(flow: Flow): Path[] {
+    return this.paths.filter((path) => path?.accepted && path.active && path.exitNodeId === flow.exitId && path.instance === flow.instance
+      && !path.transport.closed && performance.now() - path.lastReply < (this.playing ? 6_000 : 65_000));
+  }
   runtimeSnapshot(): GameRuntimeSnapshot {
-    const current = [...this.flows.values()].filter((flow) => flow.kind === "match").sort((a, b) => b.received - a.received)[0];
+    const activeMatches = this.activeMatchFlows(); const current = activeMatches[0];
     const target = current ? { address: current.address, port: current.port } : this.lastMatch;
     const exits = target ? this.comparisons(target) : [];
-    const chosen = exits.find((exit) => exit.nodeId === (current?.exitId ?? this.lastExit));
     const estimates = target ? this.estimates(target) : [];
-    const better = target ? chooseExit(this.estimates(target, true), current?.exitId ?? this.lastExit) : null;
+    const next = target ? this.decideExit(target, true) : null;
+    const better = next?.estimate ?? null;
     const selected = estimates.find((exit) => exit.nodeId === current?.exitId);
     const metadata = current ? this.measurements.get(current.exitId)?.find((item) => item.address === current.address && item.port === current.port)?.metric : null;
+    const currentPaths = current ? this.activePaths(current) : [];
+    const pathCount = current ? current.exitId === "direct" ? Number(Boolean(current.direct && !current.direct.closed)) : currentPaths.length : 0;
+    const protectionReason = !current ? "Нет активного UDP-потока матча"
+      : current.exitId === "direct" ? "Прямой путь: резервные копии через Levik не используются"
+      : !this.options.protection ? "Дублирование выключено"
+      : this.limitedByUpload ? "Похоже на очередь отдачи: временно оставлен один путь, затем защита проверится снова"
+      : pathCount < 2 ? "Для текущего потока нет двух рабочих путей" : null;
     return { ...(current ? { gameId: current.gameId } : {}), activeFlowCount: [...this.flows.values()].filter((flow) => flow.counted && flow.exitId).length,
       currentMatch: current ? { address: current.address, port: current.port,
         ...(metadata?.region ? { region: metadata.region } : {}), ...(metadata?.operator ? { operator: metadata.operator } : {}) } : null,
       lastMatch: this.lastMatch, exits, selectedExitId: current?.exitId ?? this.lastExit,
+      routeDecision: current?.decision ? { ...current.decision } : null, nextRouteDecision: next?.decision ?? null,
+      activeMatchFlowCount: activeMatches.length, mixedMatchExits: new Set(activeMatches.map((flow) => flow.exitId)).size > 1,
       selectionReason: this.options.exitScope === "session" && this.sessionExit && Boolean(this.node(this.sessionExit) && this.node(this.sessionExit)!.state !== "enabled")
-        ? "Выход завершает текущие потоки; новые потоки этой игры ждут её перезапуска" : chosen?.reason ?? null,
+        ? "Выход завершает текущие потоки; новые потоки этой игры ждут её перезапуска" : current?.decision?.reason ?? null,
       ingressPaths: this.paths.filter(Boolean).map((path) => ({ routeId: String(path.index), entryNodeId: path.entryNodeId, exitNodeId: path.exitNodeId,
-        latencyMs: path.latencyMs, active: path.active && (!current || path.exitNodeId === current.exitId) })),
+        latencyMs: path.latencyMs, active: currentPaths.includes(path) })),
       protection: { enabled: this.options.protection, limitedByUpload: this.limitedByUpload,
-        reason: this.limitedByUpload ? "Похоже на очередь отдачи: временно оставлен один путь, затем защита проверится снова" : null },
-      shadowAlternative: better && selected && selected.confidence !== "access" && selected.confidence !== "unavailable"
-        && better.confidence !== "access" && better.confidence !== "unavailable"
+        effective: this.options.protection && pathCount >= 2, pathCount, reason: protectionReason },
+      shadowAlternative: better && selected && selected.evidence === "endpoint" && better.evidence === "endpoint" && selected.confidence === better.confidence
         && better.nodeId !== selected.nodeId && selected.latencyMs !== null && better.latencyMs !== null
+        && selected.latencyMs > better.latencyMs
         ? { nodeId: better.nodeId, name: exits.find((exit) => exit.nodeId === better.nodeId)?.name ?? better.nodeId,
           savingMs: Math.max(0, Math.round(selected.latencyMs - better.latencyMs)) } : null,
       matchReport: this.matchReport, estimateHistory: [...this.estimateHistory],
-      compatibility: this.paths.some((path) => path.modern && path.probe) ? "full" : "legacy",
+      compatibility: current?.exitId === "direct" || this.paths.some((path) => (!current || path.exitNodeId === current.exitId) && path.modern) ? "full" : "legacy",
       meshRows: [...this.meshRows].map(([nodeId, neighbors]) => ({ nodeId, neighbors: [...neighbors] })) };
   }
   async listen(): Promise<{ port: number; uuid: string }> {
@@ -187,7 +212,8 @@ export class GameMultipath {
           if (!this.acceptingNewFlows) return;
           if (this.flows.size >= 32) { socket.destroy(); return; }
           flow = { socket, ...target, id: randomBytes(8), sequence: 0, seen: new SequenceWindow(),
-            counted: this.counting, xudp: mode === "xudp", startedAt: Date.now(), touched: Date.now(), sent: 0, received: 0, exitId: "", instance: null, direct: null, pending: [], kind: "service", rescued: 0, latencyHistory: [], evidence: new DeliveryEvidence(), gameId: this.options.gameId ?? "custom", finished: false, session: null,
+            counted: this.counting, xudp: mode === "xudp", startedAt: Date.now(), touched: Date.now(), sent: 0, received: 0, exitId: "", instance: null, direct: null, pending: [], kind: "service", rescued: 0, latencyHistory: [], lowerBoundSamples: false, evidence: new DeliveryEvidence(), gameId: this.options.gameId ?? "custom", finished: false, session: null,
+            decision: null, protectionRequested: this.options.protection, maxPathCount: 0,
             cleanup: () => { if (localFlows.get(key) === flow) localFlows.delete(key); } };
           localFlows.set(key, flow); this.flows.set(flow.id.toString("hex"), flow);
         }
@@ -334,12 +360,22 @@ export class GameMultipath {
         this.playing = true;
         const estimate = this.estimates(flow).find((item) => item.nodeId === flow.exitId);
         const comparable = estimate && estimate.confidence !== "access" && estimate.confidence !== "unavailable";
-        if (comparable && estimate.latencyMs !== null) flow.latencyHistory.push(estimate.latencyMs);
+        if (comparable && estimate.latencyMs !== null) {
+          flow.latencyHistory.push(estimate.latencyMs);
+          flow.lowerBoundSamples ||= estimate.evidence === "lower-bound";
+        }
         if (flow.latencyHistory.length > 3600) flow.latencyHistory.shift();
-        this.estimateHistory.push({ measuredAt: now, latencyMs: comparable ? estimate.latencyMs : null, approximate: estimate?.approximate ?? true });
-        while (this.estimateHistory.length > 120) this.estimateHistory.shift();
       }
       if (now - flow.touched > 60_000) { this.finishFlow(flow); this.flows.delete(flow.id.toString("hex")); }
+    }
+    const principal = this.activeMatchFlows()[0]; const principalId = principal?.id.toString("hex") ?? null;
+    if (principalId !== this.estimateFlowId) { this.estimateFlowId = principalId; this.estimateHistory.length = 0; }
+    if (principal) {
+      const estimate = this.estimates(principal).find((item) => item.nodeId === principal.exitId);
+      const comparable = estimate && estimate.confidence !== "access" && estimate.confidence !== "unavailable";
+      this.estimateHistory.push({ measuredAt: now, latencyMs: comparable ? estimate.latencyMs : null,
+        approximate: estimate?.approximate ?? true, lowerBound: estimate?.evidence === "lower-bound" });
+      while (this.estimateHistory.length > 120) this.estimateHistory.shift();
     }
     const activeExits = new Set([...this.flows.values()].filter((flow) => flow.counted && flow.exitId !== "direct").map((flow) => flow.exitId));
     for (const exit of activeExits) void this.ensureMeshPaths(exit);
@@ -348,7 +384,6 @@ export class GameMultipath {
       path.accepted = false; path.epoch++; path.transport.close(); delete this.paths[slot];
       this.exitPathCounts.set(path.exitNodeId, Math.max(-1, ...this.paths.filter((item) => item?.exitNodeId === path.exitNodeId).map((item) => item.pathSlot)) + 1);
     }
-    for (const [key, item] of this.observed) if (now - item.at > 10_000) this.observed.delete(key);
     for (const [key, target] of this.destinations) if (![...this.flows.values()].some((flow) => flow.address === target.address && flow.port === target.port)) this.destinations.delete(key);
     const active = this.playing || [...this.flows.values()].some((flow) => now - flow.touched < 5_000);
     if (now - this.lastProbeAt >= (active ? 1_000 : 60_000)) {
@@ -367,22 +402,10 @@ export class GameMultipath {
     flow.touched = Date.now(); flow.sent++;
     if (!flow.exitId) {
       this.selectActive();
-      const targetKey = `${flow.address}:${flow.port}`;
-      if (publicIPv4(flow.address) && ![25, 53, 853].includes(flow.port)) {
-        if (this.observed.size >= 128) this.observed.delete(this.observed.keys().next().value!);
-        this.observed.set(targetKey, { target: { address: flow.address, port: flow.port }, at: Date.now() });
-        const burst = [...this.observed.values()].filter((item) => Date.now() - item.at < 5000);
-        if (burst.length >= 3) for (const item of burst) this.admitTarget(item.target);
-      }
-      const history = this.options.history?.filter((item) => item.gameId === this.options.gameId && item.subnet === subnet24(flow.address))
-        .sort((a, b) => b.updatedAt - a.updatedAt)[0];
-      const estimates = this.estimates(flow, true);
-      const fallbackHistory = estimates.every((item) => item.confidence === "access" || item.confidence === "unavailable") ? history?.nodeId : null;
-      const selected = chooseExit(estimates, this.lastExit, this.options.preferredExitId ? this.canonical(this.options.preferredExitId) : fallbackHistory ? this.canonical(fallbackHistory) : null);
-      const session = flow.counted && this.options.exitScope === "session" ? this.sessionExit ?? this.primaryExitId : null;
-      if (session && Boolean(this.node(session) && this.node(session)!.state !== "enabled")) return;
-      flow.exitId = session ?? selected?.nodeId ?? "";
-      if (!flow.exitId) return;
+      if (flow.counted) this.admitTarget(flow);
+      const selected = this.decideExit(flow, flow.counted, flow.gameId);
+      if (!selected) return;
+      flow.exitId = selected.decision.exitId; flow.decision = { ...selected.decision, selectedAt: Date.now() };
       if (flow.counted && this.options.exitScope === "session") this.sessionExit = flow.exitId;
       if (flow.counted) this.lastExit = flow.exitId;
       const route = this.paths.filter((path) => path?.exitNodeId === flow.exitId && path.accepted && path.active && !path.transport.closed
@@ -402,12 +425,36 @@ export class GameMultipath {
     } else {
       const packet: Packet = { kind: Kind.Up, path: 0, session: this.session, flow: flow.id,
         sequence: flow.sequence++, address: flow.address, port: flow.port, payload };
-      for (const route of this.paths) if (route?.active && route.exitNodeId === flow.exitId && route.instance === flow.instance) {
+      const paths = this.activePaths(flow); flow.maxPathCount = Math.max(flow.maxPathCount, paths.length);
+      for (const route of paths) {
         route.transport.send(encode({ ...packet, session: flow.session ?? route.session, path: route.pathSlot, ...(route.modern ? { version: 2 as const, exitNodeId: flow.exitId,
           hops: 0, instance: Buffer.from(flow.instance!, "hex") } : {}) })); this.uploadBytes += payload.length;
       }
     }
     if (flow.counted) this.uploaded++;
+  }
+  private decideExit(target: ProbeTarget, counted: boolean, gameId = this.options.gameId) {
+    const estimates = this.estimates(target, true);
+    const history = this.options.history?.filter((item) => item.gameId === gameId && item.subnet === subnet24(target.address))
+      .sort((a, b) => b.updatedAt - a.updatedAt)[0];
+    const historyId = estimates.every((item) => item.confidence === "access" || item.confidence === "unavailable") ? history?.nodeId : null;
+    const preference = this.options.preferredExitId ? this.canonical(this.options.preferredExitId) : null;
+    const fallbackHistory = historyId ? this.canonical(historyId) : null;
+    const selected = chooseExit(estimates, this.lastExit, preference ?? fallbackHistory);
+    const session = counted && this.options.exitScope === "session" ? this.sessionExit ?? this.primaryExitId : null;
+    if (session && Boolean(this.node(session) && this.node(session)!.state !== "enabled")) return null;
+    const exitId = session ?? selected?.nodeId; if (!exitId) return null;
+    const estimate = estimates.find((item) => item.nodeId === exitId) ?? null;
+    const source: GameRouteDecision["source"] = session ? "session" : exitId === preference ? "manual" : exitId === fallbackHistory ? "history"
+      : estimate?.evidence === "access" || estimate?.evidence === "unavailable" ? "access" : "measured";
+    const reason = source === "session" ? "Сохранён выход текущего запуска игры"
+      : source === "manual" ? "Выход выбран вручную при открытии UDP-потока"
+      : source === "history" ? "Выход выбран по сохранённой истории игры: полных замеров при открытии потока ещё не было"
+      : source === "access" ? "При открытии потока замеров до сервера ещё не было; выход выбран по задержке A"
+      : estimate?.evidence === "lower-bound" ? "При открытии потока доступна только оценка до последнего отвечающего узла"
+      : "Выход выбран по доступным замерам до сервера при открытии UDP-потока";
+    const decision: GameRouteDecision = { exitId, exitName: exitId === "direct" ? "Напрямую, без VPN" : this.node(exitId)?.name ?? "Игровой узел", source, reason };
+    return { estimate, decision };
   }
   private admitTarget(target: ProbeTarget): void {
     if (!publicIPv4(target.address) || [25, 53, 853].includes(target.port)) return;
@@ -427,7 +474,7 @@ export class GameMultipath {
         flow.received++; flow.touched = Date.now(); if (flow.counted) this.received++; this.deliver(flow, payload);
       }, this.abort.signal, { address: flow.address, port: flow.port });
       if (this.abort.signal.aborted || !this.flows.has(flow.id.toString("hex"))) { transport.close(); return; }
-      flow.direct = transport; for (const payload of flow.pending) transport.send(payload); flow.pending = [];
+      flow.direct = transport; for (const payload of flow.pending) transport.send(payload); flow.pending = []; flow.maxPathCount = 1;
     } catch { flow.pending = []; /* Keep this flow pinned, fail closed. */ }
   }
   private estimates(target: ProbeTarget, prospective = false) {
@@ -467,10 +514,24 @@ export class GameMultipath {
         state: node?.state ?? "enabled", access: path?.quality.snapshot() ?? null, egress: estimate.egress,
         direct: this.directMeasurements.get(`${target.address}:${target.port}`) ?? null, estimatedRttMs: estimate.confidence === "access" ? null : estimate.latencyMs,
         jitterMs: estimate.jitterMs, lossPercent: estimate.confidence === "access" ? null : estimate.lossPercent,
-        confidence: estimate.confidence, approximate: estimate.approximate,
+        confidence: estimate.confidence, evidence: estimate.evidence, approximate: estimate.approximate,
+        ...(estimate.nodeId !== "direct" ? { egressStatus: this.egressStatus(estimate.nodeId, target, estimate.egress) } : {}),
         reason: estimate.nodeId === "direct" ? "Прямой путь через физический интерфейс, без VPN" : estimate.confidence === "access"
           ? "Замер до сервера ещё не готов; выбран вход с наименьшей задержкой" : "Оценка до этого сервера по A + B; текущие потоки сохраняют выход" };
     });
+  }
+  private egressStatus(nodeId: string, target: ProbeTarget, egress: Segment | null): NonNullable<GameExitComparison["egressStatus"]> {
+    const paths = this.paths.filter((path) => path?.accepted && path.exitNodeId === nodeId);
+    if (!paths.some((path) => path.modern)) return "legacy";
+    if (!paths.some((path) => path.probe) || this.probeStates.get(nodeId) === "service-unavailable") return "service-unavailable";
+    if (this.probeStates.get(nodeId) === "collecting") return "collecting";
+    if (egress && egress.latencyMs !== null) return "ready";
+    const values = this.measurements.get(nodeId) ?? [];
+    const raw = values.find((item) => item.address === target.address && item.port === target.port)
+      ?? values.find((item) => subnet24(item.address) === subnet24(target.address));
+    if (!raw || raw.metric.samples < GAME_POLICY.minimumSamples) return "collecting";
+    if (Date.now() - raw.metric.measuredAt >= GAME_POLICY.expiryMs) return "stale";
+    return "unavailable";
   }
   private selectActive(): void {
     for (const path of this.paths) if (path) path.active = false;
@@ -598,6 +659,7 @@ export class GameMultipath {
           route.entryNodeId = route.exitNodeId = body.nodeId;
         }
         route.modern = true; route.mesh = body.capabilities.mesh === true; route.probe = body.capabilities.probe === true;
+        if (!route.probe) { this.measurements.delete(route.exitNodeId); this.probeStates.set(route.exitNodeId, "service-unavailable"); }
         const load = isRecord(body.load) ? body.load : {};
         const finite = (key: string): number => typeof load[key] === "number" && Number.isFinite(load[key]) ? Math.max(0, load[key]) : 0;
         route.cpuPercent = Math.min(100, finite("cpuPercent"));
@@ -620,14 +682,23 @@ export class GameMultipath {
         if (Number.isInteger(body.nextCursor) && Number(body.nextCursor) > 0 && Number(body.nextCursor) < 64)
           this.control(route, Kind.MeshRow, { cursor: Number(body.nextCursor) });
       } else if (packet.kind === Kind.ProbeResult && Array.isArray(body.results)) {
+        if (body.status === "service-unavailable") {
+          this.measurements.delete(route.exitNodeId); this.probeStates.set(route.exitNodeId, "service-unavailable"); return;
+        }
+        if (!body.results.length) {
+          this.measurements.delete(route.exitNodeId); this.probeStates.set(route.exitNodeId, "collecting"); return;
+        }
         const existing = this.measurements.get(route.exitNodeId) ?? [];
+        let accepted = false;
         for (const value of body.results.slice(0, 32)) {
           const item = parseMeasurement(value);
           if (!item || !this.destinations.has(`${item.address}:${item.port}`)) continue;
           const index = existing.findIndex((entry) => entry.address === item.address && entry.port === item.port);
           const metric = { address: item.address, port: item.port, metric: this.segment(item) };
+          accepted = true;
           if (index < 0) existing.push(metric); else existing[index] = metric;
         }
+        if (accepted) this.probeStates.delete(route.exitNodeId);
         this.measurements.set(route.exitNodeId, existing.slice(-32));
       }
       return;
@@ -661,7 +732,10 @@ export class GameMultipath {
       averageRttMs: sorted.length ? sorted.reduce((a, b) => a + b, 0) / sorted.length : null,
       p95RttMs: sorted[Math.max(0, Math.ceil(sorted.length * 0.95) - 1)] ?? null,
       jitterMs: flow.latencyHistory.length > 1 ? flow.latencyHistory.slice(1).reduce((sum, value, index) => sum + Math.abs(value - flow.latencyHistory[index]!), 0) / (flow.latencyHistory.length - 1) : null,
-      ...flow.evidence.snapshot(), receivedPackets: flow.received, approximate: true };
+      ...flow.evidence.snapshot(), receivedPackets: flow.received, approximate: true, gameId: flow.gameId,
+      server: { ...this.lastMatch }, exitId: flow.exitId, exitName: flow.decision?.exitName ?? this.node(flow.exitId)?.name ?? "Игровой узел",
+      ...(flow.decision ? { routeDecision: { ...flow.decision } } : {}),
+      protection: { enabled: flow.protectionRequested, pathCount: flow.maxPathCount }, lowerBound: flow.lowerBoundSamples };
   }
   async stop(): Promise<void> {
     this.password = ""; this.abort.abort(); if (this.timer) clearInterval(this.timer); this.timer = null;

@@ -16,8 +16,9 @@ export interface ExitCandidate { nodeId: string; state: GameNode["state"]; acces
   egress: DestinationMetric[]; mesh?: Segment; cpuPercent?: number; direct?: Segment; processingNodes?: number;
   networkBytesPerSecond?: number; activeFlows?: number }
 export type Confidence = "exact" | "subnet" | "operator" | "region" | "access" | "unavailable";
+export type MeasurementEvidence = "endpoint" | "lower-bound" | "access" | "unavailable";
 export interface PathEstimate { nodeId: string; latencyMs: number | null; jitterMs: number | null;
-  lossPercent: number | null; score: number; confidence: Confidence; approximate: boolean; egress: Segment | null }
+  lossPercent: number | null; score: number; confidence: Confidence; evidence: MeasurementEvidence; approximate: boolean; egress: Segment | null }
 export const subnet24 = (address: string): string => address.split(".").slice(0, 3).join(".") + ".0/24";
 
 export function combineSegments(segments: Segment[], nodes = 1): Pick<PathEstimate, "latencyMs" | "jitterMs" | "lossPercent"> {
@@ -30,7 +31,7 @@ export function combineSegments(segments: Segment[], nodes = 1): Pick<PathEstima
 export function estimateExit(candidate: ExitCandidate, target: { address: string; port: number; routeKey?: string; region?: string },
   sessionRegions: string[] = [], now = Date.now()): PathEstimate {
   const unavailable: PathEstimate = { nodeId: candidate.nodeId, latencyMs: null, jitterMs: null, lossPercent: null,
-    score: Infinity, confidence: "unavailable", approximate: true, egress: null };
+    score: Infinity, confidence: "unavailable", evidence: "unavailable", approximate: true, egress: null };
   if (candidate.state !== "enabled") return unavailable;
   const fresh = (item: Segment): boolean => item.samples >= GAME_POLICY.minimumSamples && item.latencyMs !== null && Number.isFinite(item.latencyMs)
     && now >= item.measuredAt - 5_000 && now - item.measuredAt < GAME_POLICY.expiryMs && item.lossPercent <= GAME_POLICY.maxLossPercent;
@@ -38,7 +39,8 @@ export function estimateExit(candidate: ExitCandidate, target: { address: string
     if (!fresh(candidate.direct)) return unavailable;
     const metric = candidate.direct;
     return { nodeId: candidate.nodeId, latencyMs: metric.latencyMs, jitterMs: metric.jitterMs, lossPercent: metric.lossPercent,
-      score: scoreMetric(metric, now), confidence: "exact", approximate: metric.approximate, egress: null };
+      score: scoreMetric(metric, now), confidence: "exact", evidence: metric.method === "ttl-hop" ? "lower-bound" : "endpoint",
+      approximate: metric.approximate || metric.method === "ttl-hop", egress: null };
   }
   if (!candidate.access || !fresh(candidate.access) || (candidate.mesh && !fresh(candidate.mesh))) return unavailable;
   const metrics = candidate.egress.filter((item) => fresh(item.metric));
@@ -52,27 +54,30 @@ export function estimateExit(candidate: ExitCandidate, target: { address: string
   const confidence: Confidence = exact ? (exact.metric.scope === "subnet" || (!exact.metric.scope && exact.metric.approximate && exact.metric.method !== "ttl-hop") ? "subnet" : "exact")
     : subnet ? "subnet" : operator ? "operator" : region ? "region" : "access";
   const segments = [candidate.access, ...(candidate.mesh ? [candidate.mesh] : []), ...(chosen ? [chosen.metric] : [])];
+  const evidence: MeasurementEvidence = !chosen ? "access" : segments.some((item) => item.method === "ttl-hop") ? "lower-bound" : "endpoint";
   const combined = combineSegments(segments, candidate.processingNodes ?? (candidate.mesh ? 2 : 1));
   const score = combined.latencyMs! + GAME_POLICY.jitterWeight * (combined.jitterMs ?? 0) + GAME_POLICY.lossWeightMs * (combined.lossPercent ?? 0)
     + segments.reduce((sum, item) => sum + Math.max(0, now - item.measuredAt - GAME_POLICY.freshMs) / 1000 * GAME_POLICY.stalePenaltyMsPerSecond, 0)
     + Math.max(0, Math.min(100, candidate.cpuPercent ?? 0)) / 100 * GAME_POLICY.loadWeightMs
     + Math.min(1, Math.max(0, candidate.networkBytesPerSecond ?? 0) / GAME_POLICY.linkBytesPerSecond) * GAME_POLICY.networkLoadWeightMs
     + Math.min(1, Math.max(0, candidate.activeFlows ?? 0) / 1024) * GAME_POLICY.flowLoadWeightMs;
-  return { nodeId: candidate.nodeId, ...combined, score, confidence, approximate: true, egress: chosen?.metric ?? null };
+  return { nodeId: candidate.nodeId, ...combined, score, confidence, evidence, approximate: true, egress: chosen?.metric ?? null };
 }
 function scoreMetric(metric: Segment, now: number): number {
   return metric.latencyMs! + GAME_POLICY.jitterWeight * (metric.jitterMs ?? 0) + GAME_POLICY.lossWeightMs * metric.lossPercent
     + Math.max(0, now - metric.measuredAt - GAME_POLICY.freshMs) / 1000 * GAME_POLICY.stalePenaltyMsPerSecond;
 }
 
-/** Compare within the best available evidence tier; unknown B must not beat a measured destination by omitting B. */
+/** Completed measurements precede lower-bound fallback; unknown B cannot win by omitting B. */
 export function chooseExit(estimates: PathEstimate[], previousId: string | null = null, preferredId: string | null = null): PathEstimate | null {
   const tiers: Record<Confidence, number> = { exact: 0, subnet: 1, operator: 2, region: 3, access: 4, unavailable: 5 };
-  const ranked = estimates.filter((item) => Number.isFinite(item.score)).sort((a, b) => tiers[a.confidence] - tiers[b.confidence] || a.score - b.score);
+  const evidence: Record<MeasurementEvidence, number> = { endpoint: 0, "lower-bound": 1, access: 2, unavailable: 3 };
+  const tier = (item: PathEstimate): number => evidence[item.evidence] * 10 + tiers[item.confidence];
+  const ranked = estimates.filter((item) => Number.isFinite(item.score)).sort((a, b) => tier(a) - tier(b) || a.score - b.score);
   const best = ranked.find((item) => item.nodeId === preferredId) ?? ranked[0];
   if (!best) return null;
   const previous = ranked.find((item) => item.nodeId === previousId);
-  if (!preferredId && previous && tiers[previous.confidence] <= tiers[best.confidence]
+  if (!preferredId && previous && tier(previous) === tier(best)
     && previous.score - best.score < Math.max(GAME_POLICY.hysteresisMs, previous.score * GAME_POLICY.hysteresisRatio)) return previous;
   return best;
 }
