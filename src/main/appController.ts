@@ -426,8 +426,9 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     }
     this.state.busy = false;
     this.emitChanged();
-    // Before the first connection: another VPN or a leftover core is shown up front.
-    void this.checkConflicts();
+    // Before the first connection: a core left from a crash holds the adapter
+    // and ports, and another VPN is shown up front.
+    const leftovers = this.stopLeftoverCores();
     void this.reconcileFavorites();
     // Before any tunnel: protocol advice describes the user's own operator.
     void this.refreshRemoteConfig();
@@ -445,6 +446,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
       }
       this.refreshHomeRoadSoon();
     }
+    await leftovers;
     if (this.profile) {
       if (this.state.settings.autoConnectOnLaunch) {
         try {
@@ -966,7 +968,12 @@ export class AppController extends EventEmitter<AppControllerEvents> {
   async installUpdate(): Promise<void> {
     if (!this.updater) throw new Error("Модуль обновлений недоступен");
     await this.updater.install(
-      () => this.shutdown("app_update"),
+      async () => {
+        await this.shutdown("app_update");
+        // The installer runs without administrator rights and cannot end an
+        // elevated core that would keep the new xray.exe from being written.
+        await this.stopLeftoverCores();
+      },
       () => this.emit("updateInstalling"),
     );
   }
@@ -2486,6 +2493,20 @@ export class AppController extends EventEmitter<AppControllerEvents> {
       return left;
     } finally {
       this.patch({ conflicts: { ...this.state.conflicts, closing: false } });
+    }
+  }
+
+  /** Ends Levik's own cores still running without a tunnel; they are always left from a crash. */
+  private async stopLeftoverCores(): Promise<void> {
+    try {
+      await Promise.race([this.checkConflicts(), delay(25_000)]);
+      const pids = this.detectedConflicts.filter(({ conflict }) => conflict.kind === "orphan").flatMap(({ pids }) => pids);
+      if (!pids.length || this.xray.isRunning()) return;
+      this.addLog("Останавливаем ядро Levik VPN, оставшееся от прошлого запуска");
+      await closeConflictingProcesses(pids);
+      await Promise.race([this.checkConflicts(), delay(25_000)]);
+    } catch (error) {
+      this.addLog(`Остановка старого ядра: ${messageOf(error)}`);
     }
   }
 
