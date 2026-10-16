@@ -31,7 +31,24 @@ export type CabinetTarget =
   | "/dashboard/account-security"
   | "/dashboard/rules"
   | "/dashboard/family"
-  | "/dashboard/notifications";
+  | "/dashboard/notifications"
+  | "/dashboard/road";
+
+/** «Дорога домой»: how the people this computer lets in go out to the internet. */
+export type RoadMode = "direct" | "vpn";
+export type RoadExitStatus = "off" | "starting" | "online" | "offline" | "error";
+
+/** This computer as a home exit, docs/app-platform.md "Home road". */
+export interface HomeRoadSnapshot {
+  /** The website offers the road (the relay is installed). */
+  available: boolean;
+  enabled: boolean;
+  name: string | null;
+  mode: RoadMode | null;
+  lanAccess: boolean;
+  status: RoadExitStatus;
+  detail: string | null;
+}
 
 export interface WindowsProcess {
   name: string;
@@ -150,6 +167,8 @@ export interface AppSnapshot {
   remote: RemoteSnapshot;
   /** A sign-in started on this computer is waiting for approval. */
   loginPending: boolean;
+  /** null until the account says whether the road is offered. */
+  homeRoad: HomeRoadSnapshot | null;
   update: {
     status: UpdateStatus;
     version: string | null;
@@ -237,6 +256,8 @@ export interface LevikDesktopApi {
   sendRemoteCommand(deviceId: string, command: RemoteCommand): Promise<void>;
   /** Opens a diagnostics report collected for this app and copies its link. */
   openRemoteNote(commandId: string): Promise<void>;
+  /** «Пускать ко мне домой»: this computer becomes (or stops being) a home exit. */
+  setHomeRoad(enabled: boolean): Promise<void>;
   onSnapshot(listener: (snapshot: AppSnapshot) => void): () => void;
   /** A levik:// link or a notification asks for a tab. */
   onNavigate(listener: (tab: AppTab) => void): () => void;
@@ -269,6 +290,7 @@ export const IPC = {
   applyDiagnosisAction: "levik:apply-diagnosis-action",
   dismissAnnouncement: "levik:dismiss-announcement",
   openCabinet: "levik:open-cabinet",
+  setHomeRoad: "levik:set-home-road",
   answerApproval: "levik:answer-approval",
   refreshRemote: "levik:refresh-remote",
   sendRemoteCommand: "levik:send-remote-command",

@@ -8,6 +8,7 @@ import type {
   RemoteCommandsResponse,
   AccountNotificationsResponse,
   HomeSightingResponse,
+  RoadExitResponse,
   RemoteDevicesResponse,
   SettingsDocumentResponse,
   TunnelProfileResponse,
@@ -91,7 +92,17 @@ export class MobileApiClient {
   }
 
   tunnelProfile(accessToken: string, subscriptionId: string): Promise<TunnelProfileResponse> {
-    return this.request("POST", "/api/mobile/v1/tunnel-profile", { subscriptionId }, accessToken);
+    // «🏠» servers of the account's home exits come with the profile (docs/app-platform.md "Home road").
+    return this.request("POST", "/api/mobile/v1/tunnel-profile", { subscriptionId }, accessToken, { "X-Levik-Road": "1" });
+  }
+
+  /** This computer's home exit with a fresh relay token, or null. */
+  roadExit(accessToken: string): Promise<RoadExitResponse> {
+    return this.request("GET", "/api/mobile/v1/road/exit", null, accessToken);
+  }
+
+  setRoadExit(accessToken: string, enabled: boolean): Promise<RoadExitResponse> {
+    return this.request("POST", "/api/mobile/v1/road/exit", { enabled }, accessToken);
   }
 
   async logout(accessToken: string): Promise<void> {
@@ -182,6 +193,7 @@ export class MobileApiClient {
     path: string,
     payload: Record<string, unknown> | null,
     accessToken: string | null,
+    extraHeaders: Record<string, string> = {},
   ): Promise<Response> {
     let origin: URL;
     try { origin = await this.endpoints.resolve(); }
@@ -200,6 +212,7 @@ export class MobileApiClient {
         signal: controller.signal,
         headers: {
           ...this.headers(signed, accessToken),
+          ...extraHeaders,
           ...(hasBody ? { "Content-Type": "application/json" } : {}),
         },
       };

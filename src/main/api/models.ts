@@ -39,6 +39,12 @@ export interface RemoteCommandsResponse {
   commands: unknown;
 }
 
+export interface RoadExitResponse {
+  ok: boolean;
+  available?: unknown;
+  exit?: unknown;
+}
+
 export interface HomeSightingResponse {
   ok: boolean;
   home: unknown;

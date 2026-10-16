@@ -37,6 +37,7 @@ let gameSearchQuery = "";
 let favoritesOnly = false;
 let devicesSubscriptionId: string | null = null;
 let supportDialog: { creating: boolean; url: string | null } | null = null;
+let homeRoadSaving = false;
 /** "It's not the VPN": checked each time the support dialog opens. */
 let diagnosis: { running: boolean; result: DiagnosisSummary | null } = { running: false, result: null };
 let toastTimer: ReturnType<typeof setTimeout> | null = null;
@@ -371,6 +372,7 @@ function renderProfile(): string {
     <div class="profile-grid">
       ${accountSection}
       ${renderRemoteDevices()}
+      ${renderHomeRoad()}
       <section class="section card"><h2 class="card-title">Авторизовать устройство</h2><div class="card-caption">Введите код, показанный на экране другого устройства.</div><form class="activation-form" id="activation-form"><label for="activation-code">Код активации</label><div class="activation-controls"><input id="activation-code" type="text" inputmode="text" autocomplete="one-time-code" maxlength="19" placeholder="XXXX-XXXX-XXXX-XXXX" value="${escapeAttribute(activationCodeInput)}" ${activationSubmitting ? "disabled" : ""} /><button class="button primary" type="submit" ${activationSubmitting ? "disabled" : ""}>${activationSubmitting ? `<span class="spinner"></span>` : icon("link")} Авторизовать</button></div></form></section>
       <section class="section card"><h2 class="card-title">Настройки</h2><div class="settings-list">
         ${selectSetting("Маршрутизация", "Как направлять системный трафик", "routing-mode", state.settings.routingMode, [["global","Весь трафик"],["bypassRu","Обход ресурсов РФ"],["blockedOnly","Только заблокированное"]])}
@@ -437,6 +439,27 @@ function renderRemoteDevices(): string {
       ? `<div class="device-list remote-devices">${others.map(remoteDeviceRow).join("")}</div>`
       : `<div class="empty">Других устройств с Levik VPN пока нет</div>`;
   return `<section class="section card" aria-labelledby="remote-devices-title"><div class="section-head"><div><h2 class="card-title" id="remote-devices-title">Мои устройства</h2><div class="card-caption">Пульт помогает другому вашему устройству: подключить VPN, выбрать сервер или собрать диагностику.</div></div><button class="button icon-button" id="remote-refresh-button" aria-label="Обновить список устройств" ${remoteLoading ? "disabled" : ""}>${icon("refresh")}</button></div>${list}</section>`;
+}
+
+/** «Дорога домой», docs/app-platform.md "Home road": this computer as the home exit. */
+function renderHomeRoad(): string {
+  const road = state?.homeRoad;
+  if (!state || !road || (!road.available && !road.enabled)) return "";
+  const help = road.enabled ? homeRoadStatus(road) : "Ваши устройства и семья выходят в интернет через этот компьютер — как из дома. Трафик считается по тарифу того, кто подключается";
+  return `<section class="section card" aria-labelledby="home-road-title"><div class="section-head"><div><h2 class="card-title" id="home-road-title">Дорога домой</h2><div class="card-caption">Компьютер должен быть включён, а Levik VPN — запущен. Кого пускать и как, выбирается в кабинете.</div></div></div>
+    <div class="settings-list"><div class="setting-row"><div><div class="setting-name">Пускать ко мне домой</div><div class="setting-help">${escapeHtml(help)}</div></div><button class="switch ${road.enabled ? "on" : ""}" role="switch" aria-checked="${road.enabled}" id="home-road-switch" aria-label="Пускать ко мне домой" ${homeRoadSaving ? "disabled" : ""}></button></div>
+    ${road.enabled ? `<div class="setting-row"><div><div class="setting-name">Кто может подключаться</div><div class="setting-help">Ваши устройства, члены семьи и режим выхода</div></div><button class="button compact" id="home-road-cabinet-button">${icon("external")} Настроить</button></div>` : ""}</div></section>`;
+}
+
+function homeRoadStatus(road: NonNullable<AppSnapshot["homeRoad"]>): string {
+  const way = [road.mode === "vpn" ? "через VPN этого компьютера" : "домашний интернет мимо VPN", road.lanAccess ? "с доступом к домашней сети" : ""].filter(Boolean).join(", ");
+  switch (road.status) {
+    case "online": return `Открыта: «${road.name ?? "этот компьютер"}», ${way}`;
+    case "starting": return "Запускается…";
+    case "offline": return "Нет связи с Levik, переподключаемся…";
+    case "error": return road.detail ?? "Выход не запустился";
+    case "off": return "Выключена";
+  }
 }
 
 function remoteDeviceRow(device: RemoteDevice): string {
@@ -854,6 +877,8 @@ function bindPageEvents(): void {
   }));
   document.querySelectorAll<HTMLElement>("[data-renew-subscription-id]").forEach((button) => button.addEventListener("click", () => run(() => window.levik.openCabinet("/dashboard/subscriptions"))));
   document.getElementById("cabinet-button")?.addEventListener("click", () => run(() => window.levik.openCabinet("/dashboard")));
+  document.getElementById("home-road-cabinet-button")?.addEventListener("click", () => run(() => window.levik.openCabinet("/dashboard/road")));
+  document.getElementById("home-road-switch")?.addEventListener("click", () => void toggleHomeRoad());
   document.querySelectorAll<HTMLElement>("[data-announcement-link]").forEach((button) => button.addEventListener("click", () => {
     const url = button.dataset.announcementLink;
     if (url) void run(() => window.levik.openExternal(url));
@@ -1007,6 +1032,19 @@ async function createSupportReport(): Promise<void> {
     showToast(error instanceof Error ? error.message : String(error));
   }
   render();
+}
+
+async function toggleHomeRoad(): Promise<void> {
+  const road = state?.homeRoad;
+  if (!road || homeRoadSaving) return;
+  homeRoadSaving = true;
+  render();
+  try {
+    await run(() => window.levik.setHomeRoad(!road.enabled));
+  } finally {
+    homeRoadSaving = false;
+    render();
+  }
 }
 
 async function runDiagnosis(): Promise<void> {

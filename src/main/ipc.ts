@@ -94,6 +94,10 @@ export function registerIpc(controller: AppController, window: BrowserWindow): v
     await openCabinet(controller, target);
   });
   ipcMain.handle(IPC.refreshRemote, () => controller.refreshRemote());
+  ipcMain.handle(IPC.setHomeRoad, (_event, enabled: unknown) => {
+    if (typeof enabled !== "boolean") throw new Error("Некорректная настройка «Дороги домой»");
+    return controller.setHomeRoad(enabled);
+  });
   ipcMain.handle(IPC.sendRemoteCommand, (_event, deviceId: unknown, command: unknown) => {
     if (typeof deviceId !== "string" || deviceId.length > 160 || !isRemoteCommand(command)) throw new Error("Некорректная команда");
     return controller.sendRemoteCommand(deviceId, command);
