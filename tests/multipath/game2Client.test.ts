@@ -12,6 +12,8 @@ const network = vi.hoisted(() => ({
   opened: [] as number[],
   sent: [] as Array<{ node: string; flow: string; payload: string; session: string; path: number; sequence: number }>,
   sequence: new Map<string, number>(),
+  /** Per relay port and target: replaces fields of the probe result. */
+  probeOverride: null as null | ((port: number, target: { address: string; port: number }) => Record<string, unknown> | null),
 }));
 vi.mock("../../src/main/vpn/multipath/socks", async () => {
   const { decode, encode, Kind, controlPayload, parseControl } = await import("../../src/main/vpn/multipath/wire.js");
@@ -42,7 +44,8 @@ vi.mock("../../src/main/vpn/multipath/socks", async () => {
             p95Ms: network.probeMode === "unavailable" ? null : port === 1 ? 90 : 10, jitterMs: 0,
             lossPercent: network.probeMode === "unavailable" ? 100 : 0,
             method: network.probeMode === "unavailable" ? "unavailable" : "icmp", sampleCount: 8,
-            measuredAt: new Date(Date.now() - (network.probeMode === "stale" ? 600_000 : 0)).toISOString() })) }));
+            measuredAt: new Date(Date.now() - (network.probeMode === "stale" ? 600_000 : 0)).toISOString(),
+            ...(network.probeOverride?.(port, target) ?? {}) })) }));
       }
       if (packet.kind === Kind.Up) {
         network.sent.push({ node, flow: packet.flow.toString("hex"), payload: packet.payload.toString(),
@@ -55,7 +58,7 @@ vi.mock("../../src/main/vpn/multipath/socks", async () => {
 import { GAME_FLOW_LIMITS, GameMultipath, type GameRuntimeOptions } from "../../src/main/vpn/multipath/client";
 const nodes: GameRuntimeOptions["nodes"] = ["node-a", "node-b"].map((nodeId) => ({ nodeId, name: nodeId, countryCode: "SE", city: null, mesh: null, state: "enabled" }));
 afterEach(() => { vi.useRealTimers(); network.sent = []; network.sequence.clear(); network.sameCanonical = false; network.mesh = false;
-  network.legacy = false; network.replyAll = false; network.directPort = 0; network.probeMode = "ready"; network.opened = []; });
+  network.legacy = false; network.replyAll = false; network.directPort = 0; network.probeMode = "ready"; network.opened = []; network.probeOverride = null; });
 async function association(listener: { port: number; uuid: string }, target: string): Promise<Socket> {
   const socket = new Socket(); socket.on("error", () => {}); socket.connect(listener.port, "127.0.0.1"); await once(socket, "connect");
   const header = Buffer.alloc(26); Buffer.from(listener.uuid.replaceAll("-", ""), "hex").copy(header, 1);
@@ -441,5 +444,32 @@ it("makes room from the longest-silent game socket instead of refusing the match
     expect(remaining.has(match.localPort)).toBe(true);
     await send(match, "match-after");
     expect(network.sent.some((item) => item.payload === "match-after")).toBe(true);
+  } finally { for (const socket of sockets) socket.destroy(); await client.stop(); }
+}, 30_000);
+
+it("sends every other game ping through an exit lacking a measurement of that ping server, then follows the measurements", async () => {
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"] });
+  network.replyAll = true;
+  // node-a times the beacon's replies; node-b's trace stops at a silent router.
+  let bReply: Record<string, unknown> = { method: "ttl-hop", medianMs: 5, p95Ms: 5, approximate: true, hop: "62.115.139.181" };
+  network.probeOverride = (port, target) => target.address !== "8.8.4.4" ? null : port === 1 ? { method: "udp-echo", medianMs: 30, p95Ms: 30 } : bReply;
+  const client = new GameMultipath(); client.setPlaying(true); const sockets: Socket[] = [];
+  const ping = async (name: string): Promise<string | undefined> => {
+    const socket = await association(local, "8.8.4.4"); sockets.push(socket); await send(socket, name);
+    return network.sent.find((item) => item.payload === name)?.node;
+  };
+  let local: { port: number; uuid: string };
+  try {
+    local = await client.listen();
+    const pending = client.connect([{ index: 0, port: 1, nodeId: "node-a" }, { index: 1, port: 2, nodeId: "node-b" }], "test", { nodes, protection: true, preferredExitId: null, exitScope: "flow" });
+    await vi.advanceTimersByTimeAsync(2300); await pending;
+    expect(await ping("ping-0")).toBe("node-a");
+    await vi.advanceTimersByTimeAsync(3000);
+    // The destination is now known to be ping-only: node-b gets every other ping.
+    expect([await ping("ping-1"), await ping("ping-2"), await ping("ping-3"), await ping("ping-4")]).toEqual(["node-b", "node-a", "node-b", "node-a"]);
+    // node-b's relay has timed enough replies: B is real on both exits and the best one takes all pings.
+    bReply = { method: "udp-echo", medianMs: 5, p95Ms: 5 };
+    await vi.advanceTimersByTimeAsync(1500);
+    expect([await ping("ping-5"), await ping("ping-6"), await ping("ping-7")]).toEqual(["node-b", "node-b", "node-b"]);
   } finally { for (const socket of sockets) socket.destroy(); await client.stop(); }
 }, 30_000);

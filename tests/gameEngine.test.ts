@@ -1,5 +1,5 @@
 import { expect, it } from "vitest";
-import { chooseExit, chooseIngress, classifyFlow, combineSegments, estimateExit, QualityWindow, MeasurementHistory, UploadQueueGuard, GAME_POLICY,
+import { chooseExit, chooseIngress, classifyFlow, combineSegments, comparableBounds, estimateExit, QualityWindow, MeasurementHistory, UploadQueueGuard, GAME_POLICY,
   type Segment, type ExitCandidate } from "../src/main/vpn/gameEngine";
 const now = 1_000_000;
 const metric = (latencyMs = 20, jitterMs = 3, lossPercent = 1): Segment => ({ latencyMs, p95Ms: latencyMs + 2, jitterMs,
@@ -152,4 +152,37 @@ it("keeps exact-target TTL uncertainty separate from subnet fallback", () => {
   expect(estimateExit(candidate, { address: "1.1.1.1", port: 7000 }, [], now)).toMatchObject({ confidence: "exact", evidence: "lower-bound", approximate: true });
   candidate.egress[0]!.metric.scope = "subnet";
   expect(estimateExit(candidate, { address: "1.1.1.1", port: 7000 }, [], now)).toMatchObject({ confidence: "subnet", evidence: "lower-bound" });
+});
+it("compares lower bounds only when they end at one router, otherwise ranks exits without B", () => {
+  const target = { address: "185.40.64.1", port: 7081 };
+  const bound = (nodeId: string, a: number, b: number, hop?: string): ExitCandidate => {
+    const candidate = node(nodeId, a, b);
+    candidate.egress[0] = { address: target.address, port: target.port, metric: { ...metric(b, 1, 40), method: "ttl-hop", approximate: true, ...(hop ? { hop } : {}) } };
+    return candidate;
+  };
+  // Moscow's upstream answers one hop and goes silent; SPb is traced up to Riot's ingress.
+  const estimates = [estimateExit(bound("msk", 12, 1, "95.167.0.1"), target, [], now), estimateExit(bound("spb", 8, 25, "62.115.139.181"), target, [], now)];
+  expect(comparableBounds(estimates)).toBe(false);
+  expect(chooseExit(estimates)?.nodeId).toBe("spb");
+  // Hysteresis compares the same quantity: SPb stays while Moscow's A is not clearly lower.
+  const close = [estimateExit(bound("msk", 7, 1, "95.167.0.1"), target, [], now), estimateExit(bound("spb", 8, 25, "62.115.139.181"), target, [], now)];
+  expect(chooseExit(close, "spb")?.nodeId).toBe("spb");
+  // Both end at Telia's router: past it the way is shared, so the bound difference is real.
+  const shared = [estimateExit(bound("msk", 12, 10, "62.115.139.181"), target, [], now), estimateExit(bound("spb", 8, 25, "62.115.139.181"), target, [], now)];
+  expect(comparableBounds(shared)).toBe(true);
+  expect(chooseExit(shared)?.nodeId).toBe("msk");
+  // A bound without its router (an older node) compares with nothing.
+  expect(comparableBounds([estimateExit(bound("msk", 12, 10), target, [], now), estimateExit(bound("spb", 8, 25, "62.115.139.181"), target, [], now)])).toBe(false);
+  // A real measurement still precedes any bound.
+  const measured = node("hel", 30, 40); measured.egress[0] = { address: target.address, port: target.port, metric: { ...metric(40), method: "udp-echo" } };
+  expect(chooseExit([...estimates, estimateExit(measured, target, [], now)])).toMatchObject({ nodeId: "hel", evidence: "endpoint" });
+});
+it("takes a round trip to a server in the same /24 over a lower bound of the server, never below that bound", () => {
+  const target = { address: "185.40.64.9", port: 7081 };
+  const candidate = node("spb", 8, 25);
+  candidate.egress = [{ address: target.address, port: target.port, metric: { ...metric(25, 1, 40), method: "ttl-hop", approximate: true, hop: "62.115.139.181" } },
+    { address: "185.40.64.1", port: 8181, metric: { ...metric(31), method: "udp-echo" } }];
+  expect(estimateExit(candidate, target, [], now)).toMatchObject({ confidence: "subnet", evidence: "endpoint", egress: { latencyMs: 31 } });
+  candidate.egress[1]!.metric = { ...metric(20), method: "udp-echo" };
+  expect(estimateExit(candidate, target, [], now)).toMatchObject({ confidence: "subnet", evidence: "endpoint", egress: { latencyMs: 25 } });
 });

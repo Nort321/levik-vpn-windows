@@ -37,6 +37,10 @@ describe("Game multipath packet boundary", () => {
     expect(parseMeasurement({ ...result, address: "169.254.169.254" })).toBeNull();
     expect(parseMeasurement({ ...result, lossPercent: 101 })).toBeNull();
     expect(parseMeasurement({ ...result, sampleCount: 0 })).toBeNull();
+    // Only a lower bound names its router, and only a public one.
+    expect(parseMeasurement({ ...result, method: "ttl-hop", hop: "62.115.139.181" })?.hop).toBe("62.115.139.181");
+    expect(parseMeasurement({ ...result, method: "ttl-hop", hop: "10.0.0.1" })?.hop).toBeUndefined();
+    expect(parseMeasurement({ ...result, hop: "62.115.139.181" })?.hop).toBeUndefined();
   });
   it("version 3 matches the golden vector shared with the Go relay", () => {
     const session = Buffer.alloc(32); Buffer.from("0102030405060708", "hex").copy(session);

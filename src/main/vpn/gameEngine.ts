@@ -28,7 +28,9 @@ export const GAME_POLICY = Object.freeze({ window: 60, minimumSamples: 5, jitter
   /** First packet of a new destination waits for cached B from nodes at most this long. */
   holdMinMs: 40, holdMaxMs: 200, holdMaxPackets: 16 });
 
-export interface Segment extends GameMeasurement { routeKey?: string; region?: string; operator?: string; scope?: "target" | "subnet" }
+export interface Segment extends GameMeasurement { routeKey?: string; region?: string; operator?: string; scope?: "target" | "subnet";
+  /** A lower bound (ttl-hop) is timed to this router, not to the server. */
+  hop?: string }
 export interface DestinationMetric { address: string; port: number; metric: Segment }
 export interface ExitCandidate { nodeId: string; state: GameNode["state"]; access: Segment | null;
   egress: DestinationMetric[]; mesh?: Segment; cpuPercent?: number; direct?: Segment; processingNodes?: number;
@@ -36,7 +38,9 @@ export interface ExitCandidate { nodeId: string; state: GameNode["state"]; acces
 export type Confidence = "exact" | "subnet" | "operator" | "region" | "access" | "unavailable";
 export type MeasurementEvidence = "endpoint" | "lower-bound" | "access" | "unavailable";
 export interface PathEstimate { nodeId: string; latencyMs: number | null; jitterMs: number | null;
-  lossPercent: number | null; score: number; confidence: Confidence; evidence: MeasurementEvidence; approximate: boolean; egress: Segment | null }
+  lossPercent: number | null; score: number; confidence: Confidence; evidence: MeasurementEvidence; approximate: boolean; egress: Segment | null;
+  /** The score without B: what is known when lower bounds of exits cannot be compared. */
+  accessScore: number }
 export const subnet24 = (address: string): string => address.split(".").slice(0, 3).join(".") + ".0/24";
 /** Ascending order with unknown values last; never produces NaN comparisons. */
 export const byLatency = <T extends { latencyMs: number | null }>(a: T, b: T): number => (a.latencyMs ?? Infinity) - (b.latencyMs ?? Infinity) || 0;
@@ -60,62 +64,88 @@ const stale = (segments: Segment[], now: number): number => segments.reduce((sum
 export function estimateExit(candidate: ExitCandidate, target: { address: string; port: number; routeKey?: string; region?: string },
   sessionRegions: string[] = [], now = Date.now(), anchors: DestinationMetric[] = []): PathEstimate {
   const unavailable: PathEstimate = { nodeId: candidate.nodeId, latencyMs: null, jitterMs: null, lossPercent: null,
-    score: Infinity, confidence: "unavailable", evidence: "unavailable", approximate: true, egress: null };
+    score: Infinity, confidence: "unavailable", evidence: "unavailable", approximate: true, egress: null, accessScore: Infinity };
   if (candidate.state !== "enabled") return unavailable;
   const fresh = (item: Segment): boolean => item.samples >= GAME_POLICY.minimumSamples && item.latencyMs !== null && Number.isFinite(item.latencyMs)
     && now >= item.measuredAt - 5_000 && now - item.measuredAt < GAME_POLICY.expiryMs && pathLoss(item) <= GAME_POLICY.maxLossPercent;
   if (candidate.direct) {
     if (!fresh(candidate.direct)) return unavailable;
     const metric = candidate.direct;
+    const score = scoreMetric(metric, now);
     return { nodeId: candidate.nodeId, latencyMs: metric.latencyMs, jitterMs: metric.jitterMs, lossPercent: pathLoss(metric),
-      score: scoreMetric(metric, now), confidence: "exact", evidence: metric.method === "ttl-hop" ? "lower-bound" : "endpoint",
-      approximate: metric.approximate || metric.method === "ttl-hop", egress: null };
+      score, confidence: "exact", evidence: metric.method === "ttl-hop" ? "lower-bound" : "endpoint",
+      approximate: metric.approximate || metric.method === "ttl-hop", egress: null, accessScore: score };
   }
   if (!candidate.access || !fresh(candidate.access) || (candidate.mesh && !fresh(candidate.mesh))) return unavailable;
   const metrics = candidate.egress.filter((item) => fresh(item.metric));
-  const exact = metrics.find((item) => item.address === target.address && item.port === target.port);
-  const subnet = metrics.find((item) => subnet24(item.address) === subnet24(target.address));
+  // At every level a measurement of the server itself precedes a trace lower bound.
+  const endpointFirst = (items: DestinationMetric[]): DestinationMetric | undefined => items.find((item) => item.metric.method !== "ttl-hop") ?? items[0];
+  const exact = endpointFirst(metrics.filter((item) => item.address === target.address && item.port === target.port));
+  const subnet = endpointFirst(metrics.filter((item) => subnet24(item.address) === subnet24(target.address)));
   // Never infer an operator from numerical IP proximity. A route key must be
   // supplied by the measurement service's observed route/offline database.
   // Region anchors (game data-centre beacons measured continuously by the node)
   // share that route key, so a cold destination already has a measured route.
   const routed = target.routeKey ? [...metrics, ...anchors.filter((item) => fresh(item.metric))] : [];
-  const operator = target.routeKey ? routed.filter((item) => item.metric.routeKey === target.routeKey).sort((a, b) => byLatency(a.metric, b.metric))[0] : undefined;
-  const region = metrics.find((item) => item.metric.region && (item.metric.region === target.region || sessionRegions.includes(item.metric.region)));
-  const chosen = exact ?? subnet ?? operator ?? region;
-  const confidence: Confidence = exact ? (exact.metric.scope === "subnet" || (!exact.metric.scope && exact.metric.approximate && exact.metric.method !== "ttl-hop") ? "subnet" : "exact")
-    : subnet ? "subnet" : operator ? "operator" : region ? "region" : "access";
-  const segments = [candidate.access, ...(candidate.mesh ? [candidate.mesh] : []), ...(chosen ? [chosen.metric] : [])];
-  const evidence: MeasurementEvidence = !chosen ? "access" : segments.some((item) => item.method === "ttl-hop") ? "lower-bound" : "endpoint";
-  const combined = combineSegments(segments, candidate.processingNodes ?? (candidate.mesh ? 2 : 1));
-  const score = combined.latencyMs! + GAME_POLICY.jitterWeight * (combined.jitterMs ?? 0) + GAME_POLICY.lossWeightMs * (combined.lossPercent ?? 0)
-    + tail(segments) + stale(segments, now)
-    + Math.max(0, Math.min(100, candidate.cpuPercent ?? 0)) / 100 * GAME_POLICY.loadWeightMs
+  const operator = target.routeKey ? endpointFirst(routed.filter((item) => item.metric.routeKey === target.routeKey).sort((a, b) => byLatency(a.metric, b.metric))) : undefined;
+  const region = endpointFirst(metrics.filter((item) => item.metric.region && (item.metric.region === target.region || sessionRegions.includes(item.metric.region))));
+  const levels = [exact, subnet, operator, region];
+  const chosen = levels.find((item) => item && item.metric.method !== "ttl-hop") ?? levels.find(Boolean);
+  const confidence: Confidence = !chosen ? "access" : chosen === exact ? (exact.metric.scope === "subnet" || (!exact.metric.scope && exact.metric.approximate && exact.metric.method !== "ttl-hop") ? "subnet" : "exact")
+    : chosen === subnet ? "subnet" : chosen === operator ? "operator" : "region";
+  // A lower bound of this very server still holds when B comes from a nearby server.
+  const bound = [exact, subnet].find((item) => item && item.metric.method === "ttl-hop");
+  const egress = chosen && bound && chosen !== bound && chosen.metric.latencyMs! < bound.metric.latencyMs!
+    ? { ...chosen.metric, latencyMs: bound.metric.latencyMs, p95Ms: Math.max(chosen.metric.p95Ms ?? 0, bound.metric.latencyMs!) } : chosen?.metric;
+  const base = [candidate.access, ...(candidate.mesh ? [candidate.mesh] : [])];
+  const segments = [...base, ...(egress ? [egress] : [])];
+  const evidence: MeasurementEvidence = !egress ? "access" : segments.some((item) => item.method === "ttl-hop") ? "lower-bound" : "endpoint";
+  const nodes = candidate.processingNodes ?? (candidate.mesh ? 2 : 1);
+  const load = Math.max(0, Math.min(100, candidate.cpuPercent ?? 0)) / 100 * GAME_POLICY.loadWeightMs
     + Math.min(1, Math.max(0, candidate.networkBytesPerSecond ?? 0) / GAME_POLICY.linkBytesPerSecond) * GAME_POLICY.networkLoadWeightMs
     + Math.min(1, Math.max(0, candidate.activeFlows ?? 0) / 4096) * GAME_POLICY.flowLoadWeightMs;
-  return { nodeId: candidate.nodeId, ...combined, score, confidence, evidence, approximate: true, egress: chosen?.metric ?? null };
+  const scoreOf = (items: Segment[]): number => {
+    const combined = combineSegments(items, nodes);
+    return combined.latencyMs! + GAME_POLICY.jitterWeight * (combined.jitterMs ?? 0) + GAME_POLICY.lossWeightMs * (combined.lossPercent ?? 0)
+      + tail(items) + stale(items, now) + load;
+  };
+  return { nodeId: candidate.nodeId, ...combineSegments(segments, nodes), score: scoreOf(segments), confidence, evidence, approximate: true,
+    egress: egress ?? null, accessScore: scoreOf(base) };
 }
 function scoreMetric(metric: Segment, now: number): number {
   return metric.latencyMs! + GAME_POLICY.jitterWeight * (metric.jitterMs ?? 0) + GAME_POLICY.lossWeightMs * pathLoss(metric)
     + tail([metric]) + stale([metric], now);
 }
 
+/** Lower bounds of different exits compare only when all end at one router: past it the
+ * remaining way to the server is the same. Ending at different routers (a node whose
+ * upstream answers one hop and goes silent, another traced up to the server's network),
+ * the bounds say nothing about which exit is faster. */
+export function comparableBounds(estimates: PathEstimate[]): boolean {
+  const bounds = estimates.filter((item) => item.evidence === "lower-bound" && item.nodeId !== "direct" && Number.isFinite(item.score));
+  return bounds.length <= 1 || (bounds.every((item) => item.egress?.hop) && new Set(bounds.map((item) => item.egress!.hop)).size === 1);
+}
+
 /** Completed measurements precede lower-bound fallback; unknown B cannot win by omitting B.
  * A direct TTL lower bound ends at a router of the user's ISP, a relay one at a router
  * near the node: they are different points, so a direct lower bound is never chosen
- * automatically — only a completed direct measurement or an explicit preference. */
+ * automatically — only a completed direct measurement or an explicit preference.
+ * Incomparable lower bounds are ranked without B, by what is known: A, mesh and load. */
 export function chooseExit(estimates: PathEstimate[], previousId: string | null = null, preferredId: string | null = null): PathEstimate | null {
   const tiers: Record<Confidence, number> = { exact: 0, subnet: 1, operator: 2, region: 3, access: 4, unavailable: 5 };
   const evidence: Record<MeasurementEvidence, number> = { endpoint: 0, "lower-bound": 1, access: 2, unavailable: 3 };
-  const tier = (item: PathEstimate): number => evidence[item.evidence] * 10 + tiers[item.confidence];
+  const comparable = comparableBounds(estimates);
+  // Incomparable bounds form one tier: an exact bound must not beat a subnet one by depth.
+  const tier = (item: PathEstimate): number => evidence[item.evidence] * 10 + (item.evidence === "lower-bound" && !comparable ? 0 : tiers[item.confidence]);
+  const rank = (item: PathEstimate): number => item.evidence === "lower-bound" && !comparable ? item.accessScore : item.score;
   const ranked = estimates.filter((item) => Number.isFinite(item.score)
     && (item.nodeId !== "direct" || item.evidence === "endpoint" || item.nodeId === preferredId))
-    .sort((a, b) => tier(a) - tier(b) || a.score - b.score);
+    .sort((a, b) => tier(a) - tier(b) || rank(a) - rank(b));
   const best = ranked.find((item) => item.nodeId === preferredId) ?? ranked[0];
   if (!best) return null;
   const previous = ranked.find((item) => item.nodeId === previousId);
   if (!preferredId && previous && tier(previous) === tier(best)
-    && previous.score - best.score < Math.max(GAME_POLICY.hysteresisMs, previous.score * GAME_POLICY.hysteresisRatio)) return previous;
+    && rank(previous) - rank(best) < Math.max(GAME_POLICY.hysteresisMs, rank(previous) * GAME_POLICY.hysteresisRatio)) return previous;
   return best;
 }
 export interface IngressCandidate { latencyMs: number | null; entryNodeId?: string; rankMs?: number | null; reliable?: boolean; wins?: number }

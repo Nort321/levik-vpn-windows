@@ -163,6 +163,8 @@ export interface ProbeMeasurement extends ProbeTarget {
   region?: string; operator?: string; routeKey?: string;
   approximate?: boolean;
   scope?: "target" | "subnet";
+  /** The router a ttl-hop lower bound was timed to. */
+  hop?: string;
 }
 export function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -183,6 +185,7 @@ export function parseMeasurement(value: unknown): ProbeMeasurement | null {
     method: value.method as ProbeMeasurement["method"], sampleCount: Number(value.sampleCount), measuredAt: value.measuredAt,
     ...(typeof value.approximate === "boolean" ? { approximate: value.approximate } : {}),
     ...(value.scope === "target" || value.scope === "subnet" ? { scope: value.scope } : {}),
+    ...(value.method === "ttl-hop" && typeof value.hop === "string" && publicIPv4(value.hop) ? { hop: value.hop } : {}),
     ...Object.fromEntries(["region", "operator", "routeKey"].flatMap((key) => typeof value[key] === "string"
       && /^[\p{L}\p{N} ._/:-]{1,80}$/u.test(value[key]) ? [[key, value[key]]] : [])) };
 }
