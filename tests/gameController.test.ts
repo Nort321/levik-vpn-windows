@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 vi.mock("electron", () => ({ app: { getPath: () => "/tmp/levik-game-test", getVersion: () => "1.3.0", getAppPath: () => "/tmp/levik-game-test", isPackaged: false } }));
+// The real updater loads the electron package outside vi.mock, which downloads its binary mid-test on CI.
+vi.mock("../src/main/update/appUpdater", () => ({ AppUpdater: class AppUpdater { on(): this { return this; } } }));
 vi.mock("../src/main/vpn/gameRoutes", async (load) => ({
   ...await load<typeof import("../src/main/vpn/gameRoutes")>(), measureGameDataRoute: vi.fn(),
 }));

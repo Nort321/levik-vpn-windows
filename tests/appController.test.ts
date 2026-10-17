@@ -1,6 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AuthChallengeResponse } from "../src/main/api/models";
 
+// The real updater loads the electron package outside vi.mock, which downloads its binary mid-test on CI.
+vi.mock("../src/main/update/appUpdater", () => ({ AppUpdater: class AppUpdater { on(): this { return this; } } }));
+
 vi.mock("electron", () => ({
   app: {
     getPath: () => "/tmp/levik-vpn-windows-test",
