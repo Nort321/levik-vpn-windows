@@ -19,10 +19,15 @@ import type { AppSettings } from "../../shared/contracts";
 
 const execFileAsync = promisify(execFile);
 
+/** Per-connection Xray info chatter: it would push every app event out of the 200-line journal. */
+const CORE_NOISE = /\b(?:proxy\/tun: processing from|app\/dispatcher: sniffed domain|app\/dispatcher: default route for|transport\/internet\/splithttp: XHTTP is dialing|proxy\/vless\/outbound: tunneling request|transport\/internet\/tcp: dialing TCP to|proxy\/dns: handling DNS traffic|app\/dispatcher: taking detour \[levik-dns-out\])/;
+
 interface XrayEvents {
   log: [line: string];
   exit: [code: number | null, expected: boolean];
   stats: [downloadBytes: number, uploadBytes: number];
+  /** The game data plane is gone for good; the game was moved to the ordinary VPN (or could not be). */
+  gameDown: [movedToTunnel: boolean];
 }
 
 export class XrayManager extends EventEmitter<XrayEvents> {
@@ -42,6 +47,7 @@ export class XrayManager extends EventEmitter<XrayEvents> {
   /** The selected VPN outbound: carries the game when no game node answers. */
   private tunnelTag: string | null = null;
   private gameViaTunnel = false;
+  private readonly repeatedLines = new Map<string, number>();
 
   get gameMultipathStats(): GameMultipathStats | null {
     const stats = this.multipath?.snapshot();
@@ -61,6 +67,12 @@ export class XrayManager extends EventEmitter<XrayEvents> {
     if (this.process !== child) throw new Error("VPN connection changed");
     this.gameViaTunnel = true; this.selectedGameUdpRoute = null; this.gameUdpReady = true;
     await this.multipath?.stop();
+  }
+
+  /** Xray would keep sending game UDP to the dead loopback port until reconnect. */
+  private async gameDataPlaneDown(): Promise<void> {
+    if (this.gameViaTunnel || !this.process) return;
+    try { await this.routeGameThroughTunnel(); this.emit("gameDown", true); } catch { this.emit("gameDown", false); }
   }
 
   async selectGameUdpRoute(index: number | null): Promise<void> {
@@ -180,7 +192,7 @@ export class XrayManager extends EventEmitter<XrayEvents> {
     }
     if (Array.isArray(launchConfig.outbounds) && launchConfig.outbounds.some((outbound: unknown) =>
       typeof outbound === "object" && outbound !== null && "tag" in outbound && outbound.tag === GAME_MULTIPATH)) {
-      this.multipath = await RemoteGameDataPlane.create((line) => this.emit("log", line));
+      this.multipath = await RemoteGameDataPlane.create((line) => this.emit("log", line), () => void this.gameDataPlaneDown());
       const local = await this.multipath.listen();
       launchConfig = withTuicProxy(launchConfig, { port: local.port, id: local.uuid }, GAME_MULTIPATH);
     }
@@ -304,8 +316,18 @@ export class XrayManager extends EventEmitter<XrayEvents> {
   }
 
   private emitLines(chunk: Buffer): void {
-    chunk.toString("utf8").split(/\r?\n/).map((line) => line.trim()).filter(Boolean)
-      .forEach((line) => this.emit("log", line.replace(/[\u0000-\u001f]/g, "")));
+    const now = Date.now();
+    chunk.toString("utf8").split(/\r?\n/).map((line) => line.trim()).filter(Boolean).forEach((raw) => {
+      const line = raw.replace(/[\u0000-\u001f]/g, "");
+      if (CORE_NOISE.test(line)) return;
+      // One failing destination repeats per connection; the first line per 10 s tells the story.
+      const key = line.replace(/^\S+ \S+ /, "").replace(/\[\d+\] /, "").replace(/^(from \S+?):\d+ /, "$1 ");
+      const seen = this.repeatedLines.get(key);
+      if (seen !== undefined && now - seen < 10_000) return;
+      if (this.repeatedLines.size > 256) this.repeatedLines.clear();
+      this.repeatedLines.set(key, now);
+      this.emit("log", line);
+    });
   }
 
   private startStatsPolling(): void {

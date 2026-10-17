@@ -10,6 +10,15 @@ const CALL_TIMEOUT_MS = 30_000;
 /** Crashes inside this window beyond the limit leave the data plane down until reconnect. */
 const RESTART_WINDOW_MS = 60_000;
 const RESTART_LIMIT = 3;
+const STDERR_TAIL_BYTES = 2_048;
+/** Shown while the data plane has no state: no paths, no flows. */
+const EMPTY_STATE: Extract<DataPlaneEvent, { type: "state" }> = {
+  type: "state", idle: true, qualities: {},
+  snapshot: { state: "unavailable", paths: [], receivedPackets: 0, duplicateReplies: 0, uploadedPackets: 0 },
+  runtime: { currentMatch: null, lastMatch: null, exits: [], selectedExitId: null, selectionReason: null, ingressPaths: [],
+    protection: { enabled: false, limitedByUpload: false, reason: null }, shadowAlternative: null, matchReport: null,
+    estimateHistory: [], compatibility: "full" },
+};
 
 type Call = Extract<DataPlaneRequest, { type: "call" }>;
 type CallMethod = Call["method"];
@@ -32,11 +41,13 @@ export class RemoteGameDataPlane implements GameDataPlane {
   /** Bumped per restart so a restart overtaken by a newer crash leaves its successor alone. */
   private generation = 0;
 
-  private constructor(private readonly entry: string, private readonly log: (line: string) => void) {}
+  private constructor(private readonly entry: string, private readonly log: (line: string) => void,
+    private readonly down: () => void) {}
 
-  /** Falls back to the in-process data plane when the utility process cannot start. */
-  static async create(log: (line: string) => void): Promise<GameDataPlane> {
-    const plane = new RemoteGameDataPlane(join(__dirname, "gameDataPlane.js"), log);
+  /** Falls back to the in-process data plane when the utility process cannot start.
+   * `down` runs once when a crashed data plane cannot be brought back. */
+  static async create(log: (line: string) => void, down: () => void = () => {}): Promise<GameDataPlane> {
+    const plane = new RemoteGameDataPlane(join(__dirname, "gameDataPlane.js"), log, down);
     try { await plane.spawn(); return plane; } catch {
       plane.stopped = true; plane.discard(); log("Game: отдельный процесс маршрутизации недоступен; пакеты обрабатываются в основном процессе");
       const local = new GameMultipath(false); local.setLogger(log); return local;
@@ -44,8 +55,12 @@ export class RemoteGameDataPlane implements GameDataPlane {
   }
 
   private spawn(): Promise<void> {
-    const child = utilityProcess.fork(this.entry, [], { serviceName: "Levik Game data plane", stdio: "ignore" });
-    this.child = child; this.state = null;
+    const child = utilityProcess.fork(this.entry, [], { serviceName: "Levik Game data plane", stdio: ["ignore", "ignore", "pipe"] });
+    // A native crash or out-of-memory leaves its reason only on stderr.
+    let stderr = "";
+    child.stderr?.on("data", (chunk: Buffer) => { stderr = (stderr + chunk.toString("utf8")).slice(-STDERR_TAIL_BYTES); });
+    this.child = child;
+    let started = false;
     return new Promise<void>((resolve, reject) => {
       const timer = setTimeout(() => reject(new Error("Game data plane did not start")), START_TIMEOUT_MS);
       child.once("spawn", () => {
@@ -54,12 +69,15 @@ export class RemoteGameDataPlane implements GameDataPlane {
       });
       child.on("message", (event: DataPlaneEvent) => {
         if (this.child !== child) return;
-        if (event.type === "state" && !this.state) { clearTimeout(timer); this.state = event; resolve(); return; }
+        if (event.type === "state" && !started) { started = true; clearTimeout(timer); this.state = event; resolve(); return; }
         this.receive(event);
       });
       child.once("exit", (code) => {
         clearTimeout(timer); reject(new Error("Game data plane exited"));
-        if (this.child === child) void this.crashed(code);
+        if (this.child !== child) return;
+        const reason = stderr.split(/\r?\n/).map((line) => line.trim()).filter(Boolean).slice(-3).join(" | ");
+        if (reason) this.log(`Game: процесс маршрутизации: ${reason.slice(0, 600)}`);
+        void this.crashed(code);
       });
     });
   }
@@ -95,19 +113,27 @@ export class RemoteGameDataPlane implements GameDataPlane {
     if (this.stopped) return;
     const now = Date.now(); this.crashes = [...this.crashes.filter((at) => now - at < RESTART_WINDOW_MS), now];
     if (this.crashes.length > RESTART_LIMIT || !this.identity) {
-      this.log(`Game: процесс маршрутизации завершился (код ${code}); переподключите VPN`); return;
+      this.log(`Game: процесс маршрутизации завершился (код ${code})`); this.giveUp(); return;
     }
     this.log(`Game: процесс маршрутизации перезапущен (код ${code}); текущие потоки открываются заново`);
     const generation = ++this.generation;
     try {
       await this.spawn();
-      await this.request("listen", [this.identity]);
+      const identity = await this.request("listen", [this.identity]);
+      // Xray keeps sending to the old port: any other one is as good as none.
+      if (!isIdentity(identity) || identity.port !== this.identity.port) throw new Error("Game listener moved");
       this.replay();
       if (this.connection) await this.request("connect", [this.connection.candidates, this.connection.password, serializable(this.connection.options)]);
     } catch {
       if (generation !== this.generation || this.stopped) return;
-      this.discard(); this.log("Game: не удалось перезапустить процесс маршрутизации; переподключите VPN");
+      this.discard(); this.log("Game: не удалось перезапустить процесс маршрутизации"); this.giveUp();
     }
+  }
+
+  /** No data plane until reconnect: its last state goes too, and the owner moves the game elsewhere. */
+  private giveUp(): void {
+    this.stopped = true; this.state = null; this.connection = null;
+    this.down();
   }
 
   /** Drops a child that never became usable without treating its exit as a crash. */
@@ -173,10 +199,7 @@ export class RemoteGameDataPlane implements GameDataPlane {
   startCounting(): void { this.counting = true; this.notify({ type: "notify", method: "startCounting", args: [] }); }
   setPrimaryRoute(index: number): void { this.primary = index; this.notify({ type: "notify", method: "setPrimaryRoute", args: [index] }); }
 
-  private current(): Extract<DataPlaneEvent, { type: "state" }> {
-    if (!this.state) throw new Error("Game data plane state unavailable");
-    return this.state;
-  }
+  private current(): Extract<DataPlaneEvent, { type: "state" }> { return this.state ?? EMPTY_STATE; }
 }
 
 function serializable(options: GameRuntimeOptions | undefined): SerializableRuntimeOptions | undefined {

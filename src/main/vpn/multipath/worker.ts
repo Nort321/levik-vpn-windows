@@ -15,6 +15,17 @@ try { setPriority(0, constants.priority.PRIORITY_HIGH); } catch { /* Normal prio
 const plane = new GameMultipath(false);
 const emit = (event: DataPlaneEvent): void => parent.postMessage(event);
 plane.setLogger((line) => emit({ type: "log", line }));
+// A stray exception must not take every game packet down with the process: the
+// match would lose its exit and Xray would send to a closed port. It is logged instead.
+let faultsAt: number[] = [];
+const fault = (kind: string, error: unknown): void => {
+  const now = Date.now(); faultsAt = [...faultsAt.filter((at) => now - at < 60_000), now];
+  if (faultsAt.length > 5) return;
+  const text = error instanceof Error ? `${error.name}: ${error.message} ${(error.stack ?? "").split("\n").slice(1, 4).map((line) => line.trim()).join(" ")}` : String(error);
+  emit({ type: "log", line: `Game: ошибка процесса маршрутизации (${kind}): ${text.slice(0, 600)}` });
+};
+process.on("uncaughtException", (error) => fault("exception", error));
+process.on("unhandledRejection", (reason) => fault("rejection", reason));
 const measurements = new Map<number, (results: ProbeMeasurement[]) => void>();
 let measureId = 0;
 /** Direct measurements need the physical adapter helpers that live in main. */

@@ -370,6 +370,13 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     this.xray.on("log", (line) => this.handleCoreLog(line));
     this.xray.on("exit", (code, expected) => this.handleXrayExit(code, expected));
     this.xray.on("stats", (downloadBytes, uploadBytes) => this.handleTrafficStats(downloadBytes, uploadBytes));
+    this.xray.on("gameDown", (movedToTunnel) => {
+      this.addLog(movedToTunnel ? "Game: процесс маршрутизации не восстановился; игра идёт через обычный VPN"
+        : "Game: процесс маршрутизации не восстановился; переподключите VPN");
+      this.updateGame({ activeRouteId: null, phase: "degraded", message: movedToTunnel
+        ? "Игровой канал перестал работать: игра идёт через обычный VPN без игровой оптимизации. Переподключите VPN между матчами, чтобы включить его снова."
+        : "Игровой канал перестал работать. Переподключите VPN." });
+    });
     this.liveEvents = new LiveEvents(
       (signal) => this.api.openEvents(this.requireToken(), signal),
       isAuthenticationRejected,

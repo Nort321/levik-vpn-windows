@@ -9,7 +9,7 @@ class FakeChild extends EventEmitter {
   pid = 4242;
   readonly received: DataPlaneRequest[] = [];
   killed = false;
-  constructor(private readonly behaviour: { silent?: boolean }) {
+  constructor(private readonly behaviour: { silent?: boolean; movedPort?: boolean }) {
     super();
     setImmediate(() => { this.emit("spawn"); if (!behaviour.silent) { this.send({ type: "ready" }); this.send(state(true)); } });
   }
@@ -17,7 +17,9 @@ class FakeChild extends EventEmitter {
   postMessage(message: DataPlaneRequest): void {
     this.received.push(message);
     if (message.type !== "call") return;
-    const value = message.method === "listen" ? (message.args[0] ?? { port: 41000, uuid: "00000000-0000-4000-8000-000000000001" }) : null;
+    const requested = message.method === "listen" ? message.args[0] : undefined;
+    const value = message.method === "listen" ? requested && this.behaviour.movedPort ? { ...requested, port: requested.port + 1 }
+      : (requested ?? { port: 41000, uuid: "00000000-0000-4000-8000-000000000001" }) : null;
     setImmediate(() => this.send({ type: "result", id: message.id, ok: true, value }));
   }
   kill(): boolean { this.killed = true; setImmediate(() => this.emit("exit", 0)); return true; }
@@ -25,8 +27,9 @@ class FakeChild extends EventEmitter {
 }
 
 const children: FakeChild[] = [];
+let movedPort = false;
 const fork = vi.fn((_path: string, _args: string[], _options: unknown) => {
-  const child = new FakeChild({ silent: fork.mock.calls.length > 99 });
+  const child = new FakeChild({ silent: fork.mock.calls.length > 99, movedPort: movedPort && fork.mock.calls.length > 1 });
   children.push(child); return child;
 });
 vi.mock("electron", () => ({ utilityProcess: { fork: (...args: [string, string[], unknown]) => fork(...args) } }));
@@ -41,7 +44,7 @@ function child(index: number): FakeChild {
   return found;
 }
 
-afterEach(() => { children.length = 0; fork.mockClear(); });
+afterEach(() => { children.length = 0; fork.mockClear(); movedPort = false; });
 
 describe("RemoteGameDataPlane", () => {
   it("serves calls, keeps the measure callback in main and restores the same loopback after a crash", async () => {
@@ -76,9 +79,9 @@ describe("RemoteGameDataPlane", () => {
     expect(children).toHaveLength(2);
   });
 
-  it("stops restarting after repeated crashes", async () => {
-    const logs: string[] = [];
-    const plane = await RemoteGameDataPlane.create((line) => logs.push(line));
+  it("stops restarting after repeated crashes and hands the game to its owner", async () => {
+    const logs: string[] = []; const down = vi.fn();
+    const plane = await RemoteGameDataPlane.create((line) => logs.push(line), down);
     await plane.listen();
     for (let crash = 0; crash < 4; crash += 1) {
       const current = child(children.length - 1);
@@ -87,7 +90,33 @@ describe("RemoteGameDataPlane", () => {
     }
     await new Promise((resolve) => setImmediate(resolve));
     expect(children).toHaveLength(4);
-    expect(logs.at(-1)).toContain("переподключите VPN");
+    expect(logs.at(-1)).toContain("завершился");
+    expect(down).toHaveBeenCalledTimes(1);
+    // No stale paths or flows, and reads never throw in main.
+    expect(plane.snapshot()).toMatchObject({ state: "unavailable", paths: [] });
+    expect(plane.runtimeSnapshot()).toMatchObject({ currentMatch: null, exits: [] });
+    expect(plane.routeQualities()).toEqual({});
+  });
+
+  it("gives up when a restarted data plane cannot take the port Xray sends to", async () => {
+    movedPort = true;
+    const logs: string[] = []; const down = vi.fn();
+    const plane = await RemoteGameDataPlane.create((line) => logs.push(line), down);
+    await plane.listen();
+    child(0).crash();
+    await vi.waitFor(() => expect(down).toHaveBeenCalledTimes(1));
+    expect(logs.at(-1)).toContain("не удалось перезапустить");
+    expect(plane.snapshot().state).toBe("unavailable");
+  });
+
+  it("keeps the last state readable while a crashed data plane restarts", async () => {
+    const plane = await RemoteGameDataPlane.create(() => {});
+    await plane.listen();
+    child(0).crash();
+    expect(() => plane.snapshot()).not.toThrow();
+    expect(plane.snapshot().state).toBe("ready");
+    await vi.waitFor(() => expect(children).toHaveLength(2));
+    await plane.stop();
   });
 
   it("falls back to the in-process data plane when the utility process cannot start", async () => {
