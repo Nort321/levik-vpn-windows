@@ -43,6 +43,8 @@ interface Flow { id: string; connection: Connection; address: string; port: numb
   busy: boolean; recovered: number;
   /** A game ping sent through an exit that has no measurement of this server yet. */
   probing: boolean;
+  /** Counted once towards its destination being ping-only. */
+  pingNoted: boolean;
   /** Replies each path delivered first, keyed by route index and entry node. */
   pathPackets: Map<string, { routeIndex: number; entryNodeId: string; packets: number }> }
 const emptyOptions = (): GameRuntimeOptions => ({ nodes: [], preferredExitId: null, protection: true, exitScope: "flow" });
@@ -66,6 +68,9 @@ const REGIONS_INTERVAL_MS = 30_000;
  * Its pings may go out through exits lacking a measurement: the exit times the reply (B). */
 const PING_MAX_SENT = 4;
 const PING_SETTLED_MS = 2_000;
+/** A destination is ping-only once this many separate short sockets pinged it: a game opens
+ * a fresh socket per ping, while voice signalling or a handshake keeps its socket. */
+const PING_MIN_SOCKETS = 3;
 /** An exit's measurement of a ping server older than this is refreshed by one of the game's pings. */
 const PING_REFRESH_MS = 60_000;
 
@@ -103,7 +108,7 @@ export class GameMultipath {
   private readonly anchors = new Map<string, DestinationMetric[]>();
   private readonly regionsRequestedAt = new Map<string, number>();
   /** Ping-only destinations: when each exit last carried a ping there, and whose turn the next ping is. */
-  private readonly pingTargets = new Map<string, { seenAt: number; probedAt: Map<string, number>; probeNext: boolean }>();
+  private readonly pingTargets = new Map<string, { seenAt: number; sockets: number; probedAt: Map<string, number>; probeNext: boolean }>();
   private readonly probeStates = new Map<string, "collecting" | "service-unavailable">();
   private readonly queries = new Map<string, { session: Buffer; targets: Set<string>; handshake: boolean }>();
   private readonly directMeasurements = new Map<string, Segment>();
@@ -304,10 +309,7 @@ export class GameMultipath {
         if (!flow || flow.finished) {
           if (!this.acceptingNewFlows) return;
           if (!this.admitFlow(connection)) return;
-          flow = { id: randomBytes(8).toString("hex"), connection, ...target, counted: this.counting, startedAt: Date.now(), touched: Date.now(), sent: 0, received: 0,
-            exitId: "", instance: null, wire: null, direct: null, pending: [], hold: null, held: false, kind: "service", latencyHistory: [], lowerBoundSamples: false, probing: false,
-            evidence: new DeliveryEvidence(), gameId: this.options.gameId ?? "custom", finished: false, decision: null,
-            protectionRequested: this.options.protection, maxPathCount: 0, noPathSince: null, lastBusyAt: Date.now(), sentAtTick: 0, reopenReason: null, busy: false, recovered: 0, pathPackets: new Map() };
+          flow = this.createFlow(connection, target);
           connection.flows.set(key, flow); this.flows.set(flow.id, flow);
         }
         connection.touched = Date.now();
@@ -383,6 +385,27 @@ export class GameMultipath {
     const oldest = (light ?? heavy)?.connection;
     if (!oldest) return false;
     this.connections.delete(oldest); oldest.socket.destroy(); return true;
+  }
+  private createFlow(connection: Connection, target: ProbeTarget): Flow {
+    return { id: randomBytes(8).toString("hex"), connection, address: target.address, port: target.port, counted: this.counting, startedAt: Date.now(), touched: Date.now(), sent: 0, received: 0,
+      exitId: "", instance: null, wire: null, direct: null, pending: [], hold: null, held: false, kind: "service", latencyHistory: [], lowerBoundSamples: false, probing: false, pingNoted: false,
+      evidence: new DeliveryEvidence(), gameId: this.options.gameId ?? "custom", finished: false, decision: null,
+      protectionRequested: this.options.protection, maxPathCount: 0, noPathSince: null, lastBusyAt: Date.now(), sentAtTick: 0, reopenReason: null, busy: false, recovered: 0, pathPackets: new Map() };
+  }
+  /** A peer the game socket never wrote to (a voice media server, a P2P peer) reaches it as
+   * through the ordinary VPN's full-cone NAT: on the same exit and external port. Only an
+   * XUDP connection can tell the game who sent a datagram. */
+  private inboundFlow(wire: Wire, address: string, port: number): Flow | null {
+    const connection = wire.connection; const key = `${address}:${port}`;
+    const existing = connection.flows.get(key);
+    if (existing && !existing.finished) return existing;
+    const sibling = [...wire.flows.values()].find((item) => !item.finished);
+    if (!sibling || !connection.xudp || connection.socket.destroyed || !this.connections.has(connection) || !publicIPv4(address)) return null;
+    if (!this.admitFlow(connection)) return null;
+    const flow: Flow = { ...this.createFlow(connection, { address, port }), counted: sibling.counted, gameId: sibling.gameId, exitId: wire.exitId,
+      instance: wire.instance, wire, held: true, decision: sibling.decision, evidence: wire.evidence };
+    connection.flows.set(key, flow); wire.flows.set(key, flow); this.flows.set(flow.id, flow);
+    return flow;
   }
   private admitFlow(connection: Connection): boolean {
     // The same rule inside the bridge: ping-like flows first, anything else only after long silence.
@@ -594,7 +617,9 @@ export class GameMultipath {
     }
     // Only ping-like flows move (relay/lobby pings): moving a game connection disconnects it.
     if (game || now - flow.lastBusyAt < GAME_POLICY.migrateQuietMs || now - flow.startedAt < GAME_POLICY.migrateQuietMs
-      || !flow.counted || flow.exitId === "direct" || this.options.exitScope !== "flow" || this.options.preferredExitId || flow.decision?.source === "manual") return;
+      || !flow.counted || flow.exitId === "direct" || this.options.exitScope !== "flow" || this.options.preferredExitId || flow.decision?.source === "manual"
+      // Moving one destination of a socket would give the socket two public addresses.
+      || flow.connection.flows.size > 1) return;
     const estimates = this.estimates(flow, true);
     const current = estimates.find((item) => item.nodeId === flow.exitId);
     const best = chooseExit(estimates, flow.exitId);
@@ -657,7 +682,7 @@ export class GameMultipath {
   /** Holds the first packets of a new destination for about one access RTT, so the
    * cached node measurement of that server (shared by all players) decides the exit. */
   private startHold(flow: Flow, payload: Buffer): boolean {
-    if (!flow.counted || this.options.preferredExitId || this.options.exitScope !== "flow" || !publicIPv4(flow.address)) return false;
+    if (!flow.counted || this.options.preferredExitId || this.options.exitScope !== "flow" || !publicIPv4(flow.address) || this.socketExit(flow.connection)) return false;
     const exits = new Set(this.paths.filter((path) => path?.accepted && path.probe && path.entryNodeId === path.exitNodeId && this.fresh(path)
       && this.node(path.exitNodeId)?.state !== "disabled").map((path) => path.exitNodeId));
     if (!exits.size) return false;
@@ -738,8 +763,11 @@ export class GameMultipath {
     const preference = this.options.preferredExitId ? this.canonical(this.options.preferredExitId) : null;
     const fallbackHistory = historyId ? this.canonical(historyId) : null;
     const selected = chooseExit(estimates, this.lastExit, preference ?? fallbackHistory);
+    // One game socket has one public address for all its destinations, as behind any NAT:
+    // voice signalling and media, STUN and P2P peers break when a socket's destinations
+    // leave through different exits. Only a socket's first destination is decided freely.
     const pinned = !counted ? null : this.options.exitScope === "session" ? this.sessionExit ?? this.primaryExitId
-      : this.options.exitScope === "socket" ? connection?.exitId ?? null : null;
+      : this.options.exitScope === "socket" ? connection?.exitId ?? null : connection ? this.socketExit(connection) : null;
     // A session exit that is draining makes new flows wait for the game's restart;
     // one without any live path is gone and must not black-hole the game.
     if (pinned && Boolean(this.node(pinned) && this.node(pinned)!.state !== "enabled")) return null;
@@ -750,7 +778,7 @@ export class GameMultipath {
     const source: GameRouteDecision["source"] = session ? "session" : exitId === preference ? "manual" : exitId === fallbackHistory ? "history"
       : estimate?.evidence === "access" || estimate?.evidence === "unavailable" ? "access" : "measured";
     const reason = probe ? "Пинг игры до этого сервера отправлен через выход без замера: по ответу узел измеряет задержку B"
-      : source === "session" ? this.options.exitScope === "socket" ? "Сохранён выход этого сокета игры: адрес для P2P не меняется" : "Сохранён выход текущего запуска игры"
+      : source === "session" ? this.options.exitScope === "session" ? "Сохранён выход текущего запуска игры" : "Сохранён выход этого сокета игры: у всех его адресов один внешний IP и порт"
       : source === "manual" ? "Выход выбран вручную при открытии UDP-потока"
       : source === "history" ? "Выход выбран по сохранённой истории игры: полных замеров при открытии потока ещё не было"
       : source === "access" ? "При открытии потока замеров до сервера ещё не было; выход выбран по задержке A"
@@ -761,6 +789,12 @@ export class GameMultipath {
     const decision: GameRouteDecision = { exitId, exitName: exitId === "direct" ? "Напрямую, без VPN" : this.node(exitId)?.name ?? "Игровой узел", source, reason };
     return { estimate, decision, probing: Boolean(probe) };
   }
+  /** The exit the open flows of a game socket already use (the most recently active one). */
+  private socketExit(connection: Connection): string | null {
+    let best: Flow | null = null;
+    for (const flow of connection.flows.values()) if (flow.exitId && !flow.finished && (!best || flow.touched > best.touched)) best = flow;
+    return best?.exitId ?? null;
+  }
   /** Learns which destinations the game only pings. A destination that ever carries more
    * (a match, voice) is never treated as a ping target again while it is remembered. */
   private notePingTarget(flow: Flow, now: number): void {
@@ -769,14 +803,15 @@ export class GameMultipath {
       const item = this.pingTargets.get(key); if (item) item.seenAt = -Infinity;
       return;
     }
-    if (now - flow.startedAt < PING_SETTLED_MS || flow.sent > PING_MAX_SENT || flow.received < 1 || !publicIPv4(flow.address)) return;
+    if (flow.pingNoted || now - flow.startedAt < PING_SETTLED_MS || flow.sent > PING_MAX_SENT || flow.received < 1 || !publicIPv4(flow.address)) return;
+    flow.pingNoted = true;
     const item = this.pingTargets.get(key);
-    if (item) { if (item.seenAt !== -Infinity) item.seenAt = now; return; }
+    if (item) { if (item.seenAt !== -Infinity) { item.seenAt = now; item.sockets++; } return; }
     if (this.pingTargets.size >= 64) {
       const oldest = [...this.pingTargets.entries()].sort((a, b) => a[1].seenAt - b[1].seenAt)[0];
       if (oldest) this.pingTargets.delete(oldest[0]);
     }
-    this.pingTargets.set(key, { seenAt: now, probedAt: new Map(), probeNext: true });
+    this.pingTargets.set(key, { seenAt: now, sockets: 1, probedAt: new Map(), probeNext: true });
   }
   /** Every other ping to a known ping server goes through the exit whose measurement of
    * that server is missing or oldest: its relay times the reply, so B of each exit becomes
@@ -784,7 +819,7 @@ export class GameMultipath {
   private pingProbeExit(target: ProbeTarget, estimates: PathEstimate[]): string | null {
     const key = `${target.address}:${target.port}`;
     const item = this.pingTargets.get(key);
-    if (!item || item.seenAt === -Infinity || this.options.exitScope !== "flow") return null;
+    if (!item || item.seenAt === -Infinity || item.sockets < PING_MIN_SOCKETS || this.options.exitScope !== "flow") return null;
     const now = Date.now();
     // Only a relay that times pings and answers probe requests can turn a ping into B.
     const needing = estimates.filter((estimate) => estimate.nodeId !== "direct" && Number.isFinite(estimate.accessScore)
@@ -1133,9 +1168,10 @@ export class GameMultipath {
     if (recovered) this.accept(wire, recovered.sequence, recovered.address, recovered.port, recovered.payload, true);
   }
   private accept(wire: Wire, sequence: number, address: string, port: number, payload: Buffer, recovered: boolean): boolean {
-    const flow = wire.flows.get(`${address}:${port}`);
+    let flow = wire.flows.get(`${address}:${port}`);
     if (!wire.seen.accept(sequence)) { if (!recovered && flow?.counted) this.duplicates++; return false; }
-    if (!flow || flow.finished) return false;
+    if (!flow || flow.finished) flow = this.inboundFlow(wire, address, port) ?? undefined;
+    if (!flow) return false;
     flow.received++; flow.touched = Date.now(); if (recovered) flow.recovered++;
     if (flow.counted) { this.received++; if (recovered) this.recovered++; }
     this.deliver(flow, payload); return true;

@@ -7,6 +7,8 @@ const network = vi.hoisted(() => ({
   mesh: false,
   legacy: false,
   replyAll: false,
+  /** Every Up is also answered from a peer the game never wrote to. */
+  stranger: false,
   directPort: 0,
   probeMode: "ready" as "ready" | "empty" | "unavailable" | "service-unavailable" | "stale",
   opened: [] as number[],
@@ -51,6 +53,8 @@ vi.mock("../../src/main/vpn/multipath/socks", async () => {
         network.sent.push({ node, flow: packet.flow.toString("hex"), payload: packet.payload.toString(),
           session: packet.session.toString("hex"), path: packet.path, sequence: packet.sequence });
         if (network.sameCanonical || network.replyAll) reply(Kind.Down, packet.payload);
+        if (network.stranger) setTimeout(() => { if (!closed) receive(encode({ ...packet, version: 2, exitNodeId: node, instance, kind: Kind.Down,
+          address: "5.5.5.5", port: 9999, sequence: packet.sequence + 100_000, payload: Buffer.from(`stranger:${packet.payload.toString()}`) })); }, 15);
       }
     } };
   } };
@@ -58,12 +62,25 @@ vi.mock("../../src/main/vpn/multipath/socks", async () => {
 import { GAME_FLOW_LIMITS, GameMultipath, type GameRuntimeOptions } from "../../src/main/vpn/multipath/client";
 const nodes: GameRuntimeOptions["nodes"] = ["node-a", "node-b"].map((nodeId) => ({ nodeId, name: nodeId, countryCode: "SE", city: null, mesh: null, state: "enabled" }));
 afterEach(() => { vi.useRealTimers(); network.sent = []; network.sequence.clear(); network.sameCanonical = false; network.mesh = false;
-  network.legacy = false; network.replyAll = false; network.directPort = 0; network.probeMode = "ready"; network.opened = []; network.probeOverride = null; });
+  network.legacy = false; network.replyAll = false; network.directPort = 0; network.probeMode = "ready"; network.opened = []; network.probeOverride = null; network.stranger = false; });
 async function association(listener: { port: number; uuid: string }, target: string): Promise<Socket> {
   const socket = new Socket(); socket.on("error", () => {}); socket.connect(listener.port, "127.0.0.1"); await once(socket, "connect");
   const header = Buffer.alloc(26); Buffer.from(listener.uuid.replaceAll("-", ""), "hex").copy(header, 1);
   header[18] = 2; header.writeUInt16BE(7000, 19); header[21] = 1; Buffer.from(target.split(".").map(Number)).copy(header, 22);
   socket.write(header); return socket;
+}
+/** Xray's cone mode: one XUDP connection per game socket, the destination in every frame. */
+async function xudpAssociation(listener: { port: number; uuid: string }): Promise<Socket> {
+  const socket = new Socket(); socket.on("error", () => {}); socket.connect(listener.port, "127.0.0.1"); await once(socket, "connect");
+  const header = Buffer.alloc(19); Buffer.from(listener.uuid.replaceAll("-", ""), "hex").copy(header, 1); header[18] = 3;
+  socket.write(header); return socket;
+}
+async function sendTo(socket: Socket, address: string, port: number, text: string): Promise<void> {
+  const meta = Buffer.alloc(14); meta.writeUInt16BE(12, 0); meta[4] = 1; meta[5] = 1; meta[6] = 2; meta.writeUInt16BE(port, 7); meta[9] = 1;
+  Buffer.from(address.split(".").map(Number)).copy(meta, 10);
+  const payload = Buffer.from(text); const size = Buffer.alloc(2); size.writeUInt16BE(payload.length);
+  socket.write(Buffer.concat([meta, size, payload]));
+  for (let i = 0; i < 6; i++) { await new Promise<void>((resolve) => setImmediate(resolve)); await vi.advanceTimersByTimeAsync(10); }
 }
 async function send(socket: Socket, text: string): Promise<void> {
   const payload = Buffer.from(text); const size = Buffer.alloc(2); size.writeUInt16BE(payload.length); socket.write(Buffer.concat([size, payload]));
@@ -463,7 +480,8 @@ it("sends every other game ping through an exit lacking a measurement of that pi
     local = await client.listen();
     const pending = client.connect([{ index: 0, port: 1, nodeId: "node-a" }, { index: 1, port: 2, nodeId: "node-b" }], "test", { nodes, protection: true, preferredExitId: null, exitScope: "flow" });
     await vi.advanceTimersByTimeAsync(2300); await pending;
-    expect(await ping("ping-0")).toBe("node-a");
+    // Three separate short sockets make the destination ping-only (voice keeps one socket).
+    expect([await ping("ping-0"), await ping("ping-0b"), await ping("ping-0c")]).toEqual(["node-a", "node-a", "node-a"]);
     await vi.advanceTimersByTimeAsync(3000);
     // The destination is now known to be ping-only: node-b gets every other ping.
     expect([await ping("ping-1"), await ping("ping-2"), await ping("ping-3"), await ping("ping-4")]).toEqual(["node-b", "node-a", "node-b", "node-a"]);
@@ -473,3 +491,53 @@ it("sends every other game ping through an exit lacking a measurement of that pi
     expect([await ping("ping-5"), await ping("ping-6"), await ping("ping-7")]).toEqual(["node-b", "node-b", "node-b"]);
   } finally { for (const socket of sockets) socket.destroy(); await client.stop(); }
 }, 30_000);
+
+it("keeps every destination of one game socket on one exit, so voice and STUN see one public address", async () => {
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"] });
+  network.replyAll = true;
+  const client = new GameMultipath(); client.setPlaying(true); const sockets: Socket[] = [];
+  try {
+    const local = await client.listen();
+    const pending = client.connect([{ index: 0, port: 1, nodeId: "node-a" }, { index: 1, port: 2, nodeId: "node-b" }], "test", { nodes, protection: true, preferredExitId: null, exitScope: "flow" });
+    await vi.advanceTimersByTimeAsync(2300); await pending;
+    // Nothing measured yet: the voice socket's first destination (signalling) takes node-a by A.
+    network.probeMode = "empty";
+    const voice = await xudpAssociation(local); sockets.push(voice); await sendTo(voice, "1.1.1.1", 5060, "sip-register");
+    network.probeMode = "ready"; await vi.advanceTimersByTimeAsync(1500);
+    // node-b measures better for the media server: another socket goes there...
+    const other = await association(local, "8.8.8.8"); sockets.push(other); await send(other, "other-socket");
+    await vi.advanceTimersByTimeAsync(1500);
+    // ...yet the voice socket's media follows its signalling.
+    await sendTo(voice, "8.8.8.8", 7000, "rtp-media");
+    expect(network.sent.find((item) => item.payload === "sip-register")?.node).toBe("node-a");
+    expect(network.sent.find((item) => item.payload === "rtp-media")?.node).toBe("node-a");
+    expect(network.sent.find((item) => item.payload === "other-socket")?.node).toBe("node-b");
+  } finally { for (const socket of sockets) socket.destroy(); await client.stop(); }
+});
+
+it("delivers a peer the game never wrote to on the socket's exit, and the game's answer takes that exit", async () => {
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"] });
+  network.stranger = true;
+  const client = new GameMultipath(); client.setPlaying(true); const sockets: Socket[] = [];
+  try {
+    const local = await client.listen();
+    const pending = client.connect([{ index: 0, port: 1, nodeId: "node-a" }, { index: 1, port: 2, nodeId: "node-b" }], "test", { nodes, protection: true, preferredExitId: null, exitScope: "flow" });
+    await vi.advanceTimersByTimeAsync(2300); await pending;
+    const voice = await xudpAssociation(local); sockets.push(voice);
+    let received = Buffer.alloc(0); voice.on("data", (data: Buffer) => { received = Buffer.concat([received, data]); });
+    await sendTo(voice, "1.1.1.1", 5060, "sip-invite");
+    await vi.advanceTimersByTimeAsync(100);
+    // The XUDP frame names the stranger as the sender: 5.5.5.5:9999.
+    const frame = Buffer.from([0, 12, 0, 0, 2, 1, 2, 0x27, 0x0f, 1, 5, 5, 5, 5]);
+    expect(received.indexOf(frame)).toBeGreaterThanOrEqual(0);
+    expect(received.toString()).toContain("stranger:sip-invite");
+    const exit = network.sent.find((item) => item.payload === "sip-invite")?.node;
+    await sendTo(voice, "5.5.5.5", 9999, "rtp-answer");
+    expect(network.sent.find((item) => item.payload === "rtp-answer")?.node).toBe(exit);
+    // A plain (non-XUDP) socket cannot name a sender: strangers are not delivered there.
+    const plain = await association(local, "9.9.9.9"); sockets.push(plain);
+    let plainData = ""; plain.on("data", (data: Buffer) => { plainData += data.toString(); });
+    await send(plain, "plain"); await vi.advanceTimersByTimeAsync(100);
+    expect(plainData).not.toContain("stranger:plain");
+  } finally { for (const socket of sockets) socket.destroy(); await client.stop(); }
+});
