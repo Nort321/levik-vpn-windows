@@ -38,6 +38,19 @@ it("reduces confidence for stale data and never beats a destination metric by si
   const unknown = { ...node("unknown", 1, 1), egress: [] };
   expect(chooseExit([fresh, estimateExit(unknown, target, [], now)])?.nodeId).toBe("fresh");
 });
+it("never counts missing TTL-exceeded replies of a lower bound as path loss", () => {
+  const target = { address: "185.40.64.1", port: 7086 };
+  // Measured towards Riot from SPb: a 25 ms Telia hop answered 55-65% of the trace probes.
+  const candidate = node("spb", 4, 25); candidate.egress[0]!.metric = { ...metric(25, 1, 45), method: "ttl-hop", approximate: true };
+  candidate.egress[0]!.address = target.address; candidate.egress[0]!.port = target.port;
+  const estimate = estimateExit(candidate, target, [], now);
+  expect(estimate).toMatchObject({ confidence: "exact", evidence: "lower-bound" });
+  expect(estimate.egress?.latencyMs).toBe(25);
+  expect(estimate.lossPercent).toBeCloseTo(1);
+  const direct = estimateExit({ nodeId: "direct", state: "enabled", access: null, egress: [],
+    direct: { ...metric(3, 0, 60), method: "ttl-hop", approximate: true } }, target, [], now);
+  expect(direct.latencyMs).toBe(3); expect(direct.lossPercent).toBe(0);
+});
 it("allows a measured physical direct exit", () => {
   const target = { address: "1.1.1.1", port: 7000 };
   const direct = estimateExit({ nodeId: "direct", state: "enabled", access: null, egress: [], direct: metric(5) }, target, [], now);

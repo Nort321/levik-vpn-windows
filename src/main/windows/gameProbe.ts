@@ -52,10 +52,12 @@ export async function measureDirectGameTargets(
     return signal.aborted ? null : { ...target, quality: summarizeDirectSamples(samples) };
   }));
   const results = measured.filter((result): result is NonNullable<typeof result> => result !== null);
-  // The TUN can synthesize very fast ICMP replies. Multiple targets all below
+  // The TUN can synthesize very fast ICMP echo replies. Echo targets all below
   // this threshold are interference evidence, never a winning direct route.
-  if (results.length && results.every((result) => result.quality.latencyMs !== null && result.quality.latencyMs < DIRECT_INTERFERENCE_MS)) {
-    return results.map((result) => ({ ...result, quality: { ...result.quality, latencyMs: null, p95Ms: null,
+  // A TTL-exceeded reply comes from a real router (often the home one at 2-3 ms).
+  const echoes = results.filter((result) => result.quality.method === "icmp" && result.quality.latencyMs !== null);
+  if (echoes.length && echoes.every((result) => result.quality.latencyMs! < DIRECT_INTERFERENCE_MS)) {
+    return results.map((result) => result.quality.method !== "icmp" ? result : ({ ...result, quality: { ...result.quality, latencyMs: null, p95Ms: null,
       jitterMs: null, lossPercent: 100, method: "unknown", approximate: true } }));
   }
   return results;

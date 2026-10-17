@@ -18,6 +18,12 @@ describe("physical Windows game measurement", () => {
     expect(results).toHaveLength(2);
     expect(results.every((result) => result.quality.latencyMs === null && result.quality.method === "unknown")).toBe(true);
   });
+  it("keeps a home-router TTL lower bound under 3 ms: the TUN fakes echo replies, not TTL-exceeded", async () => {
+    const results = await measureDirectGameTargets([{ address: "185.40.64.1", port: 7086 }], "192.168.1.10", new AbortController().signal,
+      async (_address, ttl) => ttl === 30 ? { latencyMs: null, method: "icmp", approximate: false }
+        : { latencyMs: ttl === 1 ? 2.4 : null, method: "ttl-hop", approximate: true });
+    expect(results[0]!.quality).toMatchObject({ method: "ttl-hop", latencyMs: 2.4 });
+  });
   it("labels last-router estimates and rejects invalid native output", () => {
     const sample = parseDirectProbeSample('{"latencyMs":25,"method":"ttl-hop","approximate":false}');
     expect(summarizeDirectSamples([sample], 100)).toMatchObject({ latencyMs: 25, approximate: true, method: "ttl-hop", measuredAt: 100 });

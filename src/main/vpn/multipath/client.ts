@@ -901,8 +901,9 @@ export class GameMultipath {
         || (this.directMeasurements.get(`${a.address}:${a.port}`)?.measuredAt ?? 0) - (this.directMeasurements.get(`${b.address}:${b.port}`)?.measuredAt ?? 0)).slice(0, 4);
       void this.options.measureDirect(directTargets, this.abort.signal).then((results) => {
         if (this.abort.signal.aborted) return;
-        // A batch of sub-3ms targets is likely the TUN answering ICMP locally.
-        const good = results.filter((item) => item.medianMs !== null);
+        // A batch of sub-3ms echo targets is likely the TUN answering ICMP locally;
+        // a TTL-exceeded lower bound is a real router's reply.
+        const good = results.filter((item) => item.medianMs !== null && item.method !== "ttl-hop");
         if (good.length >= 1 && good.every((item) => item.medianMs! < 3)) { this.directMeasurements.clear(); this.directHistory.clear(); return; }
         for (const raw of results) {
           const item = parseMeasurement(raw); if (!item || !directTargets.some((target) => target.address === item.address && target.port === item.port)) continue;
@@ -916,7 +917,11 @@ export class GameMultipath {
             }
             history = new MeasurementHistory(); this.directHistory.set(key, history);
           }
-          history.push(this.segment(item)); const metric = item.medianMs === null ? this.segment(item) : history.snapshot(); if (metric) this.directMeasurements.set(key, metric);
+          history.push(this.segment(item));
+          // A round where no router answered keeps the last direct estimate while it is fresh.
+          const previous = this.directMeasurements.get(key);
+          const keep = item.medianMs === null && previous?.latencyMs != null && Date.now() - previous.measuredAt < 60_000;
+          const metric = keep ? previous : item.medianMs === null ? this.segment(item) : history.snapshot(); if (metric) this.directMeasurements.set(key, metric);
         }
       }).catch(() => {}).finally(() => { this.measuringDirect = false; });
     }

@@ -41,11 +41,16 @@ export const subnet24 = (address: string): string => address.split(".").slice(0,
 /** Ascending order with unknown values last; never produces NaN comparisons. */
 export const byLatency = <T extends { latencyMs: number | null }>(a: T, b: T): number => (a.latencyMs ?? Infinity) - (b.latencyMs ?? Infinity) || 0;
 
+/** A lower-bound (ttl-hop) segment is timed by a router's TTL-exceeded reply. Routers rate-limit
+ * those replies and every trace packet may hash onto another ECMP path, so a missing reply is
+ * not lost game traffic (35–55% observed towards Riot while the path itself lost nothing). */
+export const pathLoss = (item: Segment): number => item.method === "ttl-hop" ? 0 : item.lossPercent;
+
 export function combineSegments(segments: Segment[], nodes = 1): Pick<PathEstimate, "latencyMs" | "jitterMs" | "lossPercent"> {
   if (!segments.length || segments.some((item) => item.latencyMs === null)) return { latencyMs: null, jitterMs: null, lossPercent: null };
   return { latencyMs: segments.reduce((sum, item) => sum + item.latencyMs!, nodes * GAME_POLICY.nodeProcessingMs),
     jitterMs: Math.sqrt(segments.reduce((sum, item) => sum + (item.jitterMs ?? 0) ** 2, 0)),
-    lossPercent: 100 * (1 - segments.reduce((survival, item) => survival * (1 - item.lossPercent / 100), 1)) };
+    lossPercent: 100 * (1 - segments.reduce((survival, item) => survival * (1 - pathLoss(item) / 100), 1)) };
 }
 const tail = (segments: Segment[]): number => GAME_POLICY.tailWeight
   * Math.sqrt(segments.reduce((sum, item) => sum + Math.max(0, (item.p95Ms ?? item.latencyMs ?? 0) - (item.latencyMs ?? 0)) ** 2, 0));
@@ -58,11 +63,11 @@ export function estimateExit(candidate: ExitCandidate, target: { address: string
     score: Infinity, confidence: "unavailable", evidence: "unavailable", approximate: true, egress: null };
   if (candidate.state !== "enabled") return unavailable;
   const fresh = (item: Segment): boolean => item.samples >= GAME_POLICY.minimumSamples && item.latencyMs !== null && Number.isFinite(item.latencyMs)
-    && now >= item.measuredAt - 5_000 && now - item.measuredAt < GAME_POLICY.expiryMs && item.lossPercent <= GAME_POLICY.maxLossPercent;
+    && now >= item.measuredAt - 5_000 && now - item.measuredAt < GAME_POLICY.expiryMs && pathLoss(item) <= GAME_POLICY.maxLossPercent;
   if (candidate.direct) {
     if (!fresh(candidate.direct)) return unavailable;
     const metric = candidate.direct;
-    return { nodeId: candidate.nodeId, latencyMs: metric.latencyMs, jitterMs: metric.jitterMs, lossPercent: metric.lossPercent,
+    return { nodeId: candidate.nodeId, latencyMs: metric.latencyMs, jitterMs: metric.jitterMs, lossPercent: pathLoss(metric),
       score: scoreMetric(metric, now), confidence: "exact", evidence: metric.method === "ttl-hop" ? "lower-bound" : "endpoint",
       approximate: metric.approximate || metric.method === "ttl-hop", egress: null };
   }
@@ -91,7 +96,7 @@ export function estimateExit(candidate: ExitCandidate, target: { address: string
   return { nodeId: candidate.nodeId, ...combined, score, confidence, evidence, approximate: true, egress: chosen?.metric ?? null };
 }
 function scoreMetric(metric: Segment, now: number): number {
-  return metric.latencyMs! + GAME_POLICY.jitterWeight * (metric.jitterMs ?? 0) + GAME_POLICY.lossWeightMs * metric.lossPercent
+  return metric.latencyMs! + GAME_POLICY.jitterWeight * (metric.jitterMs ?? 0) + GAME_POLICY.lossWeightMs * pathLoss(metric)
     + tail([metric]) + stale([metric], now);
 }
 
