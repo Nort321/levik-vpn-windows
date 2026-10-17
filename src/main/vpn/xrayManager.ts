@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { EventEmitter } from "node:events";
 import { promisify } from "node:util";
 import { parseXrayStats, XRAY_STATS_ENDPOINT } from "./xrayStats";
-import { bindXrayOutboundInterface, GAME_MULTIPATH, GAME_UDP_BALANCER } from "./xrayConfig";
+import { bindXrayOutboundInterface, gameRoutingRules, isGameRule, GAME_MULTIPATH, GAME_UDP_BALANCER } from "./xrayConfig";
 import type { GameRouteCandidate, GameRuntimeOptions } from "./multipath/client";
 import type { GameConfigurableOptions, GameDataPlane } from "./multipath/dataPlane";
 import { RemoteGameDataPlane } from "./multipath/remote";
@@ -14,7 +14,6 @@ import { findWindowsOutboundInterface } from "../windows/outboundInterface";
 import { TuicSidecar, withTuicProxy } from "./tuicSidecar";
 import type { TuicEndpoint, GameMultipathStats, GameRuntimeSnapshot, GameRouteQuality } from "../../shared/contracts";
 import { GAME_BLOCK, gameTag } from "./gameRoutes";
-import { gameProcesses } from "../../shared/games";
 import type { AppSettings } from "../../shared/contracts";
 
 const execFileAsync = promisify(execFile);
@@ -106,11 +105,14 @@ export class XrayManager extends EventEmitter<XrayEvents> {
     if (!child || !this.routing || !Array.isArray(this.routing.rules)) throw new Error("Подключите VPN для обновления игр");
     const routing = structuredClone(this.routing);
     if (!Array.isArray(routing.rules)) return;
-    const processes = gameProcesses(settings);
-    for (const rule of routing.rules) if (rule && typeof rule === "object" && "ruleTag" in rule
-      && (rule.ruleTag === "game" || rule.ruleTag === "game-multipath")) Object.assign(rule, { process: processes });
-    if (!processes.length) routing.rules = routing.rules.filter((rule: unknown) => !(rule && typeof rule === "object"
-      && "ruleTag" in rule && (rule.ruleTag === "game" || rule.ruleTag === "game-multipath")));
+    // Rebuilt in place, Game's rules are contiguous: a game with known match ports has its own rule.
+    const at = routing.rules.findIndex(isGameRule);
+    if (at >= 0) {
+      if (!this.tunnelTag) throw new Error("Подключите VPN для обновления игр");
+      const multipath = Array.isArray(routing.balancers) && routing.balancers.some((balancer: unknown) => typeof balancer === "object" && balancer !== null && "tag" in balancer && balancer.tag === GAME_UDP_BALANCER);
+      const rest = routing.rules.filter((rule: unknown) => !isGameRule(rule));
+      routing.rules = [...rest.slice(0, at), ...gameRoutingRules(settings, this.tunnelTag, multipath), ...rest.slice(at)];
+    }
     if (Array.isArray(routing.balancers)) for (const balancer of routing.balancers) {
       if (!balancer || typeof balancer !== "object" || !("tag" in balancer)) continue;
       if (balancer.tag === GAME_UDP_BALANCER) Object.assign(balancer, { selector: [this.gameViaTunnel && this.tunnelTag ? this.tunnelTag

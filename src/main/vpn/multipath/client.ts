@@ -64,6 +64,9 @@ const EVICT_IDLE_MS = 2_000;
 const EVICT_HEAVY_IDLE_MS = 30_000;
 const LIGHT_PACKETS = 16;
 const REGIONS_INTERVAL_MS = 30_000;
+/** A flow that sent this many packets and got no reply is worth a line in the log. */
+const SILENT_MIN_SENT = 20;
+const SILENT_LOG_MS = 60_000;
 /** A destination the game only pings: a socket of at most PING_MAX_SENT packets that got a reply.
  * Its pings may go out through exits lacking a measurement: the exit times the reply (B). */
 const PING_MAX_SENT = 4;
@@ -78,6 +81,7 @@ const PING_REFRESH_MS = 60_000;
 export class GameMultipath {
   constructor(private counting = true) {}
   private log: (line: string) => void = () => {};
+  private readonly silentPorts = new Map<number, number>();
   /** Flow re-decisions go to the app log: they explain a game's disconnects. */
   setLogger(log: (line: string) => void): void { this.log = log; }
   startCounting(): void { this.counting = true; }
@@ -1198,10 +1202,19 @@ export class GameMultipath {
   private finishFlow(flow: Flow, final = true): void {
     if (flow.finished) return; if (final) flow.finished = true;
     if (flow.hold) { clearTimeout(flow.hold.timer); flow.hold = null; this.holds.delete(flow); }
-    if (final) { flow.direct?.close(); flow.pending = []; }
+    if (final) { flow.direct?.close(); flow.pending = []; this.noteSilent(flow); }
     if (flow.kind !== "match" || (this.matchReport && this.matchReport.endedAt > flow.touched)) return;
     this.lastMatch = this.matchServer(flow);
     this.matchReport = this.report(flow);
+  }
+  /** Logs, once a minute per port and without the address, a game flow that sent a stream
+   * through its exit and never heard back: a voice or party server refusing the exit's address. */
+  private noteSilent(flow: Flow): void {
+    const now = Date.now();
+    if (flow.received || flow.sent < SILENT_MIN_SENT || now - (this.silentPorts.get(flow.port) ?? -Infinity) < SILENT_LOG_MS) return;
+    this.silentPorts.set(flow.port, now);
+    if (this.silentPorts.size > 256) this.silentPorts.delete(this.silentPorts.keys().next().value!);
+    this.log(`Game: UDP-порт ${flow.port} не ответил через ${flow.decision?.exitName ?? this.node(flow.exitId)?.name ?? "игровой узел"} (${flow.sent} пакетов за ${Math.round((flow.touched - flow.startedAt) / 1000)} с)`);
   }
   private matchServer(flow: Flow): GameMatchServer {
     const metric = this.measurements.get(flow.exitId)?.find((item) => item.address === flow.address && item.port === flow.port)?.metric;

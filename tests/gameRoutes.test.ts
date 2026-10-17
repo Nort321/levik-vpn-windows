@@ -49,10 +49,24 @@ describe("Game access and routing", () => {
     const rules = (config.routing as { rules: Record<string, unknown>[] }).rules;
     expect(rules.findIndex((r) => r.ruleTag === "game")).toBeLessThan(rules.findIndex((r) => r.ruleTag === "process-bypass"));
     expect(rules.find((r) => r.ruleTag === "game")).toMatchObject({ process: ["VALORANT.exe", "VALORANT-Win64-Shipping.exe"], outboundTag: p.servers[0]!.tag });
-    expect(rules.find((r) => r.ruleTag === "game-multipath")).toMatchObject({ network: "udp", balancerTag: GAME_UDP_BALANCER });
+    expect(rules.find((r) => r.ruleTag === "game-match-0")).toMatchObject({ network: "udp", port: "7000-8000,8180-8181", balancerTag: GAME_UDP_BALANCER });
     expect(config).toHaveProperty("inbounds.1.settings.accounts.0", { user: "levik-game", pass: "test-password" });
     // Anti-DPI belongs to ordinary VPN; adding latency to Game is never inherited.
     expect(config).not.toHaveProperty("outbounds.1.streamSettings.sockopt.dialerProxy");
+  });
+  it("takes only a game's known match ports to the game path, its voice keeps the ordinary tunnel", () => {
+    const p = profile({ enabled: true, endpoints: [endpoint] });
+    const config = buildXrayConfig(p, p.servers[0]!, { ...settings, gameIds: ["valorant", "cs2"], gameProcesses: ["VALORANT.exe", "Custom.exe"] }, "test-password");
+    const rules = (config.routing as { rules: Record<string, unknown>[] }).rules;
+    const game = rules.filter((rule) => typeof rule.ruleTag === "string" && rule.ruleTag.startsWith("game"));
+    expect(game).toEqual([
+      expect.objectContaining({ ruleTag: "game-match-0", process: ["VALORANT.exe", "VALORANT-Win64-Shipping.exe"], port: "7000-8000,8180-8181", network: "udp", balancerTag: GAME_UDP_BALANCER }),
+      expect.objectContaining({ ruleTag: "game-multipath", process: ["cs2.exe", "Custom.exe"], network: "udp", balancerTag: GAME_UDP_BALANCER }),
+      expect.objectContaining({ ruleTag: "game", process: ["VALORANT.exe", "VALORANT-Win64-Shipping.exe", "cs2.exe", "Custom.exe"], network: "tcp,udp", outboundTag: p.servers[0]!.tag }),
+    ]);
+    expect(game[1]).not.toHaveProperty("port");
+    // VALORANT voice (UDP 27016-27024, 54000-54012) matches no game-path rule and falls to the tunnel rule.
+    expect(rules.indexOf(game[2]!)).toBe(rules.indexOf(game[0]!) + 2);
   });
   it("does not add game listeners or routes when disabled", () => {
     const p = profile({ enabled: true, endpoints: [endpoint] });
@@ -64,8 +78,8 @@ describe("Game access and routing", () => {
     const p = profile({ enabled: true, endpoints: [endpoint] });
     const config = buildXrayConfig(p, p.servers[0]!, { ...settings, gameMultipath: true }, "session-password");
     const rules = (config.routing as { rules: Record<string, unknown>[] }).rules;
-    const redundant = rules.find((rule) => rule.ruleTag === "game-multipath")!;
-    expect(redundant).toMatchObject({ network: "udp", ip: ["0.0.0.0/0"], balancerTag: GAME_UDP_BALANCER, process: ["VALORANT.exe", "VALORANT-Win64-Shipping.exe"] });
+    const redundant = rules.find((rule) => rule.ruleTag === "game-match-0")!;
+    expect(redundant).toMatchObject({ network: "udp", ip: ["0.0.0.0/0"], port: "7000-8000,8180-8181", balancerTag: GAME_UDP_BALANCER, process: ["VALORANT.exe", "VALORANT-Win64-Shipping.exe"] });
     expect(rules.indexOf(redundant)).toBeLessThan(rules.findIndex((rule) => rule.ruleTag === "game"));
     expect(rules.find((rule) => rule.port === "37079")).toMatchObject({ ip: ["127.0.0.1"], network: "udp", inboundTag: ["levik-game-probe-0"] });
     expect(rules.filter((rule) => (rule.inboundTag as string[] | undefined)?.includes(GAME_DATA_PROBE_TAG))).toEqual([

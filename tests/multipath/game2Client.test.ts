@@ -541,3 +541,22 @@ it("delivers a peer the game never wrote to on the socket's exit, and the game's
     expect(plainData).not.toContain("stranger:plain");
   } finally { for (const socket of sockets) socket.destroy(); await client.stop(); }
 });
+
+it("logs a game stream that never heard back by port, without its address", async () => {
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"] });
+  const client = new GameMultipath(); client.setPlaying(true); const sockets: Socket[] = []; const lines: string[] = [];
+  client.setLogger((line) => lines.push(line));
+  try {
+    const local = await client.listen();
+    const pending = client.connect([{ index: 0, port: 1, nodeId: "node-a" }, { index: 1, port: 2, nodeId: "node-b" }], "test", { nodes, protection: false, preferredExitId: null, exitScope: "flow" });
+    await vi.advanceTimersByTimeAsync(2300); await pending;
+    // Nothing answers: a voice stream refused by its server, and a short unanswered ping.
+    const voice = await association(local, "8.8.8.8"); sockets.push(voice);
+    for (let index = 0; index < 25; index++) await send(voice, `voice-${index}`);
+    const ping = await xudpAssociation(local); sockets.push(ping);
+    for (let index = 0; index < 3; index++) await sendTo(ping, "9.9.9.9", 7100, `ping-${index}`);
+  } finally { for (const socket of sockets) socket.destroy(); await client.stop(); }
+  const silent = lines.filter((line) => line.includes("не ответил"));
+  expect(silent).toEqual([expect.stringMatching(/^Game: UDP-порт 7000 не ответил через node-[ab] \(25 пакетов за \d+ с\)$/)]);
+  expect(lines.join("\n")).not.toContain("8.8.8.8");
+});

@@ -4,7 +4,7 @@ import { XRAY_STATS_ENDPOINT } from "./xrayStats";
 import { TUNNEL_HEALTH_PORT, TUNNEL_HEALTH_TAG } from "./tunnelHealth";
 import { resolveProcessCompanions } from "../../shared/processes";
 import { isIP } from "node:net";
-import { gameProcesses } from "../../shared/games";
+import { gameRouteGroups } from "../../shared/games";
 import { GAME_BLOCK, GAME_PROBE_PORT, GAME_DIRECT_PORT, GAME_PROBE_USER, GAME_DATA_PROBE_PORT, GAME_DATA_PROBE_TAG, gameTag, gameProbeTag } from "./gameRoutes";
 import { RELAY_PORT } from "./multipath/wire";
 export const GAME_MULTIPATH = "levik-game-multipath";
@@ -44,7 +44,7 @@ export function buildXrayConfig(
 ): Record<string, unknown> {
   const games = settings.gameEnabled && profile.game?.enabled ? profile.game.servers : [];
   const gaming = games.length > 0 && Boolean(gameProbePassword);
-  const gameRules = settings.gameEnabled ? gameProcesses(settings) : [];
+  const gameRules = gameRoutingRules(settings, server.tag, gaming);
   const antiDpiOutbound = server.tuic ? server.outbound : withAntiDpi(server, settings);
   const selectedOutbound = server.tuic
     ? tuicLocalOutbound(server.tag)
@@ -78,11 +78,7 @@ export function buildXrayConfig(
     ]),
     ...(gameRules.length ? [{ type: "field", ip: LOCAL_CIDRS, outboundTag: "direct" }] : []),
     // Explicit Game selection wins over process bypass and regional direct rules.
-    ...(gaming && gameRules.length ? [{ type: "field", process: gameRules, ip: ["0.0.0.0/0"], network: "udp", balancerTag: GAME_UDP_BALANCER, ruleTag: "game-multipath" }] : []),
-    // The game's TCP (login, lobby, matchmaking) and non-IPv4 UDP take the ordinary tunnel,
-    // the path its launcher already uses. A game node that answers echoes may still refuse
-    // new TCP connections, and a game never plays over TCP, so nothing waits on that node.
-    ...(gameRules.length ? [{ type: "field", process: gameRules, network: "tcp,udp", outboundTag: server.tag, ruleTag: "game" }] : []),
+    ...gameRules,
     ...(processBypass
       ? [{ type: "field", process: processes, network: "tcp,udp", outboundTag: "direct", ruleTag: "process-bypass" }]
       : []),
@@ -168,6 +164,30 @@ export function buildXrayConfig(
     policy: { system: { statsInboundDownlink: true, statsInboundUplink: true, statsOutboundDownlink: true, statsOutboundUplink: true } },
     stats: {},
   };
+}
+
+/** Rules owned by Game, rebuilt together when the selected games change. */
+export function isGameRule(rule: unknown): boolean {
+  return isRecord(rule) && typeof rule.ruleTag === "string" && /^game(-multipath|-match-\d+)?$/.test(rule.ruleTag);
+}
+
+/**
+ * Game routing for the selected processes, in order: IPv4 UDP of matches to the game
+ * path (only a game's match ports when they are known, so its voice and party traffic
+ * keep the address the game logged in from), then everything else of the game to the
+ * ordinary tunnel: TCP (login, lobby, matchmaking, voice) and non-IPv4 UDP. A game node
+ * that answers echoes may still refuse new TCP connections, and a game never plays over
+ * TCP, so nothing waits on that node.
+ */
+export function gameRoutingRules(settings: AppSettings, tunnelTag: string, multipath: boolean): Record<string, unknown>[] {
+  const groups = settings.gameEnabled ? gameRouteGroups(settings) : [];
+  if (!groups.length) return [];
+  return [
+    ...(multipath ? groups.map((group, index) => ({ type: "field", process: group.processes, ip: ["0.0.0.0/0"], network: "udp",
+      ...(group.matchUdpPorts ? { port: group.matchUdpPorts, ruleTag: `game-match-${index}` } : { ruleTag: "game-multipath" }),
+      balancerTag: GAME_UDP_BALANCER })) : []),
+    { type: "field", process: groups.flatMap((group) => group.processes), network: "tcp,udp", outboundTag: tunnelTag, ruleTag: "game" },
+  ];
 }
 
 /**

@@ -16,7 +16,9 @@ const settings: AppSettings = {
   preventDnsLeaks: true, favoriteServerIds: [], favoriteNodes: null, antiDpiEnabled: false,
   antiDpiPackets: "tlshello", antiDpiLength: "100-200", antiDpiInterval: "10-20", splitTunnelMode: "off",
   splitTunnelProcesses: [], connectionTelemetry: false, telemetryNoticeShown: true, syncSettings: true,
-  sharePresence: true, sleepAtHome: true, gameEnabled: true, gameIds: ["valorant"],
+  sharePresence: true, sleepAtHome: true, gameEnabled: true,
+  // A custom game: all of its IPv4 UDP takes the game path, so DNS probes stand in for a match.
+  gameIds: [], gameProcesses: ["Game.exe"],
 };
 
 async function freePort(): Promise<number> {
@@ -74,6 +76,12 @@ describe("Game routing with the bundled Xray core", () => {
       delete processRule.process;
       processRule.inboundTag = ["test-game-app"];
       execFileSync(executable, ["run", "-test", "-format", "json", "-config", "stdin:"], { input: JSON.stringify(config), stdio: "pipe", timeout: 5000 });
+      // The pinned core also accepts a game's match-port rule next to process matching.
+      const ported = buildXrayConfig({ profileId: "test", subscriptionId: "test", subscriptionExpiresAt: null,
+        servers: [normal], game: { enabled: true, servers: [game] }, directCidrs: [], directDomains: [], proxyDomains: [],
+      }, normal, { ...settings, gameIds: ["valorant"] }, "test-pass");
+      ported.inbounds = inbounds;
+      execFileSync(executable, ["run", "-test", "-format", "json", "-config", "stdin:"], { input: JSON.stringify(ported), stdio: "pipe", timeout: 5000 });
       core = spawn(executable, ["run", "-format", "json", "-config", "stdin:"], { stdio: "pipe", windowsHide: true });
       const child = core;
       let output = "";
