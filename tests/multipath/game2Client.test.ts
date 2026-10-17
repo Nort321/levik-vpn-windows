@@ -207,6 +207,31 @@ it("opens mesh paths lazily for the used exit without expanding the 64-node matr
   } finally { for (const socket of sockets) socket.destroy(); await client.stop(); }
 });
 
+it("warms mesh entries to the primary exit before the match sends its first packet", async () => {
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"] });
+  network.mesh = true;
+  const client = new GameMultipath(); client.setPlaying(true);
+  try {
+    await client.listen();
+    const meshNodes: GameRuntimeOptions["nodes"] = Array.from({ length: 3 }, (_, index) => ({
+      nodeId: `node-${index + 1}`, name: `Узел ${index + 1}`, countryCode: "SE", city: null,
+      mesh: { address: `10.70.0.${index + 1}`, port: 37080 }, state: "enabled",
+    }));
+    const pending = client.connect(meshNodes.map((node, index) => ({ index, port: index + 1, nodeId: node.nodeId })), "test", {
+      nodes: meshNodes, protection: true, preferredExitId: null, exitScope: "session",
+    });
+    await vi.advanceTimersByTimeAsync(2300); await pending;
+    client.setPrimaryRoute(2);
+    await vi.advanceTimersByTimeAsync(3000);
+    const meshPaths = client.runtimeSnapshot().ingressPaths.filter((path) => path.entryNodeId !== path.exitNodeId);
+    expect(new Set(meshPaths.map((path) => path.exitNodeId))).toEqual(new Set(["node-3"]));
+    expect(new Set(meshPaths.map((path) => path.entryNodeId))).toEqual(new Set(["node-1", "node-2"]));
+    // Still warm several seconds later, though no game flow uses the exit yet.
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(client.runtimeSnapshot().ingressPaths.filter((path) => path.entryNodeId !== path.exitNodeId)).toHaveLength(2);
+  } finally { await client.stop(); }
+});
+
 it("ignores startup health flows when pinning a session to its primary route", async () => {
   vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"] });
   const client = new GameMultipath(false); client.setPlaying(true); const sockets: Socket[] = [];

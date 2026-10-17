@@ -514,9 +514,13 @@ export class GameMultipath {
       while (this.estimateHistory.length > 120) this.estimateHistory.shift();
     }
     const activeExits = new Set([...this.flows.values()].filter((flow) => flow.counted && flow.exitId && flow.exitId !== "direct").map((flow) => flow.exitId));
-    for (const exit of activeExits) void this.ensureMeshPaths(exit);
+    // The exit the next match will most likely take keeps its backup entries open and
+    // measured, so a match has a copy through another node from its first packet.
+    const warmExits = new Set(activeExits);
+    for (const exit of [this.sessionExit, this.primaryExitId]) if (exit && exit !== "direct") warmExits.add(exit);
+    for (const exit of warmExits) void this.ensureMeshPaths(exit);
     for (const [slot, path] of this.paths.entries()) if (path && path.entryNodeId !== path.exitNodeId
-      && !activeExits.has(path.exitNodeId) && !this.preparingMesh.has(path.exitNodeId)) {
+      && !warmExits.has(path.exitNodeId) && !this.preparingMesh.has(path.exitNodeId)) {
       path.accepted = false; path.epoch++; path.transport.close(); delete this.paths[slot];
       this.exitPathCounts.set(path.exitNodeId, Math.max(-1, ...this.paths.filter((item) => item?.exitNodeId === path.exitNodeId).map((item) => item.pathSlot)) + 1);
     }

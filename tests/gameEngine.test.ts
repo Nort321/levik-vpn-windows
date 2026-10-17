@@ -121,6 +121,18 @@ it("prefers independent entry nodes when more than one can reach the pinned exit
     { latencyMs: 20, entryNodeId: "b" }], true);
   expect(result.slice(0, 2).map((item) => item.entryNodeId)).toEqual(["a", "b"]);
 });
+it("always keeps one copy on another physical node, even a slower one carried over TCP", () => {
+  const paths = [{ latencyMs: 5, entryNodeId: "spb" }, { latencyMs: 6, entryNodeId: "spb" }, { latencyMs: 7, entryNodeId: "spb" },
+    { latencyMs: 25, entryNodeId: "msk", reliable: true }];
+  const result = chooseIngress(paths, true);
+  expect(result.map((item) => item.entryNodeId)).toEqual(["spb", "msk", "spb", "spb"]);
+  expect(result).toHaveLength(GAME_POLICY.maxCopies);
+  // Beyond the backup allowance another node would only add upload, not a usable copy.
+  expect(chooseIngress([{ latencyMs: 5, entryNodeId: "spb" }, { latencyMs: 6, entryNodeId: "spb" },
+    { latencyMs: 5 + GAME_POLICY.diverseBackupMs + 1, entryNodeId: "msk" }], true).map((item) => item.entryNodeId)).toEqual(["spb", "spb"]);
+  // Without protection or with a congested uplink there is one copy only.
+  expect(chooseIngress(paths, false)).toHaveLength(1);
+});
 it("keeps exact-target TTL uncertainty separate from subnet fallback", () => {
   const candidate = node("ttl", 10, 20);
   Object.assign(candidate.egress[0]!.metric, { method: "ttl-hop", approximate: true, scope: "target" });

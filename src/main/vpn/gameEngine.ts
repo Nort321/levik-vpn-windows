@@ -8,6 +8,9 @@ export const GAME_POLICY = Object.freeze({ window: 60, minimumSamples: 5, jitter
   linkBytesPerSecond: 125_000_000, networkLoadWeightMs: 10, flowLoadWeightMs: 5,
   directProbeIntervalMs: 5_000,
   hysteresisMs: 3, hysteresisRatio: 0.05, extraPathMs: 25, maxCopies: 4,
+  /** A copy through another physical entry node is kept even this much slower (raw RTT, TCP
+   * carriage included): it is a backup that only has to arrive when the first node's route fails. */
+  diverseBackupMs: 60,
   matchMinAgeMs: 5_000, matchPacketsPerSecond: 10, matchMinReplies: 20,
   lobbyMaxAgeMs: 5_000, uploadInflationMs: 15, uploadConfirmTicks: 5, uploadMinReplicatedBytes: 1024, uploadRetryMs: 30_000,
   /** Per-path baseline is the minimum within this window, so it follows real route changes. */
@@ -121,8 +124,12 @@ export function chooseIngress<T extends IngressCandidate>(paths: T[], protection
   });
   if (!protection || limitedByUpload) return ranked.slice(0, 1);
   const first = ranked[0]; if (!first) return [];
-  const second = ranked.find((path) => path !== first && first.entryNodeId && path.entryNodeId && path.entryNodeId !== first.entryNodeId
-    && rank(path) <= rank(first) + GAME_POLICY.extraPathMs) ?? ranked[1];
+  const otherNode = (path: T): boolean => path !== first && Boolean(first.entryNodeId && path.entryNodeId && path.entryNodeId !== first.entryNodeId);
+  // Copies through one node share its route: one copy always takes another physical node
+  // when any reaches the exit, so the match survives that node's route failing.
+  const second = ranked.find((path) => otherNode(path) && rank(path) <= rank(first) + GAME_POLICY.extraPathMs)
+    ?? ranked.find((path) => otherNode(path) && path.latencyMs! <= first.latencyMs! + GAME_POLICY.diverseBackupMs)
+    ?? ranked[1];
   const selected = [first, ...(second ? [second] : [])];
   for (const path of ranked) if (!selected.includes(path) && rank(path) <= rank(first) + GAME_POLICY.extraPathMs && selected.length < GAME_POLICY.maxCopies) selected.push(path);
   return selected;
