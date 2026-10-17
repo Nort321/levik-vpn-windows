@@ -85,6 +85,7 @@ export class GameMultipath {
   private log: (line: string) => void = () => {};
   private readonly silentPorts = new Map<number, number>();
   private lastSummaryAt = 0;
+  private lastSendFailureAt = -Infinity;
   private migrated = 0;
   /** Flow re-decisions go to the app log: they explain a game's disconnects. */
   setLogger(log: (line: string) => void): void { this.log = log; }
@@ -360,8 +361,10 @@ export class GameMultipath {
           }
           if (length > MAX_PAYLOAD) { socket.destroy(); return; }
           if (buffer.length < payloadOffset + length) return;
-          forward(buffer.subarray(payloadOffset, payloadOffset + length));
+          const payload = buffer.subarray(payloadOffset, payloadOffset + length);
+          // Consumed first: a packet that fails to go out must not be replayed with the next chunk.
           buffer = buffer.subarray(payloadOffset + length);
+          try { forward(payload); } catch (error) { this.noteSendFailure(error); }
         }
       });
     });
@@ -761,9 +764,13 @@ export class GameMultipath {
     if (wire.flushTimer) clearTimeout(wire.flushTimer);
     wire.flushTimer = wire.encoder.open ? setTimeout(() => { wire.flushTimer = null; const late = wire.encoder.flush(); if (late) this.sendParity(wire, late); }, FEC_FLUSH_MS) : null;
   }
-  /** Parity rides on the backup copy when there is one: a loss on the primary route is then independent of it. */
+  /** Parity rides on the backup copy when there is one: a loss on the primary route is then independent of it.
+   * Only a path that already speaks the envelope can carry it: one whose NODE_INFO answer was lost
+   * stays in the legacy format, which has no parity frame. */
   private sendParity(wire: Wire, parity: { sequence: number; payload: Buffer }): void {
-    const paths = this.activePaths(wire).sort((a, b) => (a.fast.rankMs ?? Infinity) - (b.fast.rankMs ?? Infinity) || 0);
+    if (parity.payload.length > MAX_PAYLOAD) return;
+    const paths = this.activePaths(wire).filter((path) => this.dataVersion(path) !== 0)
+      .sort((a, b) => (a.fast.rankMs ?? Infinity) - (b.fast.rankMs ?? Infinity) || 0);
     const route = paths[1] ?? paths[0]; if (!route) return;
     this.transmit(route, this.envelope(route, { kind: Kind.Parity, path: 0, session: wire.session ?? this.session, flow: wire.id,
       sequence: parity.sequence, address: "0.0.0.0", port: 0, payload: parity.payload }, wire));
@@ -1233,6 +1240,12 @@ export class GameMultipath {
     if (flow.kind !== "match" || (this.matchReport && this.matchReport.endedAt > flow.touched)) return;
     this.lastMatch = this.matchServer(flow);
     this.matchReport = this.report(flow);
+  }
+  /** One failed game packet is dropped, as a network would drop it; the socket's next packets go on. */
+  private noteSendFailure(error: unknown): void {
+    const now = Date.now(); if (now - this.lastSendFailureAt < SILENT_LOG_MS) return;
+    this.lastSendFailureAt = now;
+    this.log(`Game: пакет игры не отправлен: ${error instanceof Error ? error.message : "ошибка"}`);
   }
   /** Logs, once a minute per port and without the address, a game flow that sent a stream
    * through its exit and never heard back: a voice or party server refusing the exit's address. */

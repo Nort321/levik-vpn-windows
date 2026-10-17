@@ -9,6 +9,9 @@ const network = vi.hoisted(() => ({
   replyAll: false,
   /** Every Up is also answered from a peer the game never wrote to. */
   stranger: false,
+  /** Relay ports whose NODE_INFO answer is lost: the path stays in the legacy format. */
+  silentNodeInfo: [] as number[],
+  fec: false,
   directPort: 0,
   probeMode: "ready" as "ready" | "empty" | "unavailable" | "service-unavailable" | "stale",
   opened: [] as number[],
@@ -35,8 +38,8 @@ vi.mock("../../src/main/vpn/multipath/socks", async () => {
       const instance = Buffer.alloc(16, network.mesh ? Number(node.slice(5)) : network.sameCanonical ? 1 : port);
       const reply = (kind: number, payload: Buffer) => setTimeout(() => { if (!closed) receive(encode({ ...packet, version: 2, exitNodeId: node, instance, kind, payload })); }, port === 1 ? 10 : 30);
       if (packet.kind === Kind.Ping) reply(Kind.Pong, instance);
-      if (packet.kind === Kind.NodeInfo && !network.legacy) reply(Kind.NodeInfo, controlPayload({ version: 2, nodeId: node, instance: instance.toString("hex"),
-        load: { cpuPercent: 0 }, capabilities: { probe: true, mesh: network.mesh, passive: true } }));
+      if (packet.kind === Kind.NodeInfo && !network.legacy && !network.silentNodeInfo.includes(port)) reply(Kind.NodeInfo, controlPayload({ version: 2, nodeId: node, instance: instance.toString("hex"),
+        load: { cpuPercent: 0 }, capabilities: { probe: true, mesh: network.mesh, passive: true, fec: network.fec } }));
       if (packet.kind === Kind.ProbeRequest && !network.legacy) {
         const body = parseControl(packet.payload) as { targets: Array<{ address: string; port: number }> };
         reply(Kind.ProbeResult, controlPayload({ version: 2,
@@ -62,7 +65,8 @@ vi.mock("../../src/main/vpn/multipath/socks", async () => {
 import { GAME_FLOW_LIMITS, GameMultipath, type GameRuntimeOptions } from "../../src/main/vpn/multipath/client";
 const nodes: GameRuntimeOptions["nodes"] = ["node-a", "node-b"].map((nodeId) => ({ nodeId, name: nodeId, countryCode: "SE", city: null, mesh: null, state: "enabled" }));
 afterEach(() => { vi.useRealTimers(); network.sent = []; network.sequence.clear(); network.sameCanonical = false; network.mesh = false;
-  network.legacy = false; network.replyAll = false; network.directPort = 0; network.probeMode = "ready"; network.opened = []; network.probeOverride = null; network.stranger = false; });
+  network.legacy = false; network.replyAll = false; network.directPort = 0; network.probeMode = "ready"; network.opened = []; network.probeOverride = null; network.stranger = false;
+  network.silentNodeInfo = []; network.fec = false; });
 async function association(listener: { port: number; uuid: string }, target: string): Promise<Socket> {
   const socket = new Socket(); socket.on("error", () => {}); socket.connect(listener.port, "127.0.0.1"); await once(socket, "connect");
   const header = Buffer.alloc(26); Buffer.from(listener.uuid.replaceAll("-", ""), "hex").copy(header, 1);
@@ -594,4 +598,25 @@ it("moves a quiet ping to a better exit, never a quiet voice stream", async () =
   expect(summary.join("\n")).toMatch(/7000 ×2 ↑\d+ ↓0, без ответа 2 \(node-[ab](, node-[ab])?\)/);
   expect(summary.some((line) => line.includes("перенесено служебных: 1"))).toBe(true);
   expect(lines.join("\n")).not.toMatch(/8\.8\.8\.8|9\.9\.9\.9/);
+});
+
+it("sends parity only on paths that speak the envelope, and a failed packet never stalls the game socket", async () => {
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"] });
+  network.sameCanonical = true; network.fec = true; network.silentNodeInfo = [2];
+  const client = new GameMultipath(); client.setPlaying(true); const sockets: Socket[] = [];
+  try {
+    const local = await client.listen();
+    const pending = client.connect([{ index: 0, port: 1, nodeId: "node-a" }, { index: 1, port: 2, nodeId: "node-a" }], "test", { nodes, protection: true, preferredExitId: null, exitScope: "flow" });
+    await vi.advanceTimersByTimeAsync(5000); await pending;
+    const socket = await association(local, "1.1.1.1"); sockets.push(socket);
+    // A match sends packets back to back: four in one write close an FEC group at once.
+    const frame = (text: string) => { const payload = Buffer.from(text); const size = Buffer.alloc(2); size.writeUInt16BE(payload.length); return Buffer.concat([size, payload]); };
+    for (let burst = 0; burst < 3; burst++) {
+      socket.write(Buffer.concat([0, 1, 2, 3].map((index) => frame(`match-${burst * 4 + index}`))));
+      for (let i = 0; i < 6; i++) { await new Promise<void>((resolve) => setImmediate(resolve)); await vi.advanceTimersByTimeAsync(10); }
+    }
+    const copies = (payload: string) => network.sent.filter((item) => item.payload === payload).length;
+    // Both paths carry every packet exactly once per path: no frame is replayed or lost.
+    for (let index = 0; index < 12; index++) expect(copies(`match-${index}`)).toBe(2);
+  } finally { for (const socket of sockets) socket.destroy(); await client.stop(); }
 });
