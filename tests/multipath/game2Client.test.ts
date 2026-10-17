@@ -34,7 +34,7 @@ vi.mock("../../src/main/vpn/multipath/socks", async () => {
       const reply = (kind: number, payload: Buffer) => setTimeout(() => { if (!closed) receive(encode({ ...packet, version: 2, exitNodeId: node, instance, kind, payload })); }, port === 1 ? 10 : 30);
       if (packet.kind === Kind.Ping) reply(Kind.Pong, instance);
       if (packet.kind === Kind.NodeInfo && !network.legacy) reply(Kind.NodeInfo, controlPayload({ version: 2, nodeId: node, instance: instance.toString("hex"),
-        load: { cpuPercent: 0 }, capabilities: { probe: true, mesh: network.mesh } }));
+        load: { cpuPercent: 0 }, capabilities: { probe: true, mesh: network.mesh, passive: true } }));
       if (packet.kind === Kind.ProbeRequest && !network.legacy) {
         const body = parseControl(packet.payload) as { targets: Array<{ address: string; port: number }> };
         reply(Kind.ProbeResult, controlPayload({ version: 2,

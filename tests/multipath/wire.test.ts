@@ -68,7 +68,7 @@ describe("Game multipath packet boundary", () => {
     expect(instanceMatches(instance, instance)).toBe(true);
   });
   it("treats missing capabilities as an old relay", () => {
-    expect(parseCapabilities(undefined)).toEqual({ probe: false, mesh: false, lgm3: false, eim: false, fec: false, regions: false, spread: false });
+    expect(parseCapabilities(undefined)).toEqual({ probe: false, mesh: false, lgm3: false, eim: false, fec: false, regions: false, spread: false, passive: false });
     expect(parseCapabilities({ lgm3: true, eim: "yes" })).toMatchObject({ lgm3: true, eim: false });
   });
 });

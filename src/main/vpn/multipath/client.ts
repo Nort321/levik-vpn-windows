@@ -786,7 +786,9 @@ export class GameMultipath {
     const item = this.pingTargets.get(key);
     if (!item || item.seenAt === -Infinity || this.options.exitScope !== "flow") return null;
     const now = Date.now();
+    // Only a relay that times pings and answers probe requests can turn a ping into B.
     const needing = estimates.filter((estimate) => estimate.nodeId !== "direct" && Number.isFinite(estimate.accessScore)
+      && this.nodeCaps.get(estimate.nodeId)?.passive === true && this.paths.some((path) => path?.exitNodeId === estimate.nodeId && path.probe)
       && this.node(estimate.nodeId)?.state !== "disabled" && this.hasLivePath(estimate.nodeId)).flatMap((estimate) => {
       const metric = this.measurements.get(estimate.nodeId)?.find((entry) => entry.address === target.address && entry.port === target.port)?.metric;
       const measured = metric && metric.method !== "ttl-hop" && metric.latencyMs !== null && metric.samples >= GAME_POLICY.minimumSamples

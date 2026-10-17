@@ -144,11 +144,13 @@ export function parseControl(payload: Buffer): unknown {
 }
 
 /** Relay features announced in NODE_INFO. Absent fields mean an older relay. */
-export interface RelayCapabilities { probe: boolean; mesh: boolean; lgm3: boolean; eim: boolean; fec: boolean; regions: boolean; spread: boolean }
+export interface RelayCapabilities { probe: boolean; mesh: boolean; lgm3: boolean; eim: boolean; fec: boolean; regions: boolean; spread: boolean;
+  /** Probe results include round trips the relay timed from the game's own pings. */
+  passive: boolean }
 export function parseCapabilities(value: unknown): RelayCapabilities {
   const item = isRecord(value) ? value : {};
   return { probe: item.probe === true, mesh: item.mesh === true, lgm3: item.lgm3 === true, eim: item.eim === true,
-    fec: item.fec === true, regions: item.regions === true, spread: item.spread === true };
+    fec: item.fec === true, regions: item.regions === true, spread: item.spread === true, passive: item.passive === true };
 }
 /** Ping payload bits: active copy and "delay this copy" for same-route time diversity. */
 export const PING_ACTIVE = 1;
