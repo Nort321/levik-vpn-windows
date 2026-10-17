@@ -389,6 +389,33 @@ it("preserves a historical cold-start decision after endpoint measurements becom
   } finally { for (const socket of sockets) socket.destroy(); await client.stop(); }
 });
 
+it("keeps a voice socket that paused for seconds and evicts a ping socket instead", async () => {
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"] });
+  network.replyAll = true;
+  const client = new GameMultipath(); client.setPlaying(true); const sockets: Socket[] = [];
+  const open = (): Set<number | undefined> => new Set([...(Reflect.get(client, "connections") as Set<{ socket: Socket }>)].map((item) => item.socket.remotePort));
+  try {
+    const local = await client.listen();
+    const pending = client.connect([{ index: 0, port: 1, nodeId: "node-a" }], "test", { nodes, protection: true, preferredExitId: null, exitScope: "flow" });
+    await vi.advanceTimersByTimeAsync(2300); await pending;
+    // Voice exchanged far more than a ping socket, then nobody spoke.
+    const voice = await association(local, "1.1.1.1"); sockets.push(voice);
+    for (let index = 0; index < 20; index++) await send(voice, `voice-${index}`);
+    const pings: Socket[] = [];
+    for (let index = 0; index < GAME_FLOW_LIMITS.connections - 1; index++) {
+      const ping = await association(local, "8.8.8.8"); pings.push(ping); sockets.push(ping); await send(ping, `ping-${index}`);
+    }
+    await vi.advanceTimersByTimeAsync(3000);
+    const late = await association(local, "9.9.9.9"); sockets.push(late); await send(late, "late-region-ping");
+    expect(network.sent.some((item) => item.payload === "late-region-ping")).toBe(true);
+    const remaining = open();
+    expect(remaining.has(voice.localPort)).toBe(true);
+    expect(remaining.has(pings[0]!.localPort)).toBe(false);
+    await send(voice, "voice-after-pause");
+    expect(network.sent.some((item) => item.payload === "voice-after-pause")).toBe(true);
+  } finally { for (const socket of sockets) socket.destroy(); await client.stop(); }
+}, 30_000);
+
 it("makes room from the longest-silent game socket instead of refusing the match's own", async () => {
   vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"] });
   network.replyAll = true;

@@ -52,8 +52,13 @@ const IDLE_FRESH_MS = 65_000;
 /** While a game is busy, a path asked and silent this long is gone. */
 const ACTIVE_SILENCE_MS = 6_000;
 export const GAME_FLOW_LIMITS = Object.freeze({ perConnection: 256, total: 1024, connections: 128 });
-/** A connection silent this long may give its place to a new one when the bridge is full. */
+/** A light connection (a ping socket: at most LIGHT_PACKETS exchanged) silent this long may
+ * give its place to a new one when the bridge is full; VALORANT opens ~14 such sockets a second. */
 const EVICT_IDLE_MS = 2_000;
+/** Any other connection (voice, a party channel) only after this much silence: game voice
+ * is quiet for seconds while nobody speaks, and a new socket would change its exit port. */
+const EVICT_HEAVY_IDLE_MS = 30_000;
+const LIGHT_PACKETS = 16;
 const REGIONS_INTERVAL_MS = 30_000;
 
 /** UDP observation, selection and replication share one bridge in both protection modes. */
@@ -351,19 +356,34 @@ export class GameMultipath {
   /** A new destination never tears down the socket: the least recently used
    * non-match flow is ended instead. Steam pings dozens of relays from one socket. */
   private evictConnection(): boolean {
-    const now = Date.now(); let oldest: Connection | null = null;
+    const now = Date.now();
+    type Candidate = { connection: Connection; touched: number };
+    let light: Candidate | null = null; let heavy: Candidate | null = null;
     for (const connection of this.connections) {
-      if (connection.socket.destroyed || now - connection.touched < EVICT_IDLE_MS) continue;
-      if ([...connection.flows.values()].some((flow) => flow.kind === "match" && now - flow.touched < ACTIVE_MATCH_MS)) continue;
-      if (!oldest || connection.touched < oldest.touched) oldest = connection;
+      if (connection.socket.destroyed) continue;
+      const flows = [...connection.flows.values()];
+      if (flows.some((flow) => flow.kind === "match" && now - flow.touched < ACTIVE_MATCH_MS)) continue;
+      // Replies count as activity: a voice socket may only listen while others speak.
+      const touched = Math.max(connection.touched, ...flows.map((flow) => flow.touched));
+      const idle = now - touched;
+      if (idle >= EVICT_IDLE_MS && flows.reduce((sum, flow) => sum + flow.sent + flow.received, 0) <= LIGHT_PACKETS
+        && (!light || touched < light.touched)) light = { connection, touched };
+      if (idle >= EVICT_HEAVY_IDLE_MS && (!heavy || touched < heavy.touched)) heavy = { connection, touched };
     }
+    const oldest = (light ?? heavy)?.connection;
     if (!oldest) return false;
     this.connections.delete(oldest); oldest.socket.destroy(); return true;
   }
   private admitFlow(connection: Connection): boolean {
+    // The same rule inside the bridge: ping-like flows first, anything else only after long silence.
     const evict = (flows: Iterable<Flow>): boolean => {
-      let oldest: Flow | null = null;
-      for (const flow of flows) if (flow.kind !== "match" && (!oldest || flow.touched < oldest.touched)) oldest = flow;
+      const now = Date.now(); let light: Flow | null = null; let heavy: Flow | null = null;
+      for (const flow of flows) {
+        if (flow.kind === "match") continue;
+        if (flow.sent + flow.received <= LIGHT_PACKETS && (!light || flow.touched < light.touched)) light = flow;
+        if (now - flow.touched >= EVICT_HEAVY_IDLE_MS && (!heavy || flow.touched < heavy.touched)) heavy = flow;
+      }
+      const oldest = light ?? heavy;
       if (!oldest) return false;
       this.dropFlow(oldest); return true;
     };
