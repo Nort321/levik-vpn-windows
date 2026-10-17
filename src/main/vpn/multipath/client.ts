@@ -51,7 +51,9 @@ const IDLE_PING_MS = 20_000;
 const IDLE_FRESH_MS = 65_000;
 /** While a game is busy, a path asked and silent this long is gone. */
 const ACTIVE_SILENCE_MS = 6_000;
-export const GAME_FLOW_LIMITS = Object.freeze({ perConnection: 256, total: 1024, connections: 64 });
+export const GAME_FLOW_LIMITS = Object.freeze({ perConnection: 256, total: 1024, connections: 128 });
+/** A connection silent this long may give its place to a new one when the bridge is full. */
+const EVICT_IDLE_MS = 2_000;
 const REGIONS_INTERVAL_MS = 30_000;
 
 /** UDP observation, selection and replication share one bridge in both protection modes. */
@@ -267,7 +269,10 @@ export class GameMultipath {
   async listen(preferred?: { port: number; uuid: string }): Promise<{ port: number; uuid: string }> {
     const uuid = preferred?.uuid ?? randomUUID(); const identity = Buffer.from(uuid.replaceAll("-", ""), "hex");
     this.server = createServer((socket) => {
-      if (this.connections.size >= GAME_FLOW_LIMITS.connections) { socket.destroy(); return; }
+      // Xray opens one connection per game socket, and games open many short-lived ones
+      // (VALORANT pings every region from a fresh socket each second). Refusing the
+      // newest would refuse the match itself: the longest-silent connection goes instead.
+      if (this.connections.size >= GAME_FLOW_LIMITS.connections && !this.evictConnection()) { socket.destroy(); return; }
       const connection: Connection = { socket, xudp: false, flows: new Map(), wires: new Map(), exitId: null, touched: Date.now() };
       this.connections.add(connection); socket.setNoDelay(true); socket.setTimeout(60_000, () => socket.destroy());
       let buffer: Buffer = Buffer.alloc(0); let mode: "udp" | "xudp" | null = null;
@@ -345,6 +350,16 @@ export class GameMultipath {
   }
   /** A new destination never tears down the socket: the least recently used
    * non-match flow is ended instead. Steam pings dozens of relays from one socket. */
+  private evictConnection(): boolean {
+    const now = Date.now(); let oldest: Connection | null = null;
+    for (const connection of this.connections) {
+      if (connection.socket.destroyed || now - connection.touched < EVICT_IDLE_MS) continue;
+      if ([...connection.flows.values()].some((flow) => flow.kind === "match" && now - flow.touched < ACTIVE_MATCH_MS)) continue;
+      if (!oldest || connection.touched < oldest.touched) oldest = connection;
+    }
+    if (!oldest) return false;
+    this.connections.delete(oldest); oldest.socket.destroy(); return true;
+  }
   private admitFlow(connection: Connection): boolean {
     const evict = (flows: Iterable<Flow>): boolean => {
       let oldest: Flow | null = null;

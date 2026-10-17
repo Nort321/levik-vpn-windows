@@ -52,7 +52,7 @@ vi.mock("../../src/main/vpn/multipath/socks", async () => {
     } };
   } };
 });
-import { GameMultipath, type GameRuntimeOptions } from "../../src/main/vpn/multipath/client";
+import { GAME_FLOW_LIMITS, GameMultipath, type GameRuntimeOptions } from "../../src/main/vpn/multipath/client";
 const nodes: GameRuntimeOptions["nodes"] = ["node-a", "node-b"].map((nodeId) => ({ nodeId, name: nodeId, countryCode: "SE", city: null, mesh: null, state: "enabled" }));
 afterEach(() => { vi.useRealTimers(); network.sent = []; network.sequence.clear(); network.sameCanonical = false; network.mesh = false;
   network.legacy = false; network.replyAll = false; network.directPort = 0; network.probeMode = "ready"; network.opened = []; });
@@ -363,3 +363,31 @@ it("preserves a historical cold-start decision after endpoint measurements becom
     expect(client.runtimeSnapshot().exits.every((exit) => exit.egressStatus === "ready")).toBe(true);
   } finally { for (const socket of sockets) socket.destroy(); await client.stop(); }
 });
+
+it("makes room from the longest-silent game socket instead of refusing the match's own", async () => {
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"] });
+  network.replyAll = true;
+  const client = new GameMultipath(); client.setPlaying(true); const sockets: Socket[] = [];
+  const open = (): Set<number | undefined> => new Set([...(Reflect.get(client, "connections") as Set<{ socket: Socket }>)].map((item) => item.socket.remotePort));
+  try {
+    const local = await client.listen();
+    const pending = client.connect([{ index: 0, port: 1, nodeId: "node-a" }], "test", { nodes, protection: true, preferredExitId: null, exitScope: "flow" });
+    await vi.advanceTimersByTimeAsync(2300); await pending;
+    const match = await association(local, "1.1.1.1"); sockets.push(match); await play(match, "match");
+    // VALORANT pings every region from a fresh socket each second: the bridge fills up.
+    const pings: Socket[] = [];
+    for (let index = 0; index < GAME_FLOW_LIMITS.connections - 1; index++) {
+      const ping = await association(local, "8.8.8.8"); pings.push(ping); sockets.push(ping); await send(ping, `ping-${index}`);
+      if (index % 20 === 0) await send(match, `match-live-${index}`);
+    }
+    await send(match, "match-live-end");
+    expect(open().size).toBe(GAME_FLOW_LIMITS.connections);
+    const late = await association(local, "9.9.9.9"); sockets.push(late); await send(late, "late-region-ping");
+    expect(network.sent.some((item) => item.payload === "late-region-ping")).toBe(true);
+    const remaining = open();
+    expect(remaining.has(pings[0]!.localPort)).toBe(false);
+    expect(remaining.has(match.localPort)).toBe(true);
+    await send(match, "match-after");
+    expect(network.sent.some((item) => item.payload === "match-after")).toBe(true);
+  } finally { for (const socket of sockets) socket.destroy(); await client.stop(); }
+}, 30_000);
