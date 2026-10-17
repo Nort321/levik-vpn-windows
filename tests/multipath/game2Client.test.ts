@@ -560,3 +560,38 @@ it("logs a game stream that never heard back by port, without its address", asyn
   expect(silent).toEqual([expect.stringMatching(/^Game: UDP-порт 7000 не ответил через node-[ab] \(25 пакетов за \d+ с\)$/)]);
   expect(lines.join("\n")).not.toContain("8.8.8.8");
 });
+
+it("moves a quiet ping to a better exit, never a quiet voice stream", async () => {
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"] });
+  const client = new GameMultipath(); client.setPlaying(true); const sockets: Socket[] = []; const lines: string[] = [];
+  client.setLogger((line) => lines.push(line));
+  try {
+    const local = await client.listen();
+    const pending = client.connect([{ index: 0, port: 1, nodeId: "node-a" }, { index: 1, port: 2, nodeId: "node-b" }], "test", { nodes, protection: false, preferredExitId: null, exitScope: "flow" });
+    await vi.advanceTimersByTimeAsync(2300); await pending;
+    // Nothing is measured yet: both open on A. B turns out 80 ms better afterwards.
+    network.probeMode = "empty";
+    const voice = await association(local, "8.8.8.8"); sockets.push(voice);
+    const ping = await association(local, "9.9.9.9"); sockets.push(ping);
+    await send(ping, "ping-0");
+    // Voice below match rate: a few packets a second, then everyone is silent.
+    for (let second = 0; second < 5; second++) {
+      for (let index = 0; index < 4; index++) await send(voice, `voice-${second}-${index}`);
+      await vi.advanceTimersByTimeAsync(1000);
+    }
+    network.probeMode = "ready";
+    await vi.advanceTimersByTimeAsync(15_000);
+    await send(voice, "voice-after"); await send(ping, "ping-after");
+    expect(network.sent.find((item) => item.payload === "voice-0-0")?.node).toBe("node-a");
+    expect(network.sent.find((item) => item.payload === "voice-after")?.node).toBe("node-a");
+    expect(network.sent.find((item) => item.payload === "ping-0")?.node).toBe("node-a");
+    expect(network.sent.find((item) => item.payload === "ping-after")?.node).toBe("node-b");
+    await vi.advanceTimersByTimeAsync(30_000);
+  } finally { for (const socket of sockets) socket.destroy(); await client.stop(); }
+  expect(lines.filter((line) => line.includes("Служебный поток перенесён"))).toHaveLength(1);
+  const summary = lines.filter((line) => line.startsWith("Game: UDP-потоки по портам: "));
+  expect(summary.length).toBeGreaterThan(0);
+  expect(summary.join("\n")).toMatch(/7000 ×2 ↑\d+ ↓0, без ответа 2 \(node-[ab](, node-[ab])?\)/);
+  expect(summary.some((line) => line.includes("перенесено служебных: 1"))).toBe(true);
+  expect(lines.join("\n")).not.toMatch(/8\.8\.8\.8|9\.9\.9\.9/);
+});

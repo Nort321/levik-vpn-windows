@@ -67,6 +67,8 @@ const REGIONS_INTERVAL_MS = 30_000;
 /** A flow that sent this many packets and got no reply is worth a line in the log. */
 const SILENT_MIN_SENT = 20;
 const SILENT_LOG_MS = 60_000;
+const SUMMARY_LOG_MS = 30_000;
+const SUMMARY_PORTS = 10;
 /** A destination the game only pings: a socket of at most PING_MAX_SENT packets that got a reply.
  * Its pings may go out through exits lacking a measurement: the exit times the reply (B). */
 const PING_MAX_SENT = 4;
@@ -82,6 +84,8 @@ export class GameMultipath {
   constructor(private counting = true) {}
   private log: (line: string) => void = () => {};
   private readonly silentPorts = new Map<number, number>();
+  private lastSummaryAt = 0;
+  private migrated = 0;
   /** Flow re-decisions go to the app log: they explain a game's disconnects. */
   setLogger(log: (line: string) => void): void { this.log = log; }
   startCounting(): void { this.counting = true; }
@@ -562,6 +566,7 @@ export class GameMultipath {
       if (now - flow.touched > 60_000) { this.dropFlow(flow); continue; }
       this.checkPinnedExit(flow, now);
     }
+    this.logSummary(now);
     const principal = this.activeMatchFlows()[0]; const principalId = principal?.id ?? null;
     if (principalId !== this.estimateFlowId) { this.estimateFlowId = principalId; this.estimateHistory.length = 0; }
     if (principal) {
@@ -620,7 +625,9 @@ export class GameMultipath {
       this.reopen(flow, "Выход перестал отвечать; поток открыт заново через доступный выход"); return;
     }
     // Only ping-like flows move (relay/lobby pings): moving a game connection disconnects it.
-    if (game || now - flow.lastBusyAt < GAME_POLICY.migrateQuietMs || now - flow.startedAt < GAME_POLICY.migrateQuietMs
+    // Voice is quiet while nobody speaks, yet a new exit address would leave its server
+    // sending to the old one: anything past a few ping exchanges stays where it is.
+    if (game || flow.sent + flow.received > LIGHT_PACKETS || now - flow.lastBusyAt < GAME_POLICY.migrateQuietMs || now - flow.startedAt < GAME_POLICY.migrateQuietMs
       || !flow.counted || flow.exitId === "direct" || this.options.exitScope !== "flow" || this.options.preferredExitId || flow.decision?.source === "manual"
       // Moving one destination of a socket would give the socket two public addresses.
       || flow.connection.flows.size > 1) return;
@@ -629,7 +636,27 @@ export class GameMultipath {
     const best = chooseExit(estimates, flow.exitId);
     if (!best || best.nodeId === flow.exitId || best.evidence !== "endpoint" || !current || !Number.isFinite(current.score)
       || current.score - best.score < Math.max(GAME_POLICY.migrateMinGainMs, current.score * GAME_POLICY.hysteresisRatio)) return;
+    this.migrated++;
     this.reopen(flow, "Служебный поток перенесён на выход с лучшим замером до сервера");
+  }
+  /** Every SUMMARY_LOG_MS while the game sends: its live UDP flows by destination port and
+   * exit, never addresses. Shows where voice or a party channel goes and whether it is answered. */
+  private logSummary(now: number): void {
+    if (now - this.lastSummaryAt < SUMMARY_LOG_MS) return;
+    const flows = [...this.flows.values()].filter((flow) => !flow.finished && now - flow.touched < SUMMARY_LOG_MS);
+    if (!flows.length) return;
+    this.lastSummaryAt = now;
+    const ports = new Map<number, { flows: number; sent: number; received: number; silent: number; exits: Set<string> }>();
+    for (const flow of flows) {
+      const item = ports.get(flow.port) ?? { flows: 0, sent: 0, received: 0, silent: 0, exits: new Set<string>() };
+      item.flows++; item.sent += flow.sent; item.received += flow.received; if (!flow.received) item.silent++;
+      item.exits.add(flow.exitId === "direct" ? "напрямую" : this.node(flow.exitId)?.name ?? "без выхода");
+      ports.set(flow.port, item);
+    }
+    const items = [...ports.entries()].sort(([, a], [, b]) => b.sent + b.received - a.sent - a.received).slice(0, SUMMARY_PORTS)
+      .map(([port, item]) => `${port}${item.flows > 1 ? ` ×${item.flows}` : ""} ↑${item.sent} ↓${item.received}${item.silent ? `, без ответа ${item.silent}` : ""} (${[...item.exits].join(", ")})`);
+    this.log(`Game: UDP-потоки по портам: ${items.join("; ")}${ports.size > SUMMARY_PORTS ? `; ещё портов: ${ports.size - SUMMARY_PORTS}` : ""}${this.migrated ? `; перенесено служебных: ${this.migrated}` : ""}`);
+    this.migrated = 0;
   }
   private hasLivePath(exitId: string): boolean {
     return exitId === "direct" ? Boolean(this.options.directSocksPort) : this.livePaths(exitId).some((path) => path.active || path.latencyMs !== null);
