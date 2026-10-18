@@ -66,6 +66,7 @@ describe("remote configuration", () => {
       maintenance: [
         { nodeId: "n1142bf5571df2373ffb23", startsAt: Date.parse("2026-10-14T12:30:00Z"), endsAt: Date.parse("2026-10-14T13:30:00Z") },
       ],
+      nodeLoad: {},
       refreshAfterSeconds: 300,
     });
     expect(parseRemoteConfig({ ok: false })).toBeNull();

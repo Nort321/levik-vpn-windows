@@ -409,11 +409,20 @@ function renderServers(): string {
 
 const maintenanceTime = new Intl.DateTimeFormat("ru-RU", { hour: "2-digit", minute: "2-digit" });
 
+/** Node load from the website: free below 0.4, busy below 0.75, crowded above. */
+function serverLoadLabel(load: number | undefined): { level: "free" | "busy" | "full"; text: string } | null {
+  if (load === undefined) return null;
+  if (load < 0.4) return { level: "free", text: "свободен" };
+  if (load < 0.75) return { level: "busy", text: "средняя нагрузка" };
+  return { level: "full", text: "загружен" };
+}
+
 function serverCard(group: ServerGroup): string {
   const server = activeVariant(group, state?.selectedServerId ?? null);
   const selected = group.variants.some((variant) => variant.id === state?.selectedServerId);
   const favorite = group.variants.some((variant) => state?.settings.favoriteServerIds.includes(variant.id));
   const latency = state?.serverLatencies[server.id];
+  const load = serverLoadLabel(state?.serverLoad[server.id]);
   const title = groupTitle(group);
   const maintenanceEnd = group.variants.map((variant) => state?.serverMaintenance[variant.id]).find((end) => end !== undefined);
   const maintenance = maintenanceEnd === undefined ? "" : `Обслуживание до ${maintenanceTime.format(maintenanceEnd)}`;
@@ -424,7 +433,7 @@ function serverCard(group: ServerGroup): string {
       return `<button class="protocol-option ${active ? "active" : ""}" role="radio" aria-checked="${active}" data-server-id="${escapeAttribute(variant.id)}">${escapeHtml(serverProtocolShortLabel(variant))}</button>`;
     }).join("")}</div>`
     : "";
-  return `<div class="server-card ${selected ? "selected" : ""}" data-server-filter="${escapeAttribute(filter)}" data-server-favorite="${favorite}"><button class="server-select" data-server-id="${escapeAttribute(server.id)}" aria-label="Выбрать ${escapeAttribute(title)}${maintenance ? `, ${escapeAttribute(maintenance.toLocaleLowerCase("ru"))}` : ""}"><span class="server-flag" aria-hidden="true">${countryFlagSvg(server.countryCode)}</span><span class="server-copy"><span class="server-name">${escapeHtml(title)}</span><span class="server-meta">${escapeHtml(countryLabel(server.countryCode))} · ${escapeHtml(serverProtocol(server))} · ${latency === undefined ? "не измерен" : latency === null ? "нет ответа" : `${latency} мс`}</span>${maintenance ? `<span class="server-maintenance">${escapeHtml(maintenance)}</span>` : ""}</span><span class="radio"></span></button><button class="favorite-button ${favorite ? "active" : ""}" data-favorite-server-id="${escapeAttribute(server.id)}" data-favorite-group-ids="${escapeAttribute(group.variants.map((variant) => variant.id).join(","))}" aria-label="${favorite ? "Удалить из избранного" : "Добавить в избранное"}" aria-pressed="${favorite}">${icon("star")}</button>${protocolSwitch}</div>`;
+  return `<div class="server-card ${selected ? "selected" : ""}" data-server-filter="${escapeAttribute(filter)}" data-server-favorite="${favorite}"><button class="server-select" data-server-id="${escapeAttribute(server.id)}" aria-label="Выбрать ${escapeAttribute(title)}${maintenance ? `, ${escapeAttribute(maintenance.toLocaleLowerCase("ru"))}` : ""}"><span class="server-flag" aria-hidden="true">${countryFlagSvg(server.countryCode)}</span><span class="server-copy"><span class="server-name">${escapeHtml(title)}</span><span class="server-meta">${escapeHtml(countryLabel(server.countryCode))} · ${escapeHtml(serverProtocol(server))} · ${latency === undefined ? "не измерен" : latency === null ? "нет ответа" : `${latency} мс`}${load && !maintenance ? ` · <span class="server-load ${load.level}">${load.text}</span>` : ""}</span>${maintenance ? `<span class="server-maintenance">${escapeHtml(maintenance)}</span>` : ""}</span><span class="radio"></span></button><button class="favorite-button ${favorite ? "active" : ""}" data-favorite-server-id="${escapeAttribute(server.id)}" data-favorite-group-ids="${escapeAttribute(group.variants.map((variant) => variant.id).join(","))}" aria-label="${favorite ? "Удалить из избранного" : "Добавить в избранное"}" aria-pressed="${favorite}">${icon("star")}</button>${protocolSwitch}</div>`;
 }
 
 /** A multi-protocol server is named by its country; a single entry keeps its own name. */

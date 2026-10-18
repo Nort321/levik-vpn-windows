@@ -30,6 +30,8 @@ export interface RemoteConfig {
   protocols: ProtocolAdvice | null;
   /** Planned work on servers, by node id. */
   maintenance: MaintenanceWindow[];
+  /** How busy each node is, 0..1, by node id; docs/app-platform.md "Node load". */
+  nodeLoad: Record<string, number>;
   refreshAfterSeconds: number;
 }
 
@@ -45,12 +47,16 @@ export interface StoredRemoteConfig {
 
 /** Advice describes the operator at the time; an old one may be about another network. */
 export const PROTOCOL_ADVICE_TTL_MS = 6 * 60 * 60 * 1_000;
+/** Load changes within minutes; an old reading is worse than none. */
+export const NODE_LOAD_TTL_MS = 10 * 60 * 1_000;
 const MIN_REFRESH_S = 5 * 60;
 const MAX_REFRESH_S = 24 * 60 * 60;
 const MAX_RESPONSE_BYTES = 64 * 1024;
 const PROTOCOL = /^[a-z0-9-]{1,24}$/;
 const FLAG_KEY = /^[a-z][a-z0-9_]{1,47}$/;
 const ANNOUNCEMENT_ID = /^[0-9a-f-]{36}$/;
+const NODE_ID = /^n1[0-9a-f]{20}$/;
+const MAX_NODES = 200;
 
 type Fetch = typeof fetch;
 
@@ -75,6 +81,7 @@ export function parseRemoteConfig(value: unknown): RemoteConfig | null {
     announcements,
     protocols: parseAdvice(value.protocols),
     maintenance: parseMaintenance(value.maintenance),
+    nodeLoad: parseNodeLoad(value.nodeLoad),
     refreshAfterSeconds: refresh,
   };
 }
@@ -106,6 +113,19 @@ export function parseAdvice(value: unknown): ProtocolAdvice | null {
   if (!isRecord(value) || !Array.isArray(value.preferred) || !Array.isArray(value.avoid)) return null;
   const list = (items: unknown[]) => items.filter((item): item is string => typeof item === "string" && PROTOCOL.test(item)).slice(0, 16);
   return { preferred: list(value.preferred), avoid: list(value.avoid) };
+}
+
+export function parseNodeLoad(value: unknown): Record<string, number> {
+  if (!isRecord(value)) return {};
+  return Object.fromEntries(Object.entries(value)
+    .filter((entry): entry is [string, number] => NODE_ID.test(entry[0]) && typeof entry[1] === "number" && entry[1] >= 0 && entry[1] <= 1)
+    .slice(0, MAX_NODES));
+}
+
+/** Node load while the configuration is fresh; empty otherwise. */
+export function currentNodeLoad(stored: StoredRemoteConfig | null, now: number): Record<string, number> {
+  if (!stored || now - stored.fetchedAt >= NODE_LOAD_TTL_MS) return {};
+  return stored.config.nodeLoad;
 }
 
 /** Announcements to show now, without the ones the user closed. */

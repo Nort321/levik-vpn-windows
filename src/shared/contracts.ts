@@ -183,6 +183,8 @@ export interface AppSnapshot {
   serverLatencies: Record<string, number | null>;
   /** Servers going into maintenance: server id → end of the work (ms since epoch). */
   serverMaintenance: Record<string, number>;
+  /** How busy each server is, 0..1, by server id; empty when the website did not say. */
+  serverLoad: Record<string, number>;
   selectedServerId: string | null;
   selectedSubscriptionId: string | null;
   settings: AppSettings;

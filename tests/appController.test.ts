@@ -78,7 +78,8 @@ describe("AppController login lifecycle", () => {
     controller.cancelLogin();
     const now = Date.now();
     Reflect.set(controller, "remoteStored", {
-      config: { maintenance: [{ nodeId: nodeIdForHost("de1.example.net"), startsAt: now + 60_000, endsAt: now + 3_600_000 }] },
+      config: { maintenance: [{ nodeId: nodeIdForHost("de1.example.net"), startsAt: now + 60_000, endsAt: now + 3_600_000 }], nodeLoad: {} },
+      fetchedAt: now,
     });
     Reflect.set(controller, "xray", { isRunning: () => true });
     const state = Reflect.get(controller, "state") as Record<string, unknown>;
