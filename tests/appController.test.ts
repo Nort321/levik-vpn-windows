@@ -101,6 +101,34 @@ describe("AppController login lifecycle", () => {
     expect(controller.snapshot().serverMaintenance).toEqual({ de1: now + 3_600_000 });
   });
 
+  it("keeps a live match on its server even right before maintenance", async () => {
+    const server = (id: string, address: string) => ({
+      id, tag: id, name: id.toUpperCase(), countryCode: "DE", outbound: { protocol: "vless", settings: { vnext: [{ address }] } },
+    });
+    const controller = new AppController();
+    controller.cancelLogin();
+    const now = Date.now();
+    Reflect.set(controller, "remoteStored", {
+      config: { maintenance: [{ nodeId: nodeIdForHost("de1.example.net"), startsAt: now + 60_000, endsAt: now + 3_600_000 }], nodeLoad: {} },
+      fetchedAt: now,
+    });
+    Reflect.set(controller, "xray", { isRunning: () => true, gameFallback: null, gameRuntimeSnapshot: { currentMatch: { address: "203.0.113.7", port: 7100 } } });
+    const state = Reflect.get(controller, "state") as Record<string, unknown> & { settings: Record<string, unknown> };
+    Object.assign(state, {
+      status: "connected",
+      busy: false,
+      servers: [server("de1", "de1.example.net"), server("nl1", "nl1.example.net")],
+      selectedServerId: "de1",
+      serverLatencies: { de1: 20, nl1: 40 },
+      settings: { ...state.settings, gameEnabled: true },
+    });
+    const selectServer = vi.spyOn(controller, "selectServer").mockResolvedValue();
+
+    await (Reflect.get(controller, "checkMaintenance") as () => Promise<void>).call(controller);
+
+    expect(selectServer).not.toHaveBeenCalled();
+  });
+
   it("ends a declined sign-in so it can start again", async () => {
     vi.useFakeTimers();
     try {
@@ -311,6 +339,39 @@ describe("AppController tunnel recovery", () => {
     vi.mocked(isTunnelHealthy).mockResolvedValue(true);
     await vi.advanceTimersByTimeAsync(1_000);
     expect(controller.snapshot()).toMatchObject({ status: "connected", selectedServerId: second.id });
+  });
+
+  it("holds recovery while a match crosses the game nodes and recovers after it", async () => {
+    const { controller, xray, second } = tunnelController();
+    await controller.connect();
+    let match: { address: string; port: number } | null = { address: "203.0.113.7", port: 7100 };
+    Object.defineProperties(xray, {
+      gameFallback: { value: null },
+      gameRuntimeSnapshot: { get: () => ({ currentMatch: match }) },
+    });
+    const state = Reflect.get(controller, "state") as { settings: Record<string, unknown> };
+    state.settings = { ...state.settings, gameEnabled: true };
+    vi.mocked(isTunnelHealthy).mockResolvedValue(false);
+    for (let check = 0; check < 5; check++) await checkTunnel(controller);
+    expect(controller.snapshot().status).toBe("connected");
+    expect(controller.snapshot().statusDetail).toContain("после матча");
+    expect(xray.start).toHaveBeenCalledOnce();
+
+    match = null;
+    await checkTunnel(controller);
+    expect(controller.snapshot().status).toBe("reconnecting");
+    vi.mocked(isTunnelHealthy).mockResolvedValue(true);
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(controller.snapshot()).toMatchObject({ status: "connected", selectedServerId: second.id });
+  });
+
+  it("measures stale latencies again before a new automatic session", async () => {
+    const { controller, xray, second } = tunnelController();
+    vi.mocked(measureServerLatencies).mockResolvedValue({ [second.id]: 5 });
+    await controller.connect();
+    expect(measureServerLatencies).toHaveBeenCalled();
+    expect(controller.snapshot().selectedServerId).toBe(second.id);
+    expect(xray.start).toHaveBeenCalledOnce();
   });
 
   it("backs off failed recovery without blackhole cores and cancels its timer on disconnect", async () => {

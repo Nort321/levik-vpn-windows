@@ -145,6 +145,8 @@ const HOME_IDLE_SCAN_MS = 10 * 60_000;
 const MAINTENANCE_CHECK_MS = 15_000;
 /** Smart Auto waits for the routes to settle before its download. */
 const TRAFFIC_CHECK_DELAY_MS = 1_500;
+/** An automatic connection measures the servers again when the last measurement is older. */
+const LATENCY_FRESH_MS = 2 * 60_000;
 /** After the remote list was shown, events keep it current this long. */
 const REMOTE_WATCH_MS = 10 * 60_000;
 const MAX_HANDLED_COMMANDS = 200;
@@ -211,6 +213,8 @@ export class AppController extends EventEmitter<AppControllerEvents> {
   private gameMonitor: ReturnType<typeof setInterval> | null = null;
   private gameValidatedAt = 0;
   private gamePlaying = false;
+  /** The tunnel failed its checks during a match; it recovers once the match ends. */
+  private recoveryHeldForMatch = false;
   private currentGameId = "custom";
   private gameProcessCheckAt = 0;
   private gameProcessCheckRunning = false;
@@ -260,6 +264,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
   private tunnelHealthFailures = 0;
   private coreFailure: string | null = null;
   private readonly failedServerIds = new Set<string>();
+  private latenciesMeasuredAt = 0;
   /** Smart Auto, docs/app-platform.md: which protocols carried traffic on which network. */
   private readonly protocolHistory = new ProtocolHistoryStore(join(app.getPath("userData"), "smart-auto.json"));
   private readonly smartLadder = new SmartLadder();
@@ -637,7 +642,10 @@ export class AppController extends EventEmitter<AppControllerEvents> {
       if (!subscriptionId) throw new Error("Выберите активную подписку");
       await this.loadTunnelProfile(subscriptionId);
     }
-    if (this.state.settings.automaticServer && !hasMeasuredLatency(this.state.serverLatencies)) {
+    // A new session chooses by current latencies: the ones measured when the app started may be hours old.
+    // A server switch inside a session keeps the server it was given.
+    const stale = !this.telemetry.active && Date.now() - this.latenciesMeasuredAt > LATENCY_FRESH_MS;
+    if (this.state.settings.automaticServer && (stale || !hasMeasuredLatency(this.state.serverLatencies))) {
       await this.pingServers();
     }
     if (!this.telemetry.active) {
@@ -822,6 +830,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     this.pingPromise = (async () => {
       const latencies = await measureServerLatencies(servers);
       if (!sameServers(servers, this.state.servers)) return;
+      this.latenciesMeasuredAt = Date.now();
       this.patch({ serverLatencies: latencies });
       if (this.state.settings.automaticServer && !this.xray.isRunning()) {
         const best = this.bestServer(servers);
@@ -1969,6 +1978,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
   }
 
   private beginTunnelRecovery(detail: string, cause: AttemptCause | null = null): void {
+    this.recoveryHeldForMatch = false;
     this.cancelGameProbes();
     this.recoveryCause = cause;
     // In-flight probes belong to the failed tunnel, not its replacement.
@@ -2051,6 +2061,12 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     }, delayMs);
   }
 
+  /** A match whose UDP crosses the game nodes: restarting or moving the tunnel would drop it. */
+  private liveMatch(): boolean {
+    return this.state.settings.gameEnabled === true && this.xray.isRunning() && this.xray.gameFallback !== "tunnel"
+      && Boolean(this.xray.gameRuntimeSnapshot?.currentMatch);
+  }
+
   private async verifyTunnelHealth(immediate = false, cause: AttemptCause | null = null): Promise<void> {
     if (this.tunnelHealthCheckRunning || this.state.status !== "connected") return;
     const generation = this.connectionGeneration;
@@ -2065,8 +2081,21 @@ export class AppController extends EventEmitter<AppControllerEvents> {
         else session.probeFailed(codes);
       });
       if (!healthy && (immediate || this.tunnelHealthFailures >= 3)) {
+        // Recovery restarts the core and with it the game's paths: a match whose UDP
+        // crosses the game nodes keeps them, and the tunnel recovers once it ends.
+        if (this.liveMatch()) {
+          if (!this.recoveryHeldForMatch) {
+            this.recoveryHeldForMatch = true;
+            this.addLog("VPN-сервер не передаёт трафик; матч идёт через игровые узлы, переподключение после матча");
+            this.patch({ statusDetail: "Обычный VPN не отвечает. Переподключимся после матча: игра идёт через игровые узлы." });
+          }
+          return;
+        }
         this.recoveryReason = "probe";
         this.beginTunnelRecovery("VPN-сервер перестал передавать трафик. Восстановление…", cause);
+      } else if (healthy && this.recoveryHeldForMatch) {
+        this.recoveryHeldForMatch = false;
+        this.patch({ statusDetail: `Защищено через ${this.selectedServer()?.name ?? "VPN"}` });
       }
     } catch (error) {
       this.addLog(`Проверка туннеля: ${messageOf(error)}`);
@@ -2403,7 +2432,9 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     const current = this.selectedServer();
     if (!current) return;
     const move = maintenanceMove(maintenanceFor(this.maintenanceWindows(), nodeIdForServer(current), now), now);
-    if (move === "stay" || (move === "when-idle" && !this.idleMeter.idle(now))) return;
+    // A running game is not idle. A live match is never moved, not even right before the work:
+    // its UDP crosses the game nodes, and the tunnel recovers after the match.
+    if (move === "stay" || (move === "when-idle" && (!this.idleMeter.idle(now) || this.gamePlaying)) || this.liveMatch()) return;
     const target = this.bestServer(this.state.servers.filter((item) => item.id !== current.id));
     if (!target || maintenanceFor(this.maintenanceWindows(), nodeIdForServer(target), now)) return;
     this.maintenanceMoving = true;
@@ -2547,6 +2578,11 @@ export class AppController extends EventEmitter<AppControllerEvents> {
 
   /** The next rung: the best server of a protocol not tried yet, a few moves at most. */
   private async climbProtocolLadder(failed: TunnelServer, protocol: string): Promise<void> {
+    // The check may have started before the game did; a running game is never moved.
+    if (this.gamePlaying || this.liveMatch()) {
+      this.addLog("Smart Auto: игра запущена, остаёмся на текущем сервере");
+      return;
+    }
     this.smartLadder.tried(failed.id, protocol);
     if (this.smartLadder.exhausted()) {
       this.addLog("Smart Auto: проверены несколько протоколов, остаёмся на текущем сервере");
