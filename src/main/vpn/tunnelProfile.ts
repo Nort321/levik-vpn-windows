@@ -6,6 +6,8 @@ import { DeviceIdentity } from "../security/deviceIdentity";
 import { extractServerEndpoint } from "./serverPinger";
 
 export interface PreparedTunnelProfile {
+  /** Levik Game alone: the game servers are the only servers and only match UDP takes them. */
+  gameOnly?: boolean;
   game?: { enabled: boolean; servers: TunnelServer[]; nodes?: GameNode[] };
   profileId: string;
   subscriptionId: string;
@@ -65,11 +67,15 @@ export function prepareTunnelProfile(plaintext: Uint8Array, expectedSubscription
   const servers = parseSource(raw.source.content);
   if (servers.length === 0 || servers.length > 512) throw new Error("В профиле нет совместимых серверов");
   const game = parseGameAccess(raw.game, servers);
+  const ordinary = servers.filter((server) => !game.servers.includes(server));
+  // Only the explicit flag: game servers never fall into ordinary selection by accident.
+  const gameOnly = game.servers.length > 0 && isRecord(raw.game) && raw.game.only === true;
   return {
     profileId: raw.profileId,
     subscriptionId: raw.subscriptionId,
     subscriptionExpiresAt: raw.subscriptionExpiresAt ?? null,
-    servers: servers.filter((server) => !game.servers.includes(server)),
+    servers: gameOnly ? game.servers : ordinary,
+    ...(gameOnly ? { gameOnly: true } : {}),
     game,
     directCidrs: validateCidrs(raw.routing?.directCidrs ?? []),
     directDomains: validateDomains(raw.routing?.directDomains ?? []),

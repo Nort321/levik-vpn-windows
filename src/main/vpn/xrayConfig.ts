@@ -54,14 +54,16 @@ export function buildXrayConfig(
   const proxyDomains = [...profile.proxyDomains];
   if (settings.routingMode === "blockedOnly") proxyDomains.push(...BLOCKED_DOMAINS);
   const processes = resolveProcessCompanions(settings.splitTunnelProcesses);
-  const processBypass = settings.splitTunnelMode === "bypass" && processes.length > 0;
+  // Levik Game alone: only match UDP takes Levik, everything else (DNS included) goes direct.
+  const gameOnly = profile.gameOnly === true;
+  const processBypass = !gameOnly && settings.splitTunnelMode === "bypass" && processes.length > 0;
 
   const rules: Record<string, unknown>[] = [
     // Probe the selected VPN even when application/domain rules bypass it.
     { type: "field", inboundTag: [TUNNEL_HEALTH_TAG], outboundTag: server.tag },
     // System DNS must reach the configured resolver before process/LAN bypass.
     { type: "field", inboundTag: ["levik-tun-in"], port: "53", outboundTag: "levik-dns-out" },
-    { type: "field", inboundTag: ["levik-dns"], outboundTag: server.tag },
+    { type: "field", inboundTag: ["levik-dns"], outboundTag: gameOnly ? "direct" : server.tag },
     ...(gaming ? [
       { type: "field", inboundTag: [GAME_DATA_PROBE_TAG], ip: ["1.1.1.1", "8.8.8.8"], port: "53", network: "udp", outboundTag: GAME_MULTIPATH },
       { type: "field", inboundTag: [GAME_DATA_PROBE_TAG], outboundTag: "levik-block" },
@@ -79,23 +81,31 @@ export function buildXrayConfig(
     ...(gameRules.length ? [{ type: "field", ip: LOCAL_CIDRS, outboundTag: "direct" }] : []),
     // A selected game's match UDP takes Game even when the game is excluded or its server is regional.
     ...gameRules,
-    ...(processBypass
-      ? [{ type: "field", process: processes, network: "tcp,udp", outboundTag: "direct", ruleTag: "process-bypass" }]
-      : []),
-    ...(!gameRules.length ? [{ type: "field", ip: LOCAL_CIDRS, outboundTag: "direct" }] : []),
-    ...(settings.splitTunnelMode === "only" && processes.length
-      ? [{ type: "field", process: processes, network: "tcp,udp", outboundTag: server.tag }]
-      : []),
-    ...(settings.splitTunnelMode === "only" ? [{ type: "field", network: "tcp,udp", outboundTag: "direct" }] : []),
-    ...(proxyDomains.length ? [{ type: "field", domain: unique(proxyDomains), outboundTag: server.tag }] : []),
-    ...(profile.directCidrs.length ? [{ type: "field", ip: profile.directCidrs, outboundTag: "direct" }] : []),
-    ...(directDomains.length ? [{ type: "field", domain: unique(directDomains), outboundTag: "direct" }] : []),
-    ...(settings.routingMode === "bypassRu" ? [
-      { type: "field", domain: RUSSIAN_GEOSITES, outboundTag: "direct" },
-      { type: "field", ip: RUSSIAN_IPS, outboundTag: "direct" },
-    ] : []),
+    ...(gameOnly ? [
+      ...(!gameRules.length ? [{ type: "field", ip: LOCAL_CIDRS, outboundTag: "direct" }] : []),
+      { type: "field", network: "tcp,udp", outboundTag: "direct" },
+    ] : ordinaryRules()),
   ];
-  if (settings.routingMode === "blockedOnly" && settings.splitTunnelMode !== "only") {
+  function ordinaryRules(): Record<string, unknown>[] {
+    return [
+      ...(processBypass
+        ? [{ type: "field", process: processes, network: "tcp,udp", outboundTag: "direct", ruleTag: "process-bypass" }]
+        : []),
+      ...(!gameRules.length ? [{ type: "field", ip: LOCAL_CIDRS, outboundTag: "direct" }] : []),
+      ...(settings.splitTunnelMode === "only" && processes.length
+        ? [{ type: "field", process: processes, network: "tcp,udp", outboundTag: server.tag }]
+        : []),
+      ...(settings.splitTunnelMode === "only" ? [{ type: "field", network: "tcp,udp", outboundTag: "direct" }] : []),
+      ...(proxyDomains.length ? [{ type: "field", domain: unique(proxyDomains), outboundTag: server.tag }] : []),
+      ...(profile.directCidrs.length ? [{ type: "field", ip: profile.directCidrs, outboundTag: "direct" }] : []),
+      ...(directDomains.length ? [{ type: "field", domain: unique(directDomains), outboundTag: "direct" }] : []),
+      ...(settings.routingMode === "bypassRu" ? [
+        { type: "field", domain: RUSSIAN_GEOSITES, outboundTag: "direct" },
+        { type: "field", ip: RUSSIAN_IPS, outboundTag: "direct" },
+      ] : []),
+    ];
+  }
+  if (!gameOnly && settings.routingMode === "blockedOnly" && settings.splitTunnelMode !== "only") {
     rules.push({ type: "field", network: "tcp,udp", outboundTag: "direct" });
   }
 

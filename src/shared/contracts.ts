@@ -357,6 +357,8 @@ export interface GameRouteQuality {
 
 export interface GameSnapshot {
   available: boolean;
+  /** Levik Game alone: only match traffic of the selected games takes Levik. */
+  only?: boolean;
   routes: Array<Pick<TunnelServer, "id" | "name" | "countryCode" | "nodeId">>;
   nodes?: Array<Pick<GameNode, "nodeId" | "name" | "countryCode" | "state">>;
   quality: Record<string, GameRouteQuality>;

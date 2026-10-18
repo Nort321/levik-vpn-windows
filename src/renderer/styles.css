@@ -571,6 +571,8 @@ select option { color: var(--text); background-color: var(--select-bg); }
 .game-session-share span { display: block; height: 100%; background: var(--blue-bright); }
 .game-notice { display: flex; align-items: center; gap: 12px; padding: 14px 18px; margin: 14px 0; background: color-mix(in srgb, var(--warning) 9%, transparent); border: 1px solid color-mix(in srgb, var(--warning) 28%, transparent); border-radius: 12px; font-size: 12px; line-height: 1.6; color: var(--text); }
 .game-notice svg { width: 22px; height: 22px; flex-shrink: 0; color: var(--warning); }
+.game-notice.is-info { background: color-mix(in srgb, var(--blue) 9%, transparent); border-color: color-mix(in srgb, var(--blue) 28%, transparent); }
+.game-notice.is-info svg { color: var(--blue-bright); }
 @media (max-width: 760px) {
   .game-flow { grid-template-columns: 1fr; gap: 14px; }
   .game-flow-origin { display: none; }

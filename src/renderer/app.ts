@@ -214,6 +214,11 @@ function gameEgressExplanation(exit: GameExitComparison | undefined): string {
   }
 }
 
+function renderGameOnlyNotice(): string {
+  if (!state?.game?.only) return "";
+  return `<div class="game-notice is-info" role="note">${icon("game")}<span><strong>Тариф Levik Game.</strong> Через Levik идут только матчи выбранных игр, весь остальной интернет — напрямую. Подключитесь, отметьте игры на вкладке Game и нажмите «Включить Game».</span></div>`;
+}
+
 function renderGame(): string {
   if (!state?.game?.available) return "";
   const game = state.game;
@@ -250,6 +255,7 @@ function renderGame(): string {
       ${carrying ? `<div class="game-metrics">${decision?.exitId !== "direct" ? `<div><span>A · ПК → выбранный выход</span><strong>${metric(selected?.access?.latencyMs)}</strong></div><div><span>B · выход → сервер игры</span><strong>${metric(selected?.egress?.latencyMs, selected?.egress?.approximate, selected?.egress?.method === "ttl-hop")}</strong></div>` : `<div><span>Маршрут текущего UDP</span><strong>Напрямую</strong></div><div><span>Резервирование через Levik</span><strong>Не применяется</strong></div>`}<div><span>D · оценка прямого пути</span><strong>${metric(direct?.latencyMs, direct?.approximate, direct?.method === "ttl-hop")}</strong></div></div><p class="game-selection">${decision?.exitId !== "direct" ? escapeHtml(gameEgressExplanation(selected)) + " " : ""}Это оценки сети. Пинг самого матча показывает игра.</p>` : ""}
       <div class="game-hero-bottom"><span class="muted">${enabled && state.status === "connected" ? "Действующие UDP-потоки не переносятся между выходами" : "Обычный сервер: " + escapeHtml(selectedServer()?.name ?? "автовыбор")}</span><button class="button ${enabled ? "" : "primary"}" id="game-toggle" ${busy || (!enabled && (!gameProcesses(state.settings).length || !game.routes.length)) ? "disabled" : ""}>${icon("power")} ${enabled ? "Выключить Game" : "Включить Game"}</button></div>
     </section>
+    ${renderGameOnlyNotice()}
     ${renderGameInsights()}
     ${renderGameSessions()}
     ${game.message ? `<div class="game-notice" role="status">${icon("pulse")}<span>${escapeHtml(game.message)}</span></div>` : ""}
@@ -374,7 +380,8 @@ function renderHome(): string {
   const disconnectAction = ["connected", "connecting", "reconnecting"].includes(state.status) || (state.status === "error" && state.settings.killSwitch);
   const server = selectedServer();
   return `
-    <header class="page-header"><div><h1>Главная</h1><div class="subtitle">Защищённый доступ к интернету</div></div></header>
+    <header class="page-header"><div><h1>Главная</h1><div class="subtitle">${state.game?.only ? "Тариф Levik Game" : "Защищённый доступ к интернету"}</div></div></header>
+    ${renderGameOnlyNotice()}
     <div class="home-grid">
       <section class="connection-card card">
         <div class="connection-label">Состояние соединения</div>

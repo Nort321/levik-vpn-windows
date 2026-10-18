@@ -1136,7 +1136,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
       this.state.settings = { ...this.state.settings, gameEnabled: profile.game?.enabled === true && this.state.settings.gameEnabled === true, gameRouteId: null };
       await this.secureStore.put("settings", Buffer.from(JSON.stringify(serializeSettings(this.state.settings))));
     }
-    this.updateGame({ available: profile.game?.enabled === true,
+    this.updateGame({ available: profile.game?.enabled === true, only: profile.gameOnly === true,
       nodes: (profile.game?.nodes ?? []).map(({ nodeId, name, countryCode, state }) => ({ nodeId, name, countryCode, state })),
       routes: (profile.game?.servers ?? []).map((server) => ({ id: server.id, name: server.name, countryCode: server.countryCode, ...(server.nodeId ? { nodeId: server.nodeId } : {}) })),
       ...(gameTransportChanged ? { quality: {}, activeRouteId: null, recommendedRouteId: null, phase: "idle" as const } : {}),

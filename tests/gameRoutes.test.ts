@@ -41,6 +41,28 @@ describe("Game access and routing", () => {
     expect(p.game?.servers.map((s) => s.name)).toEqual(["UDP"]);
     expect(p.servers.map((s) => s.name)).toEqual(["Normal", "Game"]);
   });
+  it("Levik Game alone: game servers are the only servers, match UDP takes Game and the rest goes direct", () => {
+    const only = prepareTunnelProfile(Buffer.from(JSON.stringify({ version: 1, profileId: "game-only", subscriptionId: "sub",
+      source: { mediaType: "text/plain", content: "hy2://secret@game.example:443?sni=game.example#UDP" },
+      game: { enabled: true, only: true, endpoints: [endpoint] } })), "sub");
+    expect(only.gameOnly).toBe(true);
+    expect(only.servers.map((s) => s.name)).toEqual(["UDP"]);
+    const rules = (buildXrayConfig(only, only.servers[0]!, settings, "test-password").routing as { rules: Record<string, unknown>[] }).rules;
+    const match = rules.findIndex((r) => r.ruleTag === "game-match-0");
+    const catchAll = rules.findIndex((r) => r.network === "tcp,udp" && r.outboundTag === "direct" && !r.process);
+    expect(match).toBeGreaterThan(-1);
+    expect(catchAll).toBeGreaterThan(match);
+    expect(rules.find((r) => Array.isArray(r.inboundTag) && r.inboundTag.includes("levik-dns"))).toMatchObject({ outboundTag: "direct" });
+    expect(rules.some((r) => r.ruleTag === "process-bypass")).toBe(false);
+    expect(rules.slice(catchAll + 1)).toEqual([]);
+    // Without the flag game servers stay out of ordinary selection.
+    const implicit = prepareTunnelProfile(Buffer.from(JSON.stringify({ version: 1, profileId: "game-only", subscriptionId: "sub",
+      source: { mediaType: "text/plain", content: "hy2://secret@game.example:443?sni=game.example#UDP" },
+      game: { enabled: true, endpoints: [endpoint] } })), "sub");
+    expect(implicit.gameOnly).toBeUndefined();
+    expect(implicit.servers).toEqual([]);
+    expect(profile({ enabled: true, endpoints: [endpoint] }).gameOnly).toBeUndefined();
+  });
   it("keeps normal VPN first, match UDP before bypass, and blocks games until an authenticated probe succeeds", () => {
     const p = profile({ enabled: true, endpoints: [endpoint] });
     const config = buildXrayConfig(p, p.servers[0]!, settings, "test-password");
