@@ -108,10 +108,9 @@ export class XrayManager extends EventEmitter<XrayEvents> {
     // Rebuilt in place, Game's rules are contiguous: a game with known match ports has its own rule.
     const at = routing.rules.findIndex(isGameRule);
     if (at >= 0) {
-      if (!this.tunnelTag) throw new Error("Подключите VPN для обновления игр");
       const multipath = Array.isArray(routing.balancers) && routing.balancers.some((balancer: unknown) => typeof balancer === "object" && balancer !== null && "tag" in balancer && balancer.tag === GAME_UDP_BALANCER);
       const rest = routing.rules.filter((rule: unknown) => !isGameRule(rule));
-      routing.rules = [...rest.slice(0, at), ...gameRoutingRules(settings, this.tunnelTag, multipath), ...rest.slice(at)];
+      routing.rules = [...rest.slice(0, at), ...gameRoutingRules(settings, multipath), ...rest.slice(at)];
     }
     if (Array.isArray(routing.balancers)) for (const balancer of routing.balancers) {
       if (!balancer || typeof balancer !== "object" || !("tag" in balancer)) continue;

@@ -18,9 +18,15 @@ export function normalizeProcessSelection(value: unknown): string[] {
 
 // Keep groups narrow: selecting a game must not bypass every game using its
 // launcher, or unrelated traffic owned by Steam, Battle.net, Agent or svchost.
+// Riot is one group: the Riot Client holds the account session, chat and voice of
+// VALORANT and League, and their voice fails when the client and the game leave
+// from different addresses.
+const RIOT = ["Riot Client.exe", "RiotClientServices.exe", "RiotClientUx.exe", "RiotClientUxRender.exe",
+  "VALORANT.exe", "VALORANT-Win64-Shipping.exe",
+  "LeagueClient.exe", "LeagueClientUx.exe", "LeagueClientUxRender.exe", "League of Legends.exe"];
 const COMPANION_GROUPS = [
   { triggers: ["overwatch.exe", "overwatch launcher.exe"], names: ["Overwatch.exe", "Overwatch Launcher.exe", "VivoxVoiceService.exe"] },
-  { triggers: ["valorant.exe", "valorant-win64-shipping.exe"], names: ["VALORANT.exe", "VALORANT-Win64-Shipping.exe"] },
+  { triggers: RIOT.map((name) => name.toLowerCase()), names: RIOT },
 ];
 
 export function resolveProcessCompanions(selected: readonly string[]): string[] {

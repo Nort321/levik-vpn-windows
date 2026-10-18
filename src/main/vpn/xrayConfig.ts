@@ -44,7 +44,7 @@ export function buildXrayConfig(
 ): Record<string, unknown> {
   const games = settings.gameEnabled && profile.game?.enabled ? profile.game.servers : [];
   const gaming = games.length > 0 && Boolean(gameProbePassword);
-  const gameRules = gameRoutingRules(settings, server.tag, gaming);
+  const gameRules = gameRoutingRules(settings, gaming);
   const antiDpiOutbound = server.tuic ? server.outbound : withAntiDpi(server, settings);
   const selectedOutbound = server.tuic
     ? tuicLocalOutbound(server.tag)
@@ -77,7 +77,7 @@ export function buildXrayConfig(
       { type: "field", inboundTag: [gameProbeTag(index)], outboundTag: "levik-block" },
     ]),
     ...(gameRules.length ? [{ type: "field", ip: LOCAL_CIDRS, outboundTag: "direct" }] : []),
-    // Explicit Game selection wins over process bypass and regional direct rules.
+    // A selected game's match UDP takes Game even when the game is excluded or its server is regional.
     ...gameRules,
     ...(processBypass
       ? [{ type: "field", process: processes, network: "tcp,udp", outboundTag: "direct", ruleTag: "process-bypass" }]
@@ -172,22 +172,20 @@ export function isGameRule(rule: unknown): boolean {
 }
 
 /**
- * Game routing for the selected processes, in order: IPv4 UDP of matches to the game
- * path (only a game's match ports when they are known, so its voice and party traffic
- * keep the address the game logged in from), then everything else of the game to the
- * ordinary tunnel: TCP (login, lobby, matchmaking, voice) and non-IPv4 UDP. A game node
- * that answers echoes may still refuse new TCP connections, and a game never plays over
- * TCP, so nothing waits on that node.
+ * Game routing for the selected processes: only IPv4 UDP of matches takes the game path
+ * (only a game's match ports when they are known). Everything else of the game — TCP
+ * (login, lobby, matchmaking, voice signalling), voice and party UDP, non-IPv4 UDP —
+ * follows the ordinary rules, exactly as with Game turned off: the tunnel, or direct when
+ * the user excluded the game. Forcing it into the tunnel split a game the user excluded
+ * from its launcher (Riot Client direct, VALORANT's TCP via the VPN server), and its
+ * voice never connected. A game node is never used
+ * for TCP: one that answers echoes may still refuse new TCP connections (VAL 62).
  */
-export function gameRoutingRules(settings: AppSettings, tunnelTag: string, multipath: boolean): Record<string, unknown>[] {
-  const groups = settings.gameEnabled ? gameRouteGroups(settings) : [];
-  if (!groups.length) return [];
-  return [
-    ...(multipath ? groups.map((group, index) => ({ type: "field", process: group.processes, ip: ["0.0.0.0/0"], network: "udp",
-      ...(group.matchUdpPorts ? { port: group.matchUdpPorts, ruleTag: `game-match-${index}` } : { ruleTag: "game-multipath" }),
-      balancerTag: GAME_UDP_BALANCER })) : []),
-    { type: "field", process: groups.flatMap((group) => group.processes), network: "tcp,udp", outboundTag: tunnelTag, ruleTag: "game" },
-  ];
+export function gameRoutingRules(settings: AppSettings, multipath: boolean): Record<string, unknown>[] {
+  const groups = settings.gameEnabled && multipath ? gameRouteGroups(settings) : [];
+  return groups.map((group, index) => ({ type: "field", process: group.processes, ip: ["0.0.0.0/0"], network: "udp",
+    ...(group.matchUdpPorts ? { port: group.matchUdpPorts, ruleTag: `game-match-${index}` } : { ruleTag: "game-multipath" }),
+    balancerTag: GAME_UDP_BALANCER }));
 }
 
 /**

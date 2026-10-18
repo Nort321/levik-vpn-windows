@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { prepareTunnelProfile } from "../src/main/vpn/tunnelProfile";
 import { bindXrayOutboundInterface, buildXrayConfig } from "../src/main/vpn/xrayConfig";
 import type { AppSettings } from "../src/shared/contracts";
+import { resolveProcessCompanions } from "../src/shared/processes";
 
 const settings: AppSettings = {
   routingMode: "bypassRu",
@@ -213,7 +214,7 @@ describe("Windows tunnel profile", () => {
       ...settings, routingMode, splitTunnelMode: "bypass", splitTunnelProcesses: processes,
     });
     const routing = config.routing as { rules: Array<Record<string, unknown>> };
-    expect(routing.rules[3]).toEqual({ type: "field", process: processes, network: "tcp,udp", outboundTag: "direct", ruleTag: "process-bypass" });
+    expect(routing.rules[3]).toEqual({ type: "field", process: resolveProcessCompanions(processes), network: "tcp,udp", outboundTag: "direct", ruleTag: "process-bypass" });
     expect(routing.rules.findIndex((rule) => !rule.inboundTag && rule.outboundTag === profile.servers[0]!.tag)).toBeGreaterThan(0);
     expect(config.log).toEqual({ loglevel: "info" });
 
@@ -223,7 +224,7 @@ describe("Windows tunnel profile", () => {
       expect((inactive.routing as typeof routing).rules.some((rule) => rule.ruleTag === "process-bypass")).toBe(false);
     }
     const only = buildXrayConfig(profile, profile.servers[0]!, { ...settings, splitTunnelMode: "only", splitTunnelProcesses: processes });
-    expect((only.routing as typeof routing).rules).toContainEqual({ type: "field", process: processes, network: "tcp,udp", outboundTag: profile.servers[0]!.tag });
+    expect((only.routing as typeof routing).rules).toContainEqual({ type: "field", process: resolveProcessCompanions(processes), network: "tcp,udp", outboundTag: profile.servers[0]!.tag });
   });
 
   it.each(["Ethernet", "Wi-Fi"])("binds direct and automatic outbound sockets to %s without pinning an IP", (name) => {

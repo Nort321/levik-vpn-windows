@@ -55,11 +55,11 @@ describe("Xray manager and the game data plane", () => {
     const xray = new XrayManager();
     Reflect.set(xray, "process", {}); Reflect.set(xray, "tunnelTag", "proxy");
     Reflect.set(xray, "routing", { balancers: [{ tag: GAME_UDP_BALANCER, selector: ["block"] }], rules: [
-      { type: "field", ip: ["10.0.0.0/8"], outboundTag: "direct" }, ...gameRoutingRules(settings, "proxy", true),
+      { type: "field", ip: ["10.0.0.0/8"], outboundTag: "direct" }, ...gameRoutingRules(settings, true),
       { type: "field", process: ["Discord.exe"], outboundTag: "direct", ruleTag: "process-bypass" },
     ] });
     await xray.updateGameProcesses({ ...settings, gameIds: ["valorant", "cs2"] });
-    expect(applied.at(-1)!.routing.rules.map((rule) => rule.ruleTag ?? rule.outboundTag)).toEqual(["direct", "game-match-0", "game-multipath", "game", "process-bypass"]);
+    expect(applied.at(-1)!.routing.rules.map((rule) => rule.ruleTag ?? rule.outboundTag)).toEqual(["direct", "game-match-0", "game-multipath", "process-bypass"]);
     expect(applied.at(-1)!.routing.rules[2]).toMatchObject({ process: ["cs2.exe"], balancerTag: GAME_UDP_BALANCER });
     await xray.updateGameProcesses({ ...settings, gameIds: [] });
     expect(applied.at(-1)!.routing.rules.map((rule) => rule.ruleTag ?? rule.outboundTag)).toEqual(["direct", "process-bypass"]);

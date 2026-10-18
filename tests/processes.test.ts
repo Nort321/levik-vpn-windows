@@ -64,7 +64,11 @@ describe("Windows process split tunneling", () => {
     expect(resolveProcessCompanions(["Overwatch Launcher.exe"])).toEqual([
       "Overwatch Launcher.exe", "Overwatch.exe", "VivoxVoiceService.exe",
     ]);
-    expect(resolveProcessCompanions(["VALORANT.exe"])).toEqual(["VALORANT.exe", "VALORANT-Win64-Shipping.exe"]);
+    const riot = ["Riot Client.exe", "RiotClientServices.exe", "RiotClientUx.exe", "RiotClientUxRender.exe", "VALORANT.exe", "VALORANT-Win64-Shipping.exe",
+      "LeagueClient.exe", "LeagueClientUx.exe", "LeagueClientUxRender.exe", "League of Legends.exe"];
+    // The game and the Riot Client leave from one address, whichever of them was picked.
+    expect(resolveProcessCompanions(["VALORANT.exe"])).toEqual(["VALORANT.exe", ...riot.filter((name) => name !== "VALORANT.exe")]);
+    expect(new Set(resolveProcessCompanions(["riotclientservices.exe"]).map((name) => name.toLowerCase()))).toEqual(new Set(riot.map((name) => name.toLowerCase())));
     for (const name of ["Agent.exe", "Battle.net.exe", "Steam.exe", "svchost.exe", "VivoxVoiceService.exe"]) {
       expect(resolveProcessCompanions([name])).toEqual([name]);
     }
