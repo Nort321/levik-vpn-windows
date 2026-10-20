@@ -270,6 +270,7 @@ function apiErrorMessage(code: string): string {
     invalid_activation_code: "Проверьте код активации",
     activation_not_found: "Код активации не найден или срок его действия истёк",
     rate_limited: "Слишком много попыток. Попробуйте позже.",
+    app_update_required: "Обновите Levik VPN: эта версия приложения не поддерживает Levik Game.",
   };
   return known[code] ?? code;
 }
