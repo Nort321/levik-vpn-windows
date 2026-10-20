@@ -59,8 +59,10 @@ export function buildXrayConfig(
   const processBypass = !gameOnly && settings.splitTunnelMode === "bypass" && processes.length > 0;
 
   const rules: Record<string, unknown>[] = [
-    // Probe the selected VPN even when application/domain rules bypass it.
-    { type: "field", inboundTag: [TUNNEL_HEALTH_TAG], outboundTag: server.tag },
+    // Probe the selected VPN even when application/domain rules bypass it. Levik Game alone
+    // has no ordinary VPN: its game nodes carry only the relay, so the probe (and the game's
+    // fallback, which follows this rule) is the direct connection.
+    { type: "field", inboundTag: [TUNNEL_HEALTH_TAG], outboundTag: gameOnly ? "direct" : server.tag },
     // System DNS must reach the configured resolver before process/LAN bypass.
     { type: "field", inboundTag: ["levik-tun-in"], port: "53", outboundTag: "levik-dns-out" },
     { type: "field", inboundTag: ["levik-dns"], outboundTag: gameOnly ? "direct" : server.tag },
@@ -174,6 +176,18 @@ export function buildXrayConfig(
     policy: { system: { statsInboundDownlink: true, statsInboundUplink: true, statsOutboundDownlink: true, statsOutboundUplink: true } },
     stats: {},
   };
+}
+
+/** Where game UDP goes when Game falls back: the path of the tunnel health probe — the
+ * selected VPN, or direct with Levik Game alone. Configs without that rule use their first outbound. */
+export function ordinaryTunnelTag(config: Record<string, unknown>): string | null {
+  const routing = config.routing;
+  const rules = isRecord(routing) && Array.isArray(routing.rules) ? routing.rules : [];
+  const health = rules.find((rule: unknown) => isRecord(rule) && Array.isArray(rule.inboundTag)
+    && rule.inboundTag.includes(TUNNEL_HEALTH_TAG));
+  if (isRecord(health) && typeof health.outboundTag === "string") return health.outboundTag;
+  const first: unknown = Array.isArray(config.outbounds) ? config.outbounds[0] : null;
+  return isRecord(first) && typeof first.tag === "string" ? first.tag : null;
 }
 
 /** Rules owned by Game, rebuilt together when the selected games change. */

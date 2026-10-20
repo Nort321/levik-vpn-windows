@@ -399,10 +399,11 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     this.xray.on("exit", (code, expected) => this.handleXrayExit(code, expected));
     this.xray.on("stats", (downloadBytes, uploadBytes) => this.handleTrafficStats(downloadBytes, uploadBytes));
     this.xray.on("gameDown", (movedToTunnel) => {
-      this.addLog(movedToTunnel ? "Game: процесс маршрутизации не восстановился; игра идёт через обычный VPN"
+      const path = this.profile?.gameOnly ? "напрямую" : "через обычный VPN";
+      this.addLog(movedToTunnel ? `Game: процесс маршрутизации не восстановился; игра идёт ${path}`
         : "Game: процесс маршрутизации не восстановился; переподключите VPN");
       this.updateGame({ activeRouteId: null, phase: "degraded", message: movedToTunnel
-        ? "Игровой канал перестал работать: игра идёт через обычный VPN без игровой оптимизации. Переподключите VPN между матчами, чтобы включить его снова."
+        ? `Игровой канал перестал работать: игра идёт ${path} без игровой оптимизации. Переподключите VPN между матчами, чтобы включить его снова.`
         : "Игровой канал перестал работать. Переподключите VPN." });
     });
     this.liveEvents = new LiveEvents(
@@ -2295,9 +2296,11 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     try {
       await this.xray.routeGameThroughTunnel();
       this.assertCurrentConnection(generation);
-      this.addLog("Game: игровой канал не прошёл проверку; игра идёт через обычный VPN");
+      // Levik Game alone has no ordinary VPN: the fallback is the direct connection.
+      const path = this.profile?.gameOnly ? "напрямую" : "через обычный VPN";
+      this.addLog(`Game: игровой канал не прошёл проверку; игра идёт ${path}`);
       this.updateGame({ activeRouteId: null, phase: "degraded",
-        message: "Игровой канал не прошёл проверку: игра идёт через обычный VPN без игровой оптимизации. Переподключите VPN между матчами, чтобы попробовать снова." });
+        message: `Игровой канал не прошёл проверку: игра идёт ${path} без игровой оптимизации. Переподключите VPN между матчами, чтобы попробовать снова.` });
     } catch {
       this.assertCurrentConnection(generation);
       this.updateGame({ phase: "degraded", message: "Не удалось подготовить игровой маршрут. Переподключите VPN." });

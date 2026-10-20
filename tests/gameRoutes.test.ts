@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { bestGameRoute, summarizeGameSamples, gameDnsProbe, GAME_BLOCK, GAME_DATA_PROBE_TAG } from "../src/main/vpn/gameRoutes";
 import { gameProcesses, normalizeGameIds } from "../src/shared/games";
 import { prepareTunnelProfile } from "../src/main/vpn/tunnelProfile";
-import { buildXrayConfig, bindXrayOutboundInterface, GAME_MULTIPATH, GAME_UDP_BALANCER } from "../src/main/vpn/xrayConfig";
+import { buildXrayConfig, bindXrayOutboundInterface, ordinaryTunnelTag, GAME_MULTIPATH, GAME_UDP_BALANCER } from "../src/main/vpn/xrayConfig";
 import type { AppSettings, TunnelServer } from "../src/shared/contracts";
 
 const settings: AppSettings = {
@@ -55,6 +55,12 @@ describe("Game access and routing", () => {
     expect(rules.find((r) => Array.isArray(r.inboundTag) && r.inboundTag.includes("levik-dns"))).toMatchObject({ outboundTag: "direct" });
     expect(rules.some((r) => r.ruleTag === "process-bypass")).toBe(false);
     expect(rules.slice(catchAll + 1)).toEqual([]);
+    // Game nodes carry only the relay: the health probe and the game's fallback go direct.
+    const onlyConfig = buildXrayConfig(only, only.servers[0]!, settings, "test-password");
+    expect(rules.find((r) => Array.isArray(r.inboundTag) && r.inboundTag.includes("levik-health"))).toMatchObject({ outboundTag: "direct" });
+    expect(ordinaryTunnelTag(onlyConfig)).toBe("direct");
+    const ordinary = profile({ enabled: true, endpoints: [endpoint] });
+    expect(ordinaryTunnelTag(buildXrayConfig(ordinary, ordinary.servers[0]!, settings, "test-password"))).toBe(ordinary.servers[0]!.tag);
     // Without the flag game servers stay out of ordinary selection.
     const implicit = prepareTunnelProfile(Buffer.from(JSON.stringify({ version: 1, profileId: "game-only", subscriptionId: "sub",
       source: { mediaType: "text/plain", content: "hy2://secret@game.example:443?sni=game.example#UDP" },
