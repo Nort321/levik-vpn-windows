@@ -8,7 +8,7 @@ import { extractServerEndpoint } from "./serverPinger";
 export interface PreparedTunnelProfile {
   /** Levik Game alone: the game servers are the only servers and only match UDP takes them. */
   gameOnly?: boolean;
-  game?: { enabled: boolean; servers: TunnelServer[]; nodes?: GameNode[] };
+  game?: { enabled: boolean; servers: TunnelServer[]; nodes?: GameNode[]; relayToken?: string };
   profileId: string;
   subscriptionId: string;
   subscriptionExpiresAt: string | null;
@@ -107,7 +107,9 @@ function parseGameAccess(value: unknown, servers: TunnelServer[]): NonNullable<P
       countryCode: server.countryCode, city: null, mesh: null,
       state: Array.isArray(value.nodes) && !server.nodeId?.startsWith("legacy-") ? "disabled" : "enabled" });
   }
-  return { enabled: true, servers: selected, nodes };
+  // The relay verifies it; here only its shape (94 bytes "LGT1…", base64url).
+  const relayToken = typeof value.relayToken === "string" && /^TEdUMQ[A-Za-z0-9_-]{120}$/.test(value.relayToken) ? value.relayToken : undefined;
+  return { enabled: true, servers: selected, nodes, ...(relayToken ? { relayToken } : {}) };
 }
 
 function validNodeId(value: unknown): value is string {

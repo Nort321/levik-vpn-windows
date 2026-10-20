@@ -2229,6 +2229,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
               nodes: this.profile?.game?.nodes ?? [], preferredExitId, protection: this.state.settings.gameProtection !== false,
               gameId, exitScope: gameExitScope(this.state.settings), history: this.gameHistory.snapshot(gameId),
               directSocksPort: GAME_DIRECT_PORT,
+              ...(this.profile?.game?.relayToken ? { relayToken: this.profile.game.relayToken } : {}),
               ...(source ? { measureDirect: async (targets, signal): Promise<ProbeMeasurement[]> =>
                 (await measureDirectGameTargets(targets, source, signal)).map(({ address, port, quality: measurement }) => ({
                   address, port, medianMs: measurement.latencyMs, p95Ms: measurement.p95Ms, jitterMs: measurement.jitterMs,

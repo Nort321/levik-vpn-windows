@@ -41,6 +41,14 @@ describe("Game access and routing", () => {
     expect(p.game?.servers.map((s) => s.name)).toEqual(["UDP"]);
     expect(p.servers.map((s) => s.name)).toEqual(["Normal", "Game"]);
   });
+  it("keeps a well-formed relay token from the Game section and drops anything else", () => {
+    const token = `TEdUMQ${"A".repeat(120)}`;
+    const profile = (relayToken: unknown) => prepareTunnelProfile(Buffer.from(JSON.stringify({ version: 1, profileId: "token", subscriptionId: "sub",
+      source: { mediaType: "text/plain", content: "hy2://secret@game.example:443?sni=game.example#UDP" },
+      game: { enabled: true, endpoints: [endpoint], relayToken } })), "sub");
+    expect(profile(token).game?.relayToken).toBe(token);
+    for (const bad of [`${token}A`, "TEdUMQ", 42, `XXXXXX${"A".repeat(120)}`]) expect(profile(bad).game).not.toHaveProperty("relayToken");
+  });
   it("Levik Game alone: game servers are the only servers, match UDP takes Game and the rest goes direct", () => {
     const only = prepareTunnelProfile(Buffer.from(JSON.stringify({ version: 1, profileId: "game-only", subscriptionId: "sub",
       source: { mediaType: "text/plain", content: "hy2://secret@game.example:443?sni=game.example#UDP" },

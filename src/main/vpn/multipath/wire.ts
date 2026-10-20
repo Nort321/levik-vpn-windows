@@ -12,7 +12,8 @@ export const HEADER_V3 = 38;
 export const MAX_CONTROL_BYTES = 8192;
 export const MAX_PATHS = 8;
 export const MAX_PAYLOAD = 60_000;
-export const enum Kind { Ping = 1, Pong = 2, Up = 3, Down = 4, NodeInfo = 5, ProbeRequest = 6, ProbeResult = 7, MeshRow = 8, Parity = 9, Regions = 10 }
+/** Auth carries the per-user Game token to the exit relay; AuthResult answers it (levik_game_node auth.go). */
+export const enum Kind { Ping = 1, Pong = 2, Up = 3, Down = 4, NodeInfo = 5, ProbeRequest = 6, ProbeResult = 7, MeshRow = 8, Parity = 9, Regions = 10, Auth = 11, AuthResult = 12 }
 /** v3 flag bits. Unknown bits are rejected so that a future meaning cannot be silently ignored. */
 const FLAG_HOP = 1;
 export interface Packet {
@@ -44,7 +45,7 @@ export const newSession = (random: Buffer): Buffer => Buffer.concat([random.suba
 export const newFlow = (random: Buffer): Buffer => Buffer.concat([random.subarray(0, 4), Buffer.alloc(4)]);
 const zeroTail = (value: Buffer, from: number): boolean => value.subarray(from).every((byte) => byte === 0);
 export const compactable = (packet: Pick<Packet, "session" | "flow">): boolean => zeroTail(packet.session, 8) && zeroTail(packet.flow, 4);
-export const isControl = (kind: number): boolean => kind >= Kind.NodeInfo && kind <= Kind.MeshRow || kind === Kind.Regions;
+export const isControl = (kind: number): boolean => kind >= Kind.NodeInfo && kind <= Kind.MeshRow || kind >= Kind.Regions && kind <= Kind.AuthResult;
 const isData = (kind: number): boolean => kind >= Kind.Ping && kind <= Kind.Down || kind === Kind.Parity;
 
 /** Same bytes as encode() but with a caller-owned prefix (the SOCKS UDP header) in one allocation. */

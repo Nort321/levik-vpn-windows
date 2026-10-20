@@ -1,6 +1,6 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { createSocket, type Socket as DatagramSocket } from "node:dgram";
-import { generateKeyPairSync } from "node:crypto";
+import { createPrivateKey, generateKeyPairSync, sign } from "node:crypto";
 import { once } from "node:events";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { Socket } from "node:net";
@@ -147,3 +147,36 @@ it.skipIf(!binary)("plays through the Go AEAD mesh: entry A carries a copy to ex
     expect(server.sources.size).toBe(1);
   } finally { game?.socket.destroy(); await client.stop(); await server.close(); }
 }, 30_000);
+
+/** A fresh per-user token, signed as levik_vpn_air game-relay-token.ts does (seed 01..20 of auth_test.go). */
+function relayToken(): string {
+  const seed = Buffer.from(Array.from({ length: 32 }, (_, index) => index + 1));
+  const signed = Buffer.alloc(30); signed.write("LGT1", 0, "ascii"); signed[4] = 2;
+  const now = Math.floor(Date.now() / 1000); signed.writeUInt32BE(now, 6); signed.writeUInt32BE(now + 3600, 10); signed.fill(0xa5, 14);
+  const key = createPrivateKey({ key: Buffer.concat([Buffer.from("302e020100300506032b657004220420", "hex"), seed]), format: "der", type: "pkcs8" });
+  return Buffer.concat([signed, sign(null, signed, key)]).toString("base64url");
+}
+
+it.skipIf(!binary)("hands the profile's token to a Go relay that requires one", async () => {
+  directory = await mkdtemp(join(tmpdir(), "levik-go-relay-"));
+  await writeFile(join(directory, "relay-auth.json"), JSON.stringify({ version: 1, mode: "enforce", requireToken: true,
+    publicKeys: ["ebVWLo/mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmQ="] }));
+  network.relayPort = await startGoRelay();
+  const results: string[] = [];
+  network.drop = (direction, data) => {
+    const packet = direction === "down" ? decode(data, resolve) : null;
+    if (packet?.kind === Kind.AuthResult) results.push(packet.payload.toString());
+    return false;
+  };
+  const server = await Server.start(); const client = new GameMultipath(); client.setPlaying(true); let game: GameSocket | undefined;
+  try {
+    const listener = await client.listen();
+    await client.connect([{ index: 0, port: 1, nodeId: "exit-a" }], "test",
+      { nodes, protection: true, preferredExitId: null, exitScope: "flow", relayToken: relayToken() });
+    await until(() => results.length > 0);
+    expect(JSON.parse(results[0]!)).toEqual({ version: 2, status: "ok" });
+    game = await GameSocket.open(listener);
+    game.send(server.port, "with-token");
+    await until(() => game!.replies.includes("echo:with-token"));
+  } finally { game?.socket.destroy(); await client.stop(); await server.close(); }
+}, 20_000);

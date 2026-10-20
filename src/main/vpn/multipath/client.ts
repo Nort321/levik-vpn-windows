@@ -17,6 +17,8 @@ export interface GameRuntimeOptions {
   directSourceAddress?: string; directSocksPort?: number;
   measureDirect?: (targets: ProbeTarget[], signal: AbortSignal) => Promise<ProbeMeasurement[]>;
   history?: Array<{ gameId: string; subnet: string; region: string | null; nodeId: string; updatedAt: number }>;
+  /** Signed per-user token from the profile: exits count this user's limits by it. */
+  relayToken?: string;
 }
 /** One authenticated route to the relay. `reliable` marks UDP carried in a TCP/HTTP stream. */
 export interface GameRouteCandidate { index: number; port: number; nodeId?: string; reliable?: boolean }
@@ -64,6 +66,8 @@ const EVICT_IDLE_MS = 2_000;
 const EVICT_HEAVY_IDLE_MS = 30_000;
 const LIGHT_PACKETS = 16;
 const REGIONS_INTERVAL_MS = 30_000;
+/** Each path repeats the token this often: a restarted exit or an expired relay session forgets it. */
+const AUTH_INTERVAL_MS = 15_000;
 /** A flow that sent this many packets and got no reply is worth a line in the log. */
 const SILENT_MIN_SENT = 20;
 const SILENT_LOG_MS = 60_000;
@@ -131,6 +135,10 @@ export class GameMultipath {
   private lastMatch: GameRuntimeSnapshot["lastMatch"] = null; private matchReport: GameMatchReport | null = null;
   private readonly estimateHistory: GameRuntimeSnapshot["estimateHistory"] = [];
   private estimateFlowId: string | null = null;
+  /** Per path: the exit instance and session its token was last sent for. */
+  private readonly authSent = new WeakMap<Path, string>();
+  private lastAuthAt = -Infinity;
+  private readonly authNoted = new Set<string>();
 
   private canonical(id: string): string {
     for (let i = 0; i < 4 && this.nodeAliases.has(id); i++) id = this.nodeAliases.get(id)!;
@@ -606,6 +614,10 @@ export class GameMultipath {
     }
     // Idle pings keep the relay session (60 s idle timeout) and the path state alive.
     if (now - this.lastIdlePingAt >= IDLE_PING_MS) { this.ping(); this.lastIdlePingAt = now; }
+    if (this.options.relayToken && performance.now() - this.lastAuthAt >= AUTH_INTERVAL_MS) {
+      this.lastAuthAt = performance.now();
+      for (const route of this.paths) if (route?.accepted && route.instance) this.authenticate(route);
+    }
     // Only a path that was asked and kept silent is rebuilt: the first busy tick after idle
     // time must not tear down every path the game is about to use.
     const silence = active ? ACTIVE_SILENCE_MS : IDLE_FRESH_MS;
@@ -1021,6 +1033,16 @@ export class GameMultipath {
     route.transport.send(encode({ kind, path: route.pathSlot, session, flow: Buffer.alloc(8), sequence: this.controlSequence++ >>> 0,
       address: "0.0.0.0", port: 0, version: 2, exitNodeId: route.modern ? route.exitNodeId : "", hops: 0, payload: controlPayload(body) }));
   }
+  /** The token goes to the path's session and to every older session still carrying this exit's flows. */
+  private authenticate(route: Path): void {
+    const token = this.options.relayToken; if (!token || route.transport.closed) return;
+    this.authSent.set(route, `${route.instance ?? ""}:${route.session.toString("hex")}`);
+    const sessions = new Map([[route.session.toString("hex"), route.session]]);
+    for (const wire of this.wires.values()) if (wire.session && wire.exitId === route.exitNodeId && sessions.size < 8) sessions.set(wire.session.toString("hex"), wire.session);
+    for (const session of sessions.values()) route.transport.send(encode({ kind: Kind.Auth, path: route.pathSlot, session, flow: Buffer.alloc(8),
+      sequence: this.controlSequence++ >>> 0, address: "0.0.0.0", port: 0, version: 2, exitNodeId: route.modern ? route.exitNodeId : "", hops: 0,
+      payload: controlPayload({ token }) }));
+  }
   private requestMeasurements(only?: ProbeTarget[]): void {
     const targets = only ?? [...this.destinations.values()]; if (!targets.length || this.abort.signal.aborted) return;
     const nodes = new Set<string>();
@@ -1110,7 +1132,9 @@ export class GameMultipath {
       route.sent.delete(packet.sequence); route.instance = instance; route.misses = 0;
       route.lastLatencyMs = performance.now() - started; route.quality.push(route.lastLatencyMs); route.fast.push(route.lastLatencyMs);
       route.latencyMs = route.quality.snapshot().latencyMs;
-      route.lastReply = performance.now(); route.awaitingSince = null; if (route.modern) route.accepted = true; return;
+      route.lastReply = performance.now(); route.awaitingSince = null; if (route.modern) route.accepted = true;
+      if (this.options.relayToken && this.authSent.get(route) !== `${instance}:${route.session.toString("hex")}`) this.authenticate(route);
+      return;
     }
     if (packet.version === 2 && packet.kind >= Kind.NodeInfo && packet.kind !== Kind.Parity) {
       if (route.instance && packet.instance?.toString("hex") !== route.instance) return;
@@ -1164,6 +1188,11 @@ export class GameMultipath {
         this.anchors.set(route.exitNodeId, anchors.slice(0, 256));
         if (Number.isInteger(body.nextCursor) && Number(body.nextCursor) > 0 && Number(body.nextCursor) < 16)
           this.control(route, Kind.Regions, { cursor: Number(body.nextCursor) });
+      } else if (packet.kind === Kind.AuthResult && typeof body.status === "string") {
+        const note = `${route.exitNodeId}:${body.status}`;
+        if (body.status !== "ok" && !this.authNoted.has(note) && this.authNoted.size < 64) {
+          this.authNoted.add(note); this.log(`Game: узел ${route.exitNodeId} не принял ключ Levik Game (${body.status.slice(0, 16)})`);
+        }
       } else if (packet.kind === Kind.ProbeResult && Array.isArray(body.results)) {
         if (body.status === "service-unavailable" || !body.results.length) {
           this.measurements.delete(route.exitNodeId);
