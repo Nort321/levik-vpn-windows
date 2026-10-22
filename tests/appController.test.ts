@@ -168,7 +168,10 @@ describe("AppController login lifecycle", () => {
 });
 
 vi.mock("../src/main/vpn/tunnelHealth", () => ({ isTunnelHealthy: vi.fn(), TUNNEL_HEALTH_TAG: "levik-health", TUNNEL_HEALTH_PORT: 47186 }));
-vi.mock("../src/main/vpn/serverPinger", () => ({ measureServerLatencies: vi.fn() }));
+vi.mock("../src/main/vpn/serverPinger", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../src/main/vpn/serverPinger")>(),
+  measureServerLatencies: vi.fn(),
+}));
 
 import { isTunnelHealthy } from "../src/main/vpn/tunnelHealth";
 import { measureServerLatencies } from "../src/main/vpn/serverPinger";
