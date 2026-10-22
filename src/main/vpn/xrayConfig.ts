@@ -326,6 +326,9 @@ function ipv4Only(value: unknown): unknown {
   return Array.isArray(value) ? value.filter((cidr) => typeof cidr !== "string" || !cidr.includes(":")) : value;
 }
 
+/** The TUN adapter's IPv4 address; the Kill Switch finds the adapter by it. */
+export const TUNNEL_GATEWAY_V4 = "10.89.0.1";
+
 function tunInbound(dnsServer: string): Record<string, unknown> {
   return {
     tag: "levik-tun-in",
@@ -334,7 +337,7 @@ function tunInbound(dnsServer: string): Record<string, unknown> {
       name: "LevikVPN",
       desc: "Levik VPN",
       mtu: 1500,
-      gateway: ["10.89.0.1/30", "fdfe:89::1/126"],
+      gateway: [`${TUNNEL_GATEWAY_V4}/30`, "fdfe:89::1/126"],
       dns: [dnsServer],
       autoSystemRoutingTable: FULL_TUN_ROUTES,
       autoOutboundsInterface: "auto",

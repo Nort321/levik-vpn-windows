@@ -21,7 +21,8 @@ vi.mock("../src/main/update/appUpdater", () => ({
   },
 }));
 
-vi.mock("../src/main/windows/killSwitch", () => ({
+vi.mock("../src/main/windows/killSwitch", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../src/main/windows/killSwitch")>(),
   WindowsKillSwitch: class WindowsKillSwitch {},
 }));
 
@@ -172,6 +173,7 @@ vi.mock("../src/main/vpn/serverPinger", () => ({ measureServerLatencies: vi.fn()
 import { isTunnelHealthy } from "../src/main/vpn/tunnelHealth";
 import { measureServerLatencies } from "../src/main/vpn/serverPinger";
 import { prepareTunnelProfile } from "../src/main/vpn/tunnelProfile";
+import { KillSwitchError } from "../src/main/windows/killSwitch";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -245,6 +247,21 @@ describe("AppController tunnel recovery", () => {
     exited(controller);
     await vi.advanceTimersByTimeAsync(60_000);
     expect(xray.start).toHaveBeenCalledOnce();
+  });
+
+  it("connects without the Kill Switch when Windows refuses the tunnel permit", async () => {
+    const { controller, xray, killSwitch } = tunnelController();
+    killSwitch.allowTunnel.mockRejectedValueOnce(new KillSwitchError("Kill Switch не удалось allow-tunnel: код 1168", 1168));
+    await controller.connect();
+    expect(xray.isRunning()).toBe(true);
+    expect(killSwitch.disable).toHaveBeenCalledOnce();
+    expect(controller.snapshot()).toMatchObject({ status: "connected" });
+    expect(controller.snapshot().statusDetail).toContain("Kill Switch не включился (ошибка Windows 1168)");
+
+    await controller.disconnect();
+    killSwitch.disable.mockClear();
+    await controller.connect();
+    expect(controller.snapshot().statusDetail).not.toContain("Kill Switch");
   });
 
   it("does not leave connecting status when protection cleanup fails", async () => {

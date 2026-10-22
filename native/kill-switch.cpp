@@ -217,16 +217,6 @@ DWORD AddGameProbePermit(HANDLE engine) {
   return result;
 }
 
-DWORD AddInterfacePermit(HANDLE engine, UINT64 interfaceLuid, const GUID& layerKey, const GUID& filterKey) {
-  FWPM_FILTER_CONDITION0 condition{};
-  condition.fieldKey = FWPM_CONDITION_IP_LOCAL_INTERFACE;
-  condition.matchType = FWP_MATCH_EQUAL;
-  condition.conditionValue.type = FWP_UINT64;
-  condition.conditionValue.uint64 = &interfaceLuid;
-  return AddFilter(engine, kProviderKey, kSubLayerKey, filterKey, layerKey, FWP_ACTION_PERMIT,
-                   kPermitWeight, &condition, 1);
-}
-
 DWORD AddLoopbackPermit(HANDLE engine, const GUID& providerKey, const GUID& subLayerKey,
                         const GUID& layerKey, const GUID& filterKey) {
   // Local IPC (for example Battle.net <-> Agent.exe) never traverses the TUN.
@@ -354,32 +344,68 @@ DWORD Enable(const std::wstring& appPath, const std::wstring& xrayPath, const st
   return CommitTransaction(engine.get(), result);
 }
 
-DWORD FindInterfaceLuid(const std::wstring& friendlyName, UINT64& luid) {
+bool IsAdapterName(const wchar_t* candidate, const std::wstring& name) {
+  if (candidate == nullptr) return false;
+  const size_t length = wcslen(candidate);
+  if (length < name.size() || _wcsnicmp(candidate, name.c_str(), name.size()) != 0) return false;
+  if (length == name.size()) return true;
+  // Windows renames a newer adapter "LevikVPN 2" while a removed one still holds the name.
+  if (candidate[name.size()] != L' ' || length == name.size() + 1) return false;
+  for (size_t i = name.size() + 1; i < length; ++i) {
+    if (candidate[i] < L'0' || candidate[i] > L'9') return false;
+  }
+  return true;
+}
+
+bool HasUnicastAddress(const IP_ADAPTER_ADDRESSES* adapter, const IN_ADDR& address) {
+  for (const IP_ADAPTER_UNICAST_ADDRESS* unicast = adapter->FirstUnicastAddress; unicast != nullptr; unicast = unicast->Next) {
+    const SOCKADDR* socketAddress = unicast->Address.lpSockaddr;
+    if (socketAddress == nullptr || socketAddress->sa_family != AF_INET) continue;
+    if (reinterpret_cast<const SOCKADDR_IN*>(socketAddress)->sin_addr.S_un.S_addr == address.S_un.S_addr) return true;
+  }
+  return false;
+}
+
+// The tunnel adapter is the one holding the TUN gateway address; the name is
+// only a fallback, because Windows may rename it and keep a stale "LevikVPN".
+DWORD FindTunnelLuids(const std::wstring& friendlyName, const std::wstring* gateway, std::vector<UINT64>& luids) {
+  IN_ADDR gatewayAddress{};
+  if (gateway != nullptr && InetPtonW(AF_INET, gateway->c_str(), &gatewayAddress) != 1) return ERROR_INVALID_PARAMETER;
   ULONG size = 16 * 1024;
-  std::vector<BYTE> buffer(size);
-  ULONG result = GetAdaptersAddresses(AF_UNSPEC, GAA_FLAG_INCLUDE_ALL_INTERFACES, nullptr,
-                                      reinterpret_cast<IP_ADAPTER_ADDRESSES*>(buffer.data()), &size);
-  if (result == ERROR_BUFFER_OVERFLOW) {
+  std::vector<BYTE> buffer;
+  ULONG result = ERROR_BUFFER_OVERFLOW;
+  for (int attempt = 0; attempt < 4 && result == ERROR_BUFFER_OVERFLOW; ++attempt) {
     buffer.resize(size);
-    result = GetAdaptersAddresses(AF_UNSPEC, GAA_FLAG_INCLUDE_ALL_INTERFACES, nullptr,
+    result = GetAdaptersAddresses(AF_UNSPEC, GAA_FLAG_INCLUDE_ALL_INTERFACES | GAA_FLAG_SKIP_MULTICAST, nullptr,
                                   reinterpret_cast<IP_ADAPTER_ADDRESSES*>(buffer.data()), &size);
   }
   if (result != ERROR_SUCCESS) return result;
 
   for (IP_ADAPTER_ADDRESSES* adapter = reinterpret_cast<IP_ADAPTER_ADDRESSES*>(buffer.data());
        adapter != nullptr; adapter = adapter->Next) {
-    if (adapter->FriendlyName != nullptr && _wcsicmp(adapter->FriendlyName, friendlyName.c_str()) == 0 &&
-        adapter->OperStatus == IfOperStatusUp) {
-      luid = adapter->Luid.Value;
-      return ERROR_SUCCESS;
-    }
+    const bool byAddress = gateway != nullptr && HasUnicastAddress(adapter, gatewayAddress);
+    const bool byName = adapter->OperStatus == IfOperStatusUp && IsAdapterName(adapter->FriendlyName, friendlyName);
+    if (byAddress || byName) luids.push_back(adapter->Luid.Value);
   }
-  return ERROR_NOT_FOUND;
+  return luids.empty() ? ERROR_NOT_FOUND : ERROR_SUCCESS;
 }
 
-DWORD AllowTunnel(const std::wstring& friendlyName) {
-  UINT64 interfaceLuid = 0;
-  DWORD result = FindInterfaceLuid(friendlyName, interfaceLuid);
+DWORD AddInterfacePermits(HANDLE engine, std::vector<UINT64>& luids, const GUID& layerKey, const GUID& filterKey) {
+  // Conditions on the same field are OR'ed by WFP.
+  std::vector<FWPM_FILTER_CONDITION0> conditions(luids.size());
+  for (size_t i = 0; i < luids.size(); ++i) {
+    conditions[i].fieldKey = FWPM_CONDITION_IP_LOCAL_INTERFACE;
+    conditions[i].matchType = FWP_MATCH_EQUAL;
+    conditions[i].conditionValue.type = FWP_UINT64;
+    conditions[i].conditionValue.uint64 = &luids[i];
+  }
+  return AddFilter(engine, kProviderKey, kSubLayerKey, filterKey, layerKey, FWP_ACTION_PERMIT,
+                   kPermitWeight, conditions.data(), static_cast<UINT32>(conditions.size()));
+}
+
+DWORD AllowTunnel(const std::wstring& friendlyName, const std::wstring* gateway) {
+  std::vector<UINT64> luids;
+  DWORD result = FindTunnelLuids(friendlyName, gateway, luids);
   if (result != ERROR_SUCCESS) return result;
 
   EngineHandle engine;
@@ -387,8 +413,8 @@ DWORD AllowTunnel(const std::wstring& friendlyName) {
   if ((result = BeginTransaction(engine.get())) != ERROR_SUCCESS) return result;
   result = IgnoreMissingFilter(FwpmFilterDeleteByKey0(engine.get(), &kTunnelV4Key));
   if (result == ERROR_SUCCESS) result = IgnoreMissingFilter(FwpmFilterDeleteByKey0(engine.get(), &kTunnelV6Key));
-  if (result == ERROR_SUCCESS) result = AddInterfacePermit(engine.get(), interfaceLuid, FWPM_LAYER_ALE_AUTH_CONNECT_V4, kTunnelV4Key);
-  if (result == ERROR_SUCCESS) result = AddInterfacePermit(engine.get(), interfaceLuid, FWPM_LAYER_ALE_AUTH_CONNECT_V6, kTunnelV6Key);
+  if (result == ERROR_SUCCESS) result = AddInterfacePermits(engine.get(), luids, FWPM_LAYER_ALE_AUTH_CONNECT_V4, kTunnelV4Key);
+  if (result == ERROR_SUCCESS) result = AddInterfacePermits(engine.get(), luids, FWPM_LAYER_ALE_AUTH_CONNECT_V6, kTunnelV6Key);
   return CommitTransaction(engine.get(), result);
 }
 
@@ -776,7 +802,7 @@ DWORD SelfTest() {
 
 int wmain(int argc, wchar_t* argv[]) {
   if (argc < 2) {
-    std::wcerr << L"Usage: levik-kill-switch <enable APP XRAY [TUIC]|allow-tunnel|disable|status|cleanup-legacy|outbound-interfaces|game-probe SOURCE TARGET TTL|self-test>\n";
+    std::wcerr << L"Usage: levik-kill-switch <enable APP XRAY [TUIC]|allow-tunnel NAME [GATEWAY]|disable|status|cleanup-legacy|outbound-interfaces|game-probe SOURCE TARGET TTL|self-test>\n";
     return ERROR_INVALID_PARAMETER;
   }
 
@@ -787,7 +813,11 @@ int wmain(int argc, wchar_t* argv[]) {
     const std::wstring tuicPath = argv[4];
     result = Enable(argv[2], argv[3], &tuicPath);
   }
-  else if (command == L"allow-tunnel" && argc == 3) result = AllowTunnel(argv[2]);
+  else if (command == L"allow-tunnel" && argc == 3) result = AllowTunnel(argv[2], nullptr);
+  else if (command == L"allow-tunnel" && argc == 4) {
+    const std::wstring gateway = argv[3];
+    result = AllowTunnel(argv[2], &gateway);
+  }
   else if (command == L"disable" && argc == 2) result = Disable();
   else if (command == L"status" && argc == 2) result = Status();
   else if (command == L"cleanup-legacy" && argc == 3) result = CleanupLegacyConfig(argv[2]);

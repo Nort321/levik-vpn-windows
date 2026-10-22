@@ -123,6 +123,26 @@ describe("TelemetryQueue", () => {
     expect(await queue.pending()).toEqual([]);
   });
 
+  it("keeps a sent checkpoint of an unfinished session until its final report is sent", async () => {
+    const time = clock();
+    const queue = new TelemetryQueue(directory, time.now);
+    const session = new SessionRecorder(CLIENT, "user", SETTINGS, time.now);
+    const checkpoint = session.snapshot();
+    await queue.put({ startedAt: session.startedAt, savedAt: time.now(), body: checkpoint });
+    await queue.acknowledge([{ sid: session.sid, seq: checkpoint.seq }]);
+    expect(await queue.pending()).toEqual([]);
+    // The app was killed here; a later start still finds the session to finish it.
+    const restarted = new TelemetryQueue(directory, time.now);
+    expect((await restarted.unfinished()).map((entry) => entry.body.sid)).toEqual([session.sid]);
+    session.end("unknown", null);
+    const final = session.snapshot();
+    await restarted.put({ startedAt: session.startedAt, savedAt: time.now(), body: final });
+    expect((await restarted.pending()).map((entry) => entry.body.final)).toEqual([true]);
+    await restarted.acknowledge([{ sid: session.sid, seq: final.seq }]);
+    expect(await restarted.unfinished()).toEqual([]);
+    expect(await restarted.pending()).toEqual([]);
+  });
+
   it("rotates the install id every UTC day and drops week-old reports", async () => {
     const time = clock();
     const queue = new TelemetryQueue(directory, time.now);

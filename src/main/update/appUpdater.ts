@@ -7,10 +7,16 @@ type UpdateSnapshot = AppSnapshot["update"];
 
 interface AppUpdaterEvents {
   changed: [snapshot: UpdateSnapshot];
+  /** A newer published version exists; fired on every check that finds it. */
+  available: [version: string];
 }
+
+/** Users rarely restart a tray app, so a launch-time check alone misses releases for weeks. */
+const PERIODIC_CHECK_MS = 4 * 60 * 60_000;
 
 export class AppUpdater extends EventEmitter<AppUpdaterEvents> {
   private state: UpdateSnapshot = { status: "idle", version: null, progress: null, message: null };
+  private periodicTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor() {
     super();
@@ -20,11 +26,25 @@ export class AppUpdater extends EventEmitter<AppUpdaterEvents> {
     const updateUrlOverride = process.env.LEVIK_UPDATE_URL;
     if (updateUrlOverride) autoUpdater.setFeedURL({ provider: "generic", url: updateUrlOverride });
     autoUpdater.on("checking-for-update", () => this.patch({ status: "checking", message: "Проверяем обновления…" }));
-    autoUpdater.on("update-available", (info) => this.patch({ status: "available", version: info.version, progress: 0, message: `Доступна версия ${info.version}` }));
+    autoUpdater.on("update-available", (info) => {
+      // A later silent check must not hide a download or a ready installer.
+      if (["downloading", "downloaded", "installing"].includes(this.state.status)) return;
+      this.patch({ status: "available", version: info.version, progress: 0, message: `Доступна версия ${info.version}` });
+      this.emit("available", info.version);
+    });
     autoUpdater.on("update-not-available", () => this.patch({ status: "upToDate", version: app.getVersion(), progress: null, message: "Установлена актуальная версия" }));
     autoUpdater.on("download-progress", (progress) => this.patch({ status: "downloading", progress: Math.round(progress.percent), message: "Загрузка обновления…" }));
     autoUpdater.on("update-downloaded", (info) => this.patch({ status: "downloaded", version: info.version, progress: 100, message: "Обновление готово к установке" }));
     autoUpdater.on("error", (error) => this.patch({ status: "error", progress: null, message: safeUpdateError(error) }));
+  }
+
+  startPeriodicChecks(): void {
+    if (this.periodicTimer) return;
+    this.periodicTimer = setInterval(() => {
+      if (["checking", "downloading", "downloaded", "installing"].includes(this.state.status)) return;
+      void this.check(true);
+    }, PERIODIC_CHECK_MS);
+    this.periodicTimer.unref();
   }
 
   snapshot(): UpdateSnapshot {

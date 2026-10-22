@@ -8,6 +8,8 @@ export interface QueuedSession {
   startedAt: number;
   savedAt: number;
   body: TelemetrySessionBody;
+  /** The checkpoint the server already has; kept until a final report replaces it. */
+  sentSeq?: number;
 }
 
 interface QueueFile {
@@ -64,24 +66,41 @@ export class TelemetryQueue {
     await this.save(epoch);
   }
 
+  /** Checkpoints the server does not have yet. */
   async pending(): Promise<QueuedSession[]> {
-    const epoch = this.epoch;
-    const state = await this.load();
-    if (this.prune(state)) await this.save(epoch);
-    return state.sessions.map((entry) => structuredClone(entry));
+    return (await this.all()).filter((entry) => entry.sentSeq === undefined || entry.body.seq > entry.sentSeq);
   }
 
-  /** Removes sent checkpoints unless a newer one was queued meanwhile. */
+  /** Sessions never ended, sent or not: an app killed after a send must still finalize them. */
+  async unfinished(): Promise<QueuedSession[]> {
+    return (await this.all()).filter((entry) => !entry.body.final);
+  }
+
+  /**
+   * Final reports leave the queue once sent. A sent non-final checkpoint stays,
+   * marked as sent, so a later start can finish the session it belongs to.
+   */
   async acknowledge(sent: ReadonlyArray<{ sid: string; seq: number }>): Promise<void> {
     const epoch = this.epoch;
     const state = await this.load();
     const sentSeq = new Map(sent.map((item) => [item.sid, item.seq]));
-    const before = state.sessions.length;
+    let changed = false;
     state.sessions = state.sessions.filter((entry) => {
       const seq = sentSeq.get(entry.body.sid);
-      return seq === undefined || entry.body.seq > seq;
+      if (seq === undefined || entry.body.seq > seq) return true;
+      changed = true;
+      if (entry.body.final) return false;
+      entry.sentSeq = entry.body.seq;
+      return true;
     });
-    if (state.sessions.length !== before) await this.save(epoch);
+    if (changed) await this.save(epoch);
+  }
+
+  private async all(): Promise<QueuedSession[]> {
+    const epoch = this.epoch;
+    const state = await this.load();
+    if (this.prune(state)) await this.save(epoch);
+    return state.sessions.map((entry) => structuredClone(entry));
   }
 
   async clear(): Promise<void> {
@@ -147,5 +166,6 @@ function isQueueFile(value: unknown): value is QueueFile {
     && candidate.sessions.every((entry) => typeof entry === "object" && entry !== null
       && typeof entry.startedAt === "number" && typeof entry.savedAt === "number"
       && typeof entry.body === "object" && entry.body !== null && typeof entry.body.sid === "string"
-      && typeof entry.body.seq === "number");
+      && typeof entry.body.seq === "number"
+      && (entry.sentSeq === undefined || typeof entry.sentSeq === "number"));
 }

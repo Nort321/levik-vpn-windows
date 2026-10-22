@@ -28,7 +28,7 @@ describe("Windows Kill Switch lifecycle", () => {
 
     expect(commands).toEqual([
       ["enable", "C:\\Levik\\Levik VPN.exe", "C:\\Levik\\xray.exe"],
-      ["allow-tunnel", "LevikVPN"],
+      ["allow-tunnel", "LevikVPN", "10.89.0.1"],
       ["disable"],
     ]);
     expect(killSwitch.isActive()).toBe(false);
@@ -137,13 +137,13 @@ describe("Wintun readiness", () => {
     vi.useFakeTimers();
     const commands: string[][] = [];
     const killSwitch = new WindowsKillSwitch(() => "xray.exe", {
-      platform: "win32", helperExecutablePath: "helper.exe", run: recordingRunner(commands, [0, ...Array<number>(21).fill(1168)]),
+      platform: "win32", helperExecutablePath: "helper.exe", run: recordingRunner(commands, [0, ...Array<number>(41).fill(1168)]),
     });
     await killSwitch.enable();
     const pending = expect(killSwitch.allowTunnel()).rejects.toThrow("1168");
-    await vi.advanceTimersByTimeAsync(5_000);
+    await vi.advanceTimersByTimeAsync(10_000);
     await pending;
-    expect(commands).toHaveLength(22);
+    expect(commands).toHaveLength(42);
   });
 
   it("does not retry permission errors", async () => {

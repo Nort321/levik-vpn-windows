@@ -432,7 +432,10 @@ async function waitForStartup(child: ChildProcess): Promise<void> {
       if (error) reject(error);
       else resolve();
     };
-    const onExit = (code: number | null): void => finish(new Error(`Xray завершился при запуске (код ${code ?? "unknown"})`));
+    // Exit code -1 (4294967295) is a process terminated from outside, usually by an antivirus.
+    const onExit = (code: number | null): void => finish(new Error(code === -1 || code === 4294967295
+      ? "Ядро VPN было остановлено при запуске, скорее всего антивирусом. Добавьте папку Levik VPN в исключения антивируса и подключитесь снова."
+      : `Xray завершился при запуске (код ${code ?? "unknown"})`));
     const onError = (error: Error): void => finish(error);
     const timer = setTimeout(() => finish(), 1_500);
     child.once("exit", onExit);

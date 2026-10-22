@@ -155,9 +155,8 @@ export class ConnectionTelemetry {
 
   /** A checkpoint left by an app that stopped without ending its session. */
   private async finishInterrupted(): Promise<void> {
-    const pending = await this.queue.pending();
-    for (const entry of pending) {
-      if (entry.body.final || entry.body.sid === this.session?.sid) continue;
+    for (const entry of await this.queue.unfinished()) {
+      if (entry.body.sid === this.session?.sid) continue;
       const lastT = entry.body.timeline.at(-1)?.t ?? 0;
       await this.queue.put({
         ...entry,

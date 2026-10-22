@@ -1,9 +1,18 @@
 import { execFile } from "node:child_process";
+import { TUNNEL_GATEWAY_V4 } from "../vpn/xrayConfig";
 import { windowsHelperPath } from "./helperPath";
 
 interface HelperResult {
   exitCode: number;
   errorText: string;
+}
+
+/** A failed helper command; telemetry reports its Windows error code. */
+export class KillSwitchError extends Error {
+  constructor(message: string, readonly exitCode: number) {
+    super(message);
+    this.name = "KillSwitchError";
+  }
 }
 
 export type KillSwitchCommandRunner = (arguments_: string[]) => Promise<HelperResult>;
@@ -16,6 +25,9 @@ interface WindowsKillSwitchOptions {
   tuicExecutablePath?: () => string;
   run?: KillSwitchCommandRunner;
 }
+
+// 40 × 250 ms: a slow machine (or an antivirus scanning each helper run) needs longer than 5 s.
+const ALLOW_TUNNEL_RETRIES = 40;
 
 export class WindowsKillSwitch {
   private active = false;
@@ -85,11 +97,11 @@ export class WindowsKillSwitch {
     if (this.platform !== "win32" || !this.active) return;
     // Wintun can still be registering after Xray has passed its startup grace period.
     // Retry only ERROR_NOT_FOUND; permission/filter errors must fail immediately.
-    for (let attempt = 0; attempt <= 20 && this.active; attempt += 1) {
+    for (let attempt = 0; attempt <= ALLOW_TUNNEL_RETRIES && this.active; attempt += 1) {
       const result = await this.serialize(() => this.active
-        ? this.run(["allow-tunnel", "LevikVPN"])
+        ? this.run(["allow-tunnel", "LevikVPN", TUNNEL_GATEWAY_V4])
         : Promise.resolve({ exitCode: 0, errorText: "" }));
-      if (result.exitCode !== 1168 || attempt === 20) {
+      if (result.exitCode !== 1168 || attempt === ALLOW_TUNNEL_RETRIES) {
         this.assertSuccessful(result, "allow-tunnel");
         return;
       }
@@ -126,7 +138,7 @@ export class WindowsKillSwitch {
 
   private assertSuccessful(result: HelperResult, operation: string): void {
     if (result.exitCode === 0) return;
-    throw new Error(`Kill Switch не удалось ${operation}: ${result.errorText || `код ${result.exitCode}`}`);
+    throw new KillSwitchError(`Kill Switch не удалось ${operation}: ${result.errorText || `код ${result.exitCode}`}`, result.exitCode);
   }
 }
 

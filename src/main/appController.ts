@@ -48,7 +48,7 @@ import {
 } from "./vpn/smartAuto";
 import { measureServerLatencies } from "./vpn/serverPinger";
 import { DnsLeakProtection } from "./windows/dnsLeakProtection";
-import { WindowsKillSwitch } from "./windows/killSwitch";
+import { KillSwitchError, WindowsKillSwitch } from "./windows/killSwitch";
 import { AppUpdater } from "./update/appUpdater";
 import { normalizeProcessSelection } from "../shared/processes";
 import { classifyCoreLogLine, networkTypeOfInterface, protocolOf } from "./telemetry/codes";
@@ -263,6 +263,9 @@ export class AppController extends EventEmitter<AppControllerEvents> {
   private tunnelHealthCheckRunning = false;
   private tunnelHealthFailures = 0;
   private coreFailure: string | null = null;
+  /** Why this tunnel runs without the Kill Switch the user enabled. */
+  private killSwitchFailure: string | null = null;
+  private announcedUpdateVersion: string | null = null;
   private readonly failedServerIds = new Set<string>();
   private latenciesMeasuredAt = 0;
   /** Smart Auto, docs/app-platform.md: which protocols carried traffic on which network. */
@@ -374,6 +377,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     try {
       this.updater = new AppUpdater();
       this.updater.on("changed", (update) => this.patch({ update }));
+      this.updater.on("available", (version) => this.announceUpdate(version));
     } catch (error) {
       this.updater = null;
       this.state.update = { status: "error", version: null, progress: null, message: `Модуль обновлений недоступен: ${messageOf(error)}` };
@@ -502,6 +506,18 @@ export class AppController extends EventEmitter<AppControllerEvents> {
       }
     }
     void this.updater?.check(true);
+    this.updater?.startPeriodicChecks();
+  }
+
+  /** One system notification per new version; the home screen keeps showing the banner. */
+  private announceUpdate(version: string): void {
+    if (this.announcedUpdateVersion === version) return;
+    this.announcedUpdateVersion = version;
+    this.emit("notify", {
+      title: `Доступна новая версия Levik VPN ${version}`,
+      body: "Откройте приложение, чтобы скачать и установить обновление.",
+      tab: "home",
+    });
   }
 
   snapshot(): AppSnapshot {
@@ -688,7 +704,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
       this.reconnectAttempts = 0;
       this.patch({
         status: "connected",
-        statusDetail: `Защищено через ${server.name}`,
+        statusDetail: this.connectedDetail(server),
         sessionStartedAt: Date.now(),
       });
       // The tunnel works, so whatever else is running does not block it.
@@ -2043,7 +2059,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
           this.tunnelHealthFailures = 0;
           this.failedServerIds.clear();
           this.recoveryCause = null;
-          this.patch({ status: "connected", statusDetail: `Защищено через ${this.selectedServer()?.name ?? "VPN"}` });
+          this.patch({ status: "connected", statusDetail: this.connectedDetail(this.selectedServer()) });
           this.recordConnected();
         } catch (error) {
           try {
@@ -2096,7 +2112,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
         this.beginTunnelRecovery("VPN-сервер перестал передавать трафик. Восстановление…", cause);
       } else if (healthy && this.recoveryHeldForMatch) {
         this.recoveryHeldForMatch = false;
-        this.patch({ statusDetail: `Защищено через ${this.selectedServer()?.name ?? "VPN"}` });
+        this.patch({ statusDetail: this.connectedDetail(this.selectedServer()) });
       }
     } catch (error) {
       this.addLog(`Проверка туннеля: ${messageOf(error)}`);
@@ -2106,13 +2122,19 @@ export class AppController extends EventEmitter<AppControllerEvents> {
   }
 
   private async verifyTunnelReadiness(generation: number, onFailure?: (codes: string[]) => void): Promise<void> {
+    let failures: string[] = [];
     const healthy = await isTunnelHealthy({
       startup: true,
       shouldContinue: () => generation === this.connectionGeneration && this.xray.isRunning(),
-      onFailure,
+      onFailure: (codes) => { failures = codes; onFailure?.(codes); },
     });
     this.assertCurrentConnection(generation);
-    if (!healthy) throw new Error("Не удалось подтвердить доступ в интернет через VPN. Повторите подключение или выберите другой сервер.");
+    if (healthy) return;
+    // The core's local port never answered: it was stopped or blocked on this computer, not by the server.
+    if (!this.xray.isRunning() || (failures.length && failures.every((code) => code === "no_vpn_network"))) {
+      throw new Error("Ядро VPN не запустилось на этом компьютере. Чаще всего его блокирует антивирус: добавьте папку Levik VPN в исключения и подключитесь снова.");
+    }
+    throw new Error("Не удалось подтвердить доступ в интернет через VPN. Повторите подключение или выберите другой сервер.");
   }
 
   private runTunnelOperation(operation: () => Promise<void>): Promise<void> {
@@ -2199,6 +2221,32 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     }
   }
 
+  /**
+   * Opens the boundary for the tunnel adapter. Should Windows refuse, the tunnel
+   * runs without the Kill Switch: failing the connection would release the
+   * boundary anyway and leave the traffic outside any VPN.
+   */
+  private async allowTunnelThroughKillSwitch(): Promise<void> {
+    try {
+      await this.killSwitch.allowTunnel();
+      this.killSwitchFailure = null;
+    } catch (error) {
+      if (!(error instanceof KillSwitchError)) throw error;
+      const code = `killswitch_${error.exitCode}`;
+      this.telemetry.record((session) => session.coreLog(code));
+      await this.killSwitch.disable();
+      this.killSwitchFailure = `ошибка Windows ${error.exitCode}`;
+      this.addLog(`${error.message}. VPN работает без Kill Switch`);
+    }
+  }
+
+  private connectedDetail(server: TunnelServer | null): string {
+    const name = server?.name ?? "VPN";
+    return this.killSwitchFailure
+      ? `Защищено через ${name}. Kill Switch не включился (${this.killSwitchFailure})`
+      : `Защищено через ${name}`;
+  }
+
   private async startXray(config: Record<string, unknown>, generation: number): Promise<void> {
     this.assertCurrentConnection(generation);
     const gameTuic = this.state.settings.gameEnabled && this.profile?.game?.enabled
@@ -2206,7 +2254,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     await this.xray.start(config, this.lastTuic, gameTuic);
     try {
       this.assertCurrentConnection(generation);
-      await this.killSwitch.allowTunnel();
+      await this.allowTunnelThroughKillSwitch();
       this.assertCurrentConnection(generation);
       if (this.state.settings.gameEnabled) {
         this.cancelGameProbes();

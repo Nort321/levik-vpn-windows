@@ -123,7 +123,7 @@ function render(preserveScroll = true): void {
           <div class="status-subtitle">${escapeHtml(state.statusDetail ?? "VPN готов к подключению")}</div>
         </div>
       </aside>
-      <main class="content"><div class="content-inner">${renderElevationNotice()}${renderConflicts()}${renderAnnouncements()}${renderTelemetryNotice()}${renderPage()}</div></main>
+      <main class="content"><div class="content-inner">${renderElevationNotice()}${renderUpdateNotice()}${renderConflicts()}${renderAnnouncements()}${renderTelemetryNotice()}${renderPage()}</div></main>
     </div>
     ${showProcessDialog ? renderProcessDialog() : ""}
     ${devicesSubscriptionId ? renderDevicesDialog(devicesSubscriptionId) : ""}
@@ -520,6 +520,30 @@ function renderAnnouncements(): string {
     <div class="announcement-copy"><h2 class="card-title" id="announcement-${escapeAttribute(item.id)}">${escapeHtml(item.title)}</h2><p class="card-caption">${escapeHtml(item.body)}</p></div>
     <div class="announcement-actions">${item.linkUrl ? `<button class="button compact" data-announcement-link="${escapeAttribute(item.linkUrl)}">${icon("external")} Подробнее</button>` : ""}<button class="button icon-button" data-dismiss-announcement="${escapeAttribute(item.id)}" aria-label="Скрыть сообщение">${icon("close")}</button></div>
   </section>`).join("");
+}
+
+// Per-device convenience only: the banner comes back for the next version.
+const DISMISSED_UPDATE_KEY = "levik.dismissedUpdateVersion";
+
+function dismissedUpdateVersion(): string | null {
+  try { return window.localStorage.getItem(DISMISSED_UPDATE_KEY); } catch { return null; }
+}
+
+function renderUpdateNotice(): string {
+  const update = state?.update;
+  if (!update?.version || !["available", "downloading", "downloaded", "installing"].includes(update.status)) return "";
+  if (update.status === "available" && dismissedUpdateVersion() === update.version) return "";
+  const busy = update.status === "downloading" || update.status === "installing";
+  const label = update.status === "downloaded" ? "Установить и перезапустить"
+    : update.status === "downloading" ? `Загрузка ${update.progress ?? 0}%`
+    : update.status === "installing" ? "Установка…" : "Скачать";
+  const caption = update.status === "downloaded"
+    ? "Обновление загружено. VPN отключится на время установки и приложение перезапустится."
+    : `Сейчас установлена версия ${state?.appVersion ?? ""}. В новой версии исправления и улучшения подключения.`;
+  return `<section class="announcement card" role="status" aria-labelledby="update-notice-title">
+    <div class="announcement-copy"><h2 class="card-title" id="update-notice-title">Доступна новая версия ${escapeHtml(update.version)}</h2><p class="card-caption">${escapeHtml(caption)}</p></div>
+    <div class="announcement-actions"><button class="button primary compact" id="update-notice-button" ${busy ? "disabled aria-busy=\"true\"" : ""}>${icon(update.status === "downloaded" ? "install" : "update")} ${label}</button>${update.status === "available" ? `<button class="button icon-button" id="update-notice-dismiss" aria-label="Скрыть до следующей версии">${icon("close")}</button>` : ""}</div>
+  </section>`;
 }
 
 function renderElevationNotice(): string {
@@ -1036,6 +1060,15 @@ function bindPageEvents(): void {
     const id = button.dataset.dismissAnnouncement;
     if (id) void run(() => window.levik.dismissAnnouncement(id));
   }));
+  document.getElementById("update-notice-button")?.addEventListener("click", () => run(() => {
+    if (state?.update.status === "downloaded") return window.levik.installUpdate();
+    return window.levik.downloadUpdate();
+  }));
+  document.getElementById("update-notice-dismiss")?.addEventListener("click", () => {
+    const version = state?.update.version;
+    if (version) { try { window.localStorage.setItem(DISMISSED_UPDATE_KEY, version); } catch { /* storage unavailable */ } }
+    render();
+  });
   document.getElementById("update-button")?.addEventListener("click", () => run(() => {
     if (state?.update.status === "downloaded") return window.levik.installUpdate();
     if (state?.update.status === "available") return window.levik.downloadUpdate();
