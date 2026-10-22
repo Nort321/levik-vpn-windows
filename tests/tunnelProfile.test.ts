@@ -29,6 +29,20 @@ const settings: AppSettings = {
 };
 
 describe("Windows tunnel profile", () => {
+  const stubProfile = (content: string, game?: unknown) => Buffer.from(JSON.stringify({
+    version: 1, profileId: "stub", subscriptionId: "sub", issuedAt: new Date().toISOString(),
+    source: { mediaType: "text/plain", content }, ...(game ? { game } : {}),
+  }));
+  const stub = (remark: string) => `vless://00000000-0000-0000-0000-000000000000@0.0.0.0:1?encryption=none&type=tcp#${encodeURIComponent(remark)}`;
+
+  it("never offers Remnawave's stub link as a server", () => {
+    expect(() => prepareTunnelProfile(stubProfile(stub("Подписка закончилась · продлите в боте")), "sub"))
+      .toThrow("Подписка закончилась · продлите в боте");
+    expect(() => prepareTunnelProfile(stubProfile(stub("Серверы временно недоступны")), "sub")).toThrow("Только Game");
+    const mixed = prepareTunnelProfile(stubProfile(`${stub("Серверы временно недоступны")}\nvless://11111111-1111-4111-8111-111111111111@example.com:443?encryption=none&type=tcp#DE`), "sub");
+    expect(mixed.servers.map((server) => server.name)).toEqual(["DE"]);
+  });
+
   it("converts VLESS Reality share links without exposing Android dependencies", () => {
     const profile = {
       version: 1,

@@ -64,12 +64,16 @@ export function prepareTunnelProfile(plaintext: Uint8Array, expectedSubscription
   if (raw.version !== 1 || raw.subscriptionId !== expectedSubscriptionId) throw new Error("Профиль не соответствует подписке");
   if (!/^[A-Za-z0-9._:-]{1,128}$/.test(raw.profileId)) throw new Error("Некорректный идентификатор профиля");
   if (!raw.source || typeof raw.source.content !== "string") throw new Error("Профиль не содержит конфигурацию");
-  const servers = parseSource(raw.source.content);
-  if (servers.length === 0 || servers.length > 512) throw new Error("В профиле нет совместимых серверов");
+  const parsed = parseSource(raw.source.content);
+  // Remnawave's stub links (expired, traffic used up, no ordinary servers…) are never servers.
+  const placeholders = parsed.filter(isSubscriptionPlaceholder);
+  const servers = parsed.filter((server) => !placeholders.includes(server));
   const game = parseGameAccess(raw.game, servers);
   const ordinary = servers.filter((server) => !game.servers.includes(server));
   // Only the explicit flag: game servers never fall into ordinary selection by accident.
   const gameOnly = game.servers.length > 0 && isRecord(raw.game) && raw.game.only === true;
+  if (!gameOnly && ordinary.length === 0 && placeholders[0]) throw new Error(placeholderMessage(placeholders[0].name));
+  if (servers.length === 0 || servers.length > 512) throw new Error("В профиле нет совместимых серверов");
   return {
     profileId: raw.profileId,
     subscriptionId: raw.subscriptionId,
@@ -81,6 +85,19 @@ export function prepareTunnelProfile(plaintext: Uint8Array, expectedSubscription
     directDomains: validateDomains(raw.routing?.directDomains ?? []),
     proxyDomains: validateDomains(raw.routing?.proxyDomains ?? []),
   };
+}
+
+/** Remnawave's stub link: VLESS to 0.0.0.0:1 named after the reason. */
+export function isSubscriptionPlaceholder(server: TunnelServer): boolean {
+  const endpoint = extractServerEndpoint(server.outbound);
+  return server.outbound.protocol === "vless" && endpoint?.host === "0.0.0.0" && endpoint.port === 1;
+}
+
+/** The stub's name is the panel's explanation, e.g. "Подписка закончилась · продлите в боте". */
+function placeholderMessage(name: string): string {
+  return /недоступн/i.test(name)
+    ? "В подписке сейчас нет серверов обычного VPN. Если у вас тариф «Только Game», включите Levik Game на вкладке Game; иначе обновите подписку или напишите в поддержку."
+    : name;
 }
 
 function parseGameAccess(value: unknown, servers: TunnelServer[]): NonNullable<PreparedTunnelProfile["game"]> {
