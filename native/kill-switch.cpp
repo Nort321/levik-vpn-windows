@@ -104,12 +104,14 @@ class WinHandle {
   HANDLE value_ = INVALID_HANDLE_VALUE;
 };
 
+// English only: std::wcerr runs in the "C" locale, where a localized (e.g. Cyrillic)
+// message puts the stream into a failed state and the app receives an empty stderr.
 std::wstring ErrorMessage(DWORD code) {
   wchar_t* raw = nullptr;
   const DWORD length = FormatMessageW(
       FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
-      nullptr, code, 0, reinterpret_cast<wchar_t*>(&raw), 0, nullptr);
-  std::wstring message = length != 0 && raw != nullptr ? std::wstring(raw, length) : L"Windows error " + std::to_wstring(code);
+      nullptr, code, MAKELANGID(LANG_ENGLISH, SUBLANG_ENGLISH_US), reinterpret_cast<wchar_t*>(&raw), 0, nullptr);
+  std::wstring message = length != 0 && raw != nullptr ? std::wstring(raw, length) : L"no description";
   if (raw != nullptr) LocalFree(raw);
   while (!message.empty() && (message.back() == L'\r' || message.back() == L'\n')) message.pop_back();
   return message;
@@ -807,7 +809,7 @@ int wmain(int argc, wchar_t* argv[]) {
   }
 
   if (result != ERROR_SUCCESS && result != 2 && result != 3) {
-    std::wcerr << ErrorMessage(result) << L" (" << result << L")\n";
+    std::wcerr << L"Windows error " << result << L": " << ErrorMessage(result) << L"\n";
   }
   return static_cast<int>(result);
 }

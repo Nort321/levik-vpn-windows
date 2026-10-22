@@ -142,7 +142,8 @@ async function runHelper(executablePath: string, arguments_: string[]): Promise<
         return;
       }
       if (typeof error.code === "number") {
-        resolve({ exitCode: error.code, errorText: stderr.trim() || error.message });
+        // error.message only repeats the command line; an empty errorText reports the exit code.
+        resolve({ exitCode: error.code, errorText: stderr.trim() });
         return;
       }
       reject(error);
