@@ -27,6 +27,7 @@ vi.mock("../src/main/windows/killSwitch", async (importOriginal) => ({
 }));
 
 import { AppController } from "../src/main/appController";
+import { CoreStartError } from "../src/main/vpn/xrayManager";
 import { nodeIdForHost } from "../src/main/platform/favoriteNodes";
 
 describe("AppController login lifecycle", () => {
@@ -503,17 +504,49 @@ describe("AppController tunnel recovery", () => {
     expect(killSwitch.disable).toHaveBeenCalledOnce();
   });
 
-  it("cancels an initial connection while Xray is still starting", async () => {
+  it("cancels an initial connection while Xray is still starting without reporting it as a failure", async () => {
     const { controller, xray, killSwitch } = tunnelController();
     let finishStart: (() => void) | undefined;
     xray.start.mockImplementationOnce(() => new Promise<void>((resolve) => { finishStart = resolve; }));
-    const connecting = expect(controller.connect()).rejects.toThrow("отменено");
+    const connecting = controller.connect();
     await vi.advanceTimersByTimeAsync(0);
     const disconnect = controller.disconnect();
     finishStart?.();
-    await Promise.all([connecting, disconnect]);
+    await expect(Promise.all([connecting, disconnect])).resolves.toBeDefined();
     expect(controller.snapshot().status).toBe("disconnected");
     expect(killSwitch.allowTunnel).not.toHaveBeenCalled();
+  });
+
+  it("ends a core left from a crash and starts again when the new core cannot take the adapter", async () => {
+    const { controller, xray } = tunnelController();
+    xray.start.mockRejectedValueOnce(new CoreStartError("Windows ещё не освободил сетевой адаптер Levik VPN.", true));
+    const stopLeftoverCores = vi.fn(async () => true);
+    Reflect.set(controller, "stopLeftoverCores", stopLeftoverCores);
+    await controller.connect();
+    expect(stopLeftoverCores).toHaveBeenCalledOnce();
+    expect(xray.start).toHaveBeenCalledTimes(2);
+    expect(controller.snapshot().status).toBe("connected");
+  });
+
+  it("reports the core's own start failure when no leftover core is in the way", async () => {
+    const { controller, xray } = tunnelController();
+    xray.start.mockRejectedValueOnce(new CoreStartError("Windows ещё не освободил сетевой адаптер Levik VPN.", true));
+    Reflect.set(controller, "stopLeftoverCores", vi.fn(async () => false));
+    Reflect.set(controller, "explainFailureByConflicts", vi.fn(async () => {}));
+    await expect(controller.connect()).rejects.toThrow("сетевой адаптер");
+    expect(xray.start).toHaveBeenCalledOnce();
+    expect(controller.snapshot()).toMatchObject({ status: "error", statusDetail: expect.stringContaining("сетевой адаптер") });
+  });
+
+  it("never blames other apps when the server, not this computer, failed", async () => {
+    const { controller } = tunnelController();
+    vi.mocked(isTunnelHealthy).mockResolvedValue(false);
+    const explain = vi.fn(async () => {});
+    Reflect.set(controller, "explainFailureByConflicts", explain);
+    const failed = expect(controller.connect()).rejects.toThrow("доступ в интернет");
+    await vi.runAllTimersAsync();
+    await failed;
+    expect(explain).not.toHaveBeenCalled();
   });
 
   it("does not deadlock if profile refresh disconnects an expired session", async () => {

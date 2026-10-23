@@ -31,7 +31,7 @@ import { SecureStore } from "./security/secureStore";
 import { decryptTunnelProfile, prepareTunnelProfile, ruleRoutingKey } from "./vpn/tunnelProfile";
 import type { PreparedTunnelProfile } from "./vpn/tunnelProfile";
 import { buildXrayConfig } from "./vpn/xrayConfig";
-import { XrayManager } from "./vpn/xrayManager";
+import { CoreStartError, XrayManager } from "./vpn/xrayManager";
 import { carriesTraffic, isTunnelHealthy } from "./vpn/tunnelHealth";
 import {
   nextRung,
@@ -724,10 +724,13 @@ export class AppController extends EventEmitter<AppControllerEvents> {
         this.patch({ status: "error", statusDetail: messageOf(failure), sessionStartedAt: null });
         progress.fail();
         void this.telemetry.finish("error", progress.code);
-        // Outside the tunnel lock: the scan takes a second or two of PowerShell.
-        void this.explainFailureByConflicts(generation, failure);
+        // Only a core that could not start on this computer can be blamed on other apps;
+        // outside the tunnel lock, since the scan takes a second or two of PowerShell.
+        if (failure instanceof CoreStartError) void this.explainFailureByConflicts(generation, failure);
+        throw failure;
       }
-      throw failure;
+      // A server switch or a disconnect replaced this attempt and reports its own outcome.
+      if (failure !== error) this.addLog(`Остановка туннеля: ${messageOf(failure)}`);
     } finally {
       this.patch({ busy: false });
     }
@@ -2130,9 +2133,12 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     });
     this.assertCurrentConnection(generation);
     if (healthy) return;
-    // The core's local port never answered: it was stopped or blocked on this computer, not by the server.
-    if (!this.xray.isRunning() || (failures.length && failures.every((code) => code === "no_vpn_network"))) {
-      throw new Error("Ядро VPN не запустилось на этом компьютере. Чаще всего его блокирует антивирус: добавьте папку Levik VPN в исключения и подключитесь снова.");
+    // The core started, so these are this computer's problems, not the server's.
+    if (!this.xray.isRunning()) {
+      throw new CoreStartError("Ядро VPN завершилось сразу после запуска. Подключитесь снова; подробности — в журнале приложения.", false);
+    }
+    if (failures.length && failures.every((code) => code === "no_vpn_network")) {
+      throw new CoreStartError("Ядро VPN запущено, но не принимает подключения на этом компьютере. Так бывает, когда его блокирует антивирус или файрвол: добавьте папку Levik VPN в исключения и подключитесь снова.", false);
     }
     throw new Error("Не удалось подтвердить доступ в интернет через VPN. Повторите подключение или выберите другой сервер.");
   }
@@ -2251,7 +2257,15 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     this.assertCurrentConnection(generation);
     const gameTuic = this.state.settings.gameEnabled && this.profile?.game?.enabled
       ? this.profile.game.servers.flatMap((server, index) => server.tuic ? [{ tag: gameTag(index), endpoint: server.tuic }] : []) : [];
-    await this.xray.start(config, this.lastTuic, gameTuic);
+    const current = (): boolean => generation === this.connectionGeneration;
+    try {
+      await this.xray.start(config, this.lastTuic, gameTuic, current);
+    } catch (error) {
+      // A core left from a crash holds the adapter or a port: it is always ours to end.
+      if (!(error instanceof CoreStartError) || !error.retryable || !current() || !await this.stopLeftoverCores()) throw error;
+      this.assertCurrentConnection(generation);
+      await this.xray.start(config, this.lastTuic, gameTuic, current);
+    }
     try {
       this.assertCurrentConnection(generation);
       await this.allowTunnelThroughKillSwitch();
@@ -2760,17 +2774,19 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     }
   }
 
-  /** Ends Levik's own cores still running without a tunnel; they are always left from a crash. */
-  private async stopLeftoverCores(): Promise<void> {
+  /** Ends Levik's own cores still running without a tunnel; they are always left from a crash. True when one was ended. */
+  private async stopLeftoverCores(): Promise<boolean> {
     try {
       await Promise.race([this.checkConflicts(), delay(25_000)]);
       const pids = this.detectedConflicts.filter(({ conflict }) => conflict.kind === "orphan").flatMap(({ pids }) => pids);
-      if (!pids.length || this.xray.isRunning()) return;
+      if (!pids.length || this.xray.isRunning()) return false;
       this.addLog("Останавливаем ядро Levik VPN, оставшееся от прошлого запуска");
       await closeConflictingProcesses(pids);
       await Promise.race([this.checkConflicts(), delay(25_000)]);
+      return true;
     } catch (error) {
       this.addLog(`Остановка старого ядра: ${messageOf(error)}`);
+      return false;
     }
   }
 
@@ -2788,12 +2804,10 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     const items = this.state.conflicts.items;
     if (!items.length) return;
     this.addLog(`Ошибка подключения: ${messageOf(failure)}`);
-    const blocking = items.some((item) => item.kind !== "vpn");
     const names = [...new Set(items.map((item) => item.name))].slice(0, 3).join(", ");
+    const closable = items.some((item) => item.closable);
     this.patch({
-      statusDetail: blocking
-        ? `Туннель не запустился: нужный порт занят (${names}). Закройте мешающие приложения кнопкой выше`
-        : `Туннель не запустился: мешает ${names}. Закройте мешающие приложения кнопкой выше`,
+      statusDetail: `Туннель не запустился. Мешает: ${names}.${closable ? " Закройте мешающие приложения кнопкой выше" : ""}`,
     });
   }
 

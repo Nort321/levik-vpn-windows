@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { elevatedStartScript, hasElevatedLevel, powerShellString, windowsArgument } from "../src/main/windows/elevation";
-import { closeProcessesScript, conflictScanScript, detectConflicts, parseConflictScan, parseExcludedRanges } from "../src/main/windows/tunnelConflicts";
+import { closeProcessesScript, conflictScanScript, detectConflicts, isCoreRun, parseConflictScan, parseExcludedRanges } from "../src/main/windows/tunnelConflicts";
 import type { ConflictScanInput, ConflictScanOptions } from "../src/main/windows/tunnelConflicts";
 
 const options: ConflictScanOptions = {
@@ -57,6 +57,33 @@ describe("tunnel conflicts", () => {
     expect(found[0]?.conflict.detail).toContain("47185");
   });
 
+  it("never takes the app's own Xray processes or one-shot commands for a core left from a crash", () => {
+    const core = "C:\\Program Files\\Levik VPN\\resources\\xray\\xray.exe";
+    const found = scan({
+      processes: [
+        // Home road exit and an API call of the running app.
+        { pid: 510, name: "xray.exe", path: core, parentPid: 100, commandLine: `"${core}" run -format json -config stdin:` },
+        { pid: 511, name: "xray.exe", path: core, parentPid: 100, commandLine: `"${core}" api statsquery --server=127.0.0.1:47185` },
+        // Left by a crashed app: commands end by themselves, a running core does not.
+        { pid: 520, name: "xray.exe", path: core, parentPid: 90, commandLine: `"${core}" version` },
+        { pid: 521, name: "xray.exe", path: core, parentPid: 90, commandLine: `"${core}" run -test -format json -config stdin:` },
+        { pid: 522, name: "xray.exe", path: core, parentPid: 90, commandLine: `"${core}" run -format json -config stdin:` },
+      ],
+      portOwners: [{ port: 47185, pid: 510 }],
+    });
+    expect(found.map(({ conflict, pids }) => [conflict.id, pids])).toEqual([["orphan", [522]]]);
+    expect(found[0]?.conflict.detail).not.toContain("47185");
+  });
+
+  it("recognizes a serving core by its command line", () => {
+    expect(isCoreRun('"C:\\Levik\\xray.exe" run -format json -config stdin:')).toBe(true);
+    expect(isCoreRun("C:\\Levik\\singbox\\sing-box.exe run -c stdin --disable-color")).toBe(true);
+    expect(isCoreRun(null)).toBe(true);
+    expect(isCoreRun("xray.exe run -test -config stdin:")).toBe(false);
+    expect(isCoreRun("xray.exe api rmi levik-tun-in")).toBe(false);
+    expect(isCoreRun('"C:\\runner\\xray.exe" version')).toBe(false);
+  });
+
   it("reports the owner of a port Xray needs and never offers to close a system service", () => {
     const found = scan({
       processes: [
@@ -84,10 +111,12 @@ describe("tunnel conflicts", () => {
 
   it("parses the PowerShell scan, including single objects and missing fields", () => {
     expect(parseConflictScan('\uFEFF{"processes":{"pid":5,"name":"a.exe","path":""},"owners":[{"port":47185,"pid":5},{"port":"x","pid":1}],"excluded":""}')).toEqual({
-      processes: [{ pid: 5, name: "a.exe", path: null }],
+      processes: [{ pid: 5, name: "a.exe", path: null, parentPid: null, commandLine: null }],
       portOwners: [{ port: 47185, pid: 5 }],
       excludedRanges: [],
     });
+    expect(parseConflictScan('{"processes":[{"pid":7,"parent":3,"name":"xray.exe","path":"C:\\\\x.exe","command":" x.exe run "}]}').processes)
+      .toEqual([{ pid: 7, name: "xray.exe", path: "C:\\x.exe", parentPid: 3, commandLine: "x.exe run" }]);
     expect(parseConflictScan("")).toEqual({ processes: [], portOwners: [], excludedRanges: [] });
   });
 

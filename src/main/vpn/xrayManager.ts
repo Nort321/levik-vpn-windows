@@ -153,7 +153,9 @@ export class XrayManager extends EventEmitter<XrayEvents> {
     return this.outboundName;
   }
 
-  async start(config: Record<string, unknown>, tuic?: TuicEndpoint, gameTuic: Array<{ tag: string; endpoint: TuicEndpoint }> = []): Promise<void> {
+  /** shouldContinue: false once the caller no longer wants this tunnel, so a retry is never started for it. */
+  async start(config: Record<string, unknown>, tuic?: TuicEndpoint, gameTuic: Array<{ tag: string; endpoint: TuicEndpoint }> = [],
+    shouldContinue: () => boolean = () => true): Promise<void> {
     if (process.platform !== "win32") throw new Error("VPN-туннель запускается только в Windows-сборке");
     const { stdout: version } = await execFileAsync(this.executablePath(), ["version"], {
       windowsHide: true, timeout: 5_000, maxBuffer: 64 * 1024,
@@ -203,26 +205,19 @@ export class XrayManager extends EventEmitter<XrayEvents> {
     this.emit("log", `Xray: outbound interface [${interfaceName}] (TCP/UDP, direct, IPv6 ${outbound.ipv6 ? "on" : "off"})`);
     try {
       await this.validate(configInput);
-      const child = spawn(this.executablePath(), xrayConfigArguments(false), {
-        windowsHide: true,
-        stdio: ["pipe", "pipe", "pipe"],
-        env: { ...process.env, XRAY_LOCATION_ASSET: this.assetDirectory() },
-      });
-      this.process = child;
-      child.stdout.on("data", (chunk: Buffer) => this.emitLines(chunk));
-      child.stderr.on("data", (chunk: Buffer) => this.emitLines(chunk));
-      child.once("error", (error) => this.emit("log", `Xray: ${error.message}`));
-      child.once("exit", (code) => {
-        if (this.process !== child) return;
-        this.stopStatsPolling();
-        const expected = this.stopping.has(child);
-        this.process = null;
-        this.emit("exit", code, expected);
-      });
-      await Promise.all([
-        waitForStartup(child),
-        writeConfigInput(child, configInput),
-      ]);
+      for (let attempt = 1; ; attempt++) {
+        try {
+          await this.launch(configInput);
+          break;
+        } catch (error) {
+          // A core killed moments ago may still hold its Wintun adapter: Windows
+          // removes it asynchronously, and the new core cannot create it until then.
+          if (!(error instanceof CoreStartError) || !error.retryable || attempt >= CORE_START_ATTEMPTS || !shouldContinue()) throw error;
+          this.emit("log", `Xray: ядро не запустилось, повтор через ${attempt} с`);
+          await delay(attempt * 1_000);
+          if (!shouldContinue()) throw error;
+        }
+      }
       this.routing = typeof launchConfig.routing === "object" && launchConfig.routing !== null
         ? structuredClone(launchConfig.routing) as Record<string, unknown> : null;
       this.startStatsPolling();
@@ -231,6 +226,41 @@ export class XrayManager extends EventEmitter<XrayEvents> {
       throw error;
     } finally {
       configInput.fill(0);
+    }
+  }
+
+  /** One core process, resolved once Xray reports every inbound, the TUN included, started. */
+  private async launch(configInput: Buffer): Promise<void> {
+    const child = spawn(this.executablePath(), xrayConfigArguments(false), {
+      windowsHide: true,
+      stdio: ["pipe", "pipe", "pipe"],
+      env: { ...process.env, XRAY_LOCATION_ASSET: this.assetDirectory() },
+    });
+    this.process = child;
+    // Listeners first: a core that fails at once must not lose its reason.
+    const startup = waitForStartup(child);
+    child.stdout.on("data", (chunk: Buffer) => this.emitLines(chunk));
+    child.stderr.on("data", (chunk: Buffer) => this.emitLines(chunk));
+    child.once("error", (error) => this.emit("log", `Xray: ${error.message}`));
+    child.once("exit", (code) => {
+      if (this.process !== child) return;
+      this.stopStatsPolling();
+      const expected = this.stopping.has(child);
+      this.process = null;
+      this.emit("exit", code, expected);
+    });
+    try {
+      // A core that exits mid-write breaks the pipe: its own reason explains more than EPIPE.
+      const [started, written] = await Promise.allSettled([startup, writeConfigInput(child, configInput)]);
+      if (started.status === "rejected") throw started.reason;
+      if (written.status === "rejected") throw written.reason;
+    } catch (error) {
+      if (this.process === child) {
+        this.stopping.add(child);
+        await stopChild(child);
+        if (this.process === child) this.process = null;
+      }
+      throw error;
     }
   }
 
@@ -420,27 +450,91 @@ async function writeConfigInput(child: ChildProcess, configInput: Buffer): Promi
   });
 }
 
-async function waitForStartup(child: ChildProcess): Promise<void> {
+/** A core start failure the controller can explain; retryable when the same start may work a moment later. */
+export class CoreStartError extends Error {
+  constructor(message: string, readonly retryable: boolean) {
+    super(message);
+    this.name = "CoreStartError";
+  }
+}
+
+const CORE_START_ATTEMPTS = 3;
+/** Creating the Wintun adapter takes seconds, and much longer while an antivirus inspects the driver. */
+export const CORE_START_TIMEOUT_MS = 45_000;
+const CORE_STARTED = /\bXray \S+ started\b/;
+const CORE_START_FAILED = /\bFailed to start: (.+)/;
+
+/**
+ * Resolves on Xray's own "started" line: it is written after every inbound,
+ * the TUN included, has started. A fixed delay took a core that was still
+ * creating its adapter for a running one and blamed its later exit on an antivirus.
+ */
+export async function waitForStartup(child: ChildProcess, timeoutMs = CORE_START_TIMEOUT_MS): Promise<void> {
   await new Promise<void>((resolve, reject) => {
     let settled = false;
+    let reason: string | null = null;
+    let pending = "";
     const finish = (error?: Error): void => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
       child.off("exit", onExit);
       child.off("error", onError);
+      child.stdout?.off("data", onData);
+      child.stderr?.off("data", onData);
       if (error) reject(error);
       else resolve();
     };
-    // Exit code -1 (4294967295) is a process terminated from outside, usually by an antivirus.
-    const onExit = (code: number | null): void => finish(new Error(code === -1 || code === 4294967295
-      ? "Ядро VPN было остановлено при запуске, скорее всего антивирусом. Добавьте папку Levik VPN в исключения антивируса и подключитесь снова."
-      : `Xray завершился при запуске (код ${code ?? "unknown"})`));
-    const onError = (error: Error): void => finish(error);
-    const timer = setTimeout(() => finish(), 1_500);
+    const onData = (chunk: Buffer | string): void => {
+      const lines = `${pending}${chunk.toString()}`.split(/\r?\n/);
+      pending = (lines.pop() ?? "").slice(-4_096);
+      for (const line of lines) {
+        const failed = CORE_START_FAILED.exec(line);
+        if (failed?.[1]) reason = failed[1].trim();
+        else if (CORE_STARTED.test(line)) finish();
+      }
+    };
+    const onExit = (code: number | null): void => {
+      if (pending) onData("\n");
+      finish(startupExitError(code, reason));
+    };
+    const onError = (): void => finish(new CoreStartError(
+      "Windows не дал запустить ядро VPN (xray.exe). Чаще всего его блокирует или удаляет антивирус: добавьте папку Levik VPN в исключения и подключитесь снова.",
+      false,
+    ));
+    const timer = setTimeout(() => finish(new CoreStartError(
+      "Ядро VPN слишком долго создаёт сетевой адаптер. Подключитесь снова; если не поможет, перезагрузите компьютер.",
+      false,
+    )), timeoutMs);
+    child.stdout?.on("data", onData);
+    child.stderr?.on("data", onData);
     child.once("exit", onExit);
     child.once("error", onError);
   });
+}
+
+/** Xray exits with 23 on a configuration it cannot load and with -1 when an inbound, such as the TUN, fails to start. */
+export function startupExitError(code: number | null, reason: string | null): CoreStartError {
+  const failedToStart = code === -1 || code === 4294967295;
+  if (failedToStart && reason) {
+    if (/wintun|\btun\b|adapter|already exists/i.test(reason)) {
+      return new CoreStartError("Windows ещё не освободил сетевой адаптер Levik VPN. Подключитесь снова через несколько секунд; если не поможет, перезагрузите компьютер.", true);
+    }
+    if (/only one usage of each socket address|address already in use|access a socket in a way forbidden|bind/i.test(reason)) {
+      return new CoreStartError("Нужный ядру VPN локальный порт занят другой программой.", true);
+    }
+    return new CoreStartError("Ядро VPN не смогло запуститься на этом компьютере. Подробности — в журнале приложения.", true);
+  }
+  // Without its own message, -1 is a process ended from outside, usually by an antivirus.
+  if (failedToStart) {
+    return new CoreStartError("Ядро VPN было остановлено при запуске, скорее всего антивирусом. Добавьте папку Levik VPN в исключения антивируса и подключитесь снова.", false);
+  }
+  if (code === 23) return new CoreStartError("Ядро VPN отклонило конфигурацию. Обновите приложение или выберите другой сервер.", false);
+  return new CoreStartError(`Ядро VPN завершилось при запуске (код ${code ?? "unknown"})`, false);
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise<void>((resolve) => setTimeout(resolve, ms));
 }
 
 export async function updateXrayRouting(executable: string, endpoint: string, routing: Record<string, unknown>): Promise<void> {

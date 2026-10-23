@@ -734,7 +734,7 @@ function bindRemoteDialog(): void {
     const commandId = button.dataset.remoteNote;
     if (commandId) void run(async () => {
       await window.levik.openRemoteNote(commandId);
-      showToast("Ссылка на диагностику скопирована");
+      showToast("Ссылка на диагностику скопирована", "notice");
     });
   }));
   document.getElementById("close-remote-dialog")?.addEventListener("click", closeRemoteDialog);
@@ -821,7 +821,7 @@ async function answerApproval(id: string, number: number | null): Promise<void> 
   try {
     const result = await window.levik.answerApproval(id, number);
     hiddenApprovals.add(id);
-    showToast(result === "approved" ? "Вход подтверждён" : "Вход отменён: устройство не получит доступ");
+    showToast(result === "approved" ? "Вход подтверждён" : "Вход отменён: устройство не получит доступ", "notice");
   } catch (error) {
     showToast(error instanceof Error ? error.message : String(error));
   } finally {
@@ -1050,7 +1050,8 @@ function bindPageEvents(): void {
   document.getElementById("check-conflicts-button")?.addEventListener("click", () => void run(() => window.levik.checkConflicts()));
   document.getElementById("close-conflicts-button")?.addEventListener("click", () => void run(async () => {
     const left = await window.levik.closeConflicts();
-    showToast(left ? `Не удалось закрыть приложений: ${left}. Закройте их вручную` : "Мешающие приложения закрыты. Можно подключаться");
+    if (left) showToast(`Не удалось закрыть приложений: ${left}. Закройте их вручную`);
+    else showToast("Мешающие приложения закрыты. Можно подключаться", "notice");
   }));
   document.querySelectorAll<HTMLElement>("[data-announcement-link]").forEach((button) => button.addEventListener("click", () => {
     const url = button.dataset.announcementLink;
@@ -1161,7 +1162,7 @@ async function authorizeActivation(): Promise<void> {
   try {
     await window.levik.authorizeActivation(activationCodeInput);
     activationCodeInput = "";
-    showToast("Устройство авторизовано");
+    showToast("Устройство авторизовано", "notice");
   } catch (error) {
     showToast(error instanceof Error ? error.message : String(error));
   } finally {
@@ -1333,9 +1334,11 @@ async function run(operation: () => Promise<unknown>): Promise<void> {
   }
 }
 
-function showToast(message: string): void {
+/** Errors by default; "notice" for a finished action, which must not look like a failure. */
+function showToast(message: string, tone: "error" | "notice" = "error"): void {
   const toast = requiredElement("toast");
   toast.textContent = message.replace(/^Error invoking remote method '[^']+':\s*(?:Error:\s*)?/, "");
+  toast.classList.toggle("notice", tone === "notice");
   toast.classList.add("visible");
   if (toastTimer) clearTimeout(toastTimer);
   toastTimer = setTimeout(() => toast.classList.remove("visible"), 4_500);

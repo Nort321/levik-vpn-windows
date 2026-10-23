@@ -411,6 +411,7 @@ select option { color: var(--text); background-color: var(--select-bg); }
 .empty { padding: 45px 24px; text-align: center; color: var(--muted); }
 .toast { position: fixed; right: 24px; bottom: 24px; max-width: 390px; padding: 13px 16px; border: 1px solid rgba(255,107,118,.25); border-radius: 12px; color: var(--toast-text, #ffd9dc); background: var(--toast-bg, rgba(89,25,34,.94)); box-shadow: var(--shadow); transform: translateY(22px); opacity: 0; pointer-events: none; transition: 180ms ease; }
 .toast.visible { transform: translateY(0); opacity: 1; }
+.toast.notice { color: var(--text); background: var(--surface-strong); border-color: color-mix(in srgb, var(--green) 40%, transparent); }
 .spinner { display: inline-block; flex-shrink: 0; width: 18px; height: 18px; border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%; animation: spin .8s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 

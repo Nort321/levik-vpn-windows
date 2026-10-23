@@ -90,6 +90,9 @@ export interface ScannedProcess {
   pid: number;
   name: string;
   path: string | null;
+  /** Null when Windows does not say; a parent id may belong to a process that has already exited. */
+  parentPid?: number | null;
+  commandLine?: string | null;
 }
 
 export interface ConflictScanInput {
@@ -106,6 +109,7 @@ export interface ConflictScanOptions {
   ownExecutables: readonly string[];
   /** Cores at these paths are Levik's; while no tunnel runs, a running one is left from a crash. */
   coreExecutables: readonly string[];
+  /** The app's main process: its children (the Home road exit, Xray API calls) are never conflicts. */
   ownPid: number;
 }
 
@@ -130,11 +134,14 @@ export function detectConflicts(input: ConflictScanInput, options: ConflictScanO
     items.set(id, { conflict, pids: new Set(pid === null ? [] : [pid]) });
   };
 
+  const ownChild = (item: ScannedProcess | undefined): boolean => item?.parentPid === options.ownPid;
   for (const item of input.processes) {
     if (item.pid === options.ownPid) continue;
     const path = item.path ? normalizePath(item.path) : null;
     const key = item.name.toLowerCase();
     if (path && cores.has(path)) {
+      // `xray api`, `xray version` and `run -test` finish by themselves; only a running core holds the adapter.
+      if (ownChild(item) || !isCoreRun(item.commandLine ?? null)) continue;
       add("orphan", {
         id: "orphan", kind: "orphan", name: "Ядро Levik VPN от прошлого запуска", processName: item.name,
         detail: "Осталось после сбоя и удерживает сетевой адаптер", closable: true,
@@ -156,6 +163,7 @@ export function detectConflicts(input: ConflictScanInput, options: ConflictScanO
     const item = byPid.get(owner.pid);
     const path = item?.path ? normalizePath(item.path) : null;
     if (path && own.has(path) && !cores.has(path)) continue;
+    if (path && cores.has(path) && ownChild(item)) continue;
     const processName = item?.name ?? null;
     const key = processName?.toLowerCase() ?? "";
     const protectedProcess = owner.pid <= 4 || PROTECTED_PROCESSES.has(key);
@@ -193,6 +201,13 @@ export function detectConflicts(input: ConflictScanInput, options: ConflictScanO
 
 const KIND_ORDER: Record<TunnelConflict["kind"], number> = { orphan: 0, port: 1, vpn: 2, reserved: 3 };
 
+/** A core started to serve traffic, not a one-shot command of the same executable. Unknown counts as a core. */
+export function isCoreRun(commandLine: string | null): boolean {
+  if (!commandLine) return true;
+  const args = commandLine.toLowerCase();
+  return /(?:^|[\s"])run(?:\s|$)/.test(args) && !/\s-test(?:\s|$)/.test(args);
+}
+
 function displayName(processName: string | null, pid: number): string {
   if (!processName) return `Процесс ${pid}`;
   return processName.replace(/\.exe$/i, "");
@@ -202,14 +217,17 @@ function normalizePath(value: string): string {
   return win32.normalize(value.trim().replaceAll("/", "\\")).toLowerCase();
 }
 
-/** One PowerShell run: every process, owners of the given ports and Windows' reserved TCP ranges. */
+/**
+ * One PowerShell run: every process, owners of the given ports and Windows' reserved TCP ranges.
+ * Command lines are read only for the cores' executable names: other apps' arguments may carry secrets.
+ */
 export function conflictScanScript(ports: readonly number[]): string {
   const list = ports.filter(isPort).join(",") || "0";
   return [
     "$ErrorActionPreference = 'SilentlyContinue';",
     "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false);",
     `$ports = @(${list});`,
-    "$processes = @(Get-CimInstance Win32_Process | ForEach-Object { [pscustomobject]@{ pid = [int]$_.ProcessId; name = [string]$_.Name; path = [string]$_.ExecutablePath } });",
+    "$processes = @(Get-CimInstance Win32_Process | ForEach-Object { [pscustomobject]@{ pid = [int]$_.ProcessId; parent = [int]$_.ParentProcessId; name = [string]$_.Name; path = [string]$_.ExecutablePath; command = $(if (@('xray.exe', 'sing-box.exe') -contains [string]$_.Name) { [string]$_.CommandLine } else { '' }) } });",
     "$owners = @(Get-NetTCPConnection -State Listen -LocalPort $ports | ForEach-Object { [pscustomobject]@{ port = [int]$_.LocalPort; pid = [int]$_.OwningProcess } });",
     "$owners += @(Get-NetUDPEndpoint -LocalPort $ports | ForEach-Object { [pscustomobject]@{ port = [int]$_.LocalPort; pid = [int]$_.OwningProcess } });",
     "$excluded = (netsh.exe interface ipv4 show excludedportrange protocol=tcp) -join \"`n\";",
@@ -223,7 +241,8 @@ export function parseConflictScan(stdout: string): ConflictScanInput {
   const processes = asArray(decoded.processes).flatMap((item): ScannedProcess[] => {
     if (!isRecord(item) || !isPid(item.pid) || typeof item.name !== "string" || !item.name.trim()) return [];
     const path = typeof item.path === "string" && item.path.trim() ? item.path.trim() : null;
-    return [{ pid: item.pid, name: item.name.trim().slice(0, 260), path }];
+    const commandLine = typeof item.command === "string" && item.command.trim() ? item.command.trim().slice(0, 2_048) : null;
+    return [{ pid: item.pid, name: item.name.trim().slice(0, 260), path, parentPid: isPid(item.parent) ? item.parent : null, commandLine }];
   });
   const portOwners = asArray(decoded.owners).flatMap((item) => {
     if (!isRecord(item) || !isPort(item.port) || !isPid(item.pid)) return [];
