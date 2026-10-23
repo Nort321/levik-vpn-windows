@@ -98,6 +98,7 @@ import {
   canonicalNodeList,
   isCanonicalNodeList,
   nodeIdForServer,
+  nodeLoadForServer,
   parseNodeList,
   reconcileFavorites,
   serversByNode,
@@ -2467,9 +2468,8 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     const load = currentNodeLoad(this.remoteStored, now);
     const marked: Record<string, number> = {};
     for (const server of this.state.servers) {
-      const node = nodeIdForServer(server);
-      const value = node ? load[node] : undefined;
-      if (value !== undefined) marked[server.id] = value;
+      const value = nodeLoadForServer(load, server);
+      if (value !== null) marked[server.id] = value;
     }
     return marked;
   }
@@ -2586,13 +2586,12 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     const network = this.protocolHistory.networkKey();
     return rankSmart(servers.map((server) => {
       const protocol = protocolOf(server);
-      const node = nodeIdForServer(server);
       return {
         id: server.id,
         protocol,
         latencyMs: this.state.serverLatencies[server.id] ?? null,
         silenceMeansDown: silenceMeansDown(server.outbound),
-        load: node ? load[node] ?? null : null,
+        load: nodeLoadForServer(load, server),
         verdict: verdictOf(history, network, protocol, now),
       };
     }), currentAdvice(this.remoteStored, now));

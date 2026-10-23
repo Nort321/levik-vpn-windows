@@ -3,8 +3,10 @@ import type { TunnelServer } from "../src/shared/contracts";
 import {
   canonicalNodeList,
   isCanonicalNodeList,
+  nodeIdForEndpoint,
   nodeIdForHost,
   nodeIdForServer,
+  nodeLoadForServer,
   parseNodeList,
   reconcileFavorites,
   serversByNode,
@@ -52,5 +54,23 @@ describe("favourite nodes", () => {
     const base = { favoriteNodes: null } as unknown as Parameters<typeof syncedChanges>[0];
     expect(syncedChanges(base, { ...base, favoriteNodes: fi })).toEqual({});
     expect(syncedChanges({ ...base, favoriteNodes: "" }, { ...base, favoriteNodes: fi })).toEqual({ favoriteNodes: fi });
+  });
+
+  it("finds the load of one server behind a shared relay by its port", () => {
+    const relayFr = nodeIdForEndpoint("2.27.42.184", 21443);
+    expect(relayFr).toBe("n15f491927d4394acd315d");
+    const relay = "n126c4033f0b74bc1be26a";
+    expect(nodeIdForHost("2.27.42.184")).toBe(relay);
+    const vless = { id: "fr", tag: "fr", name: "fr", countryCode: "FR", outbound: { protocol: "vless", settings: { vnext: [{ address: "2.27.42.184", port: 21443 }] } } } as TunnelServer;
+    const flat = { ...vless, outbound: { protocol: "hysteria", settings: { address: "2.27.42.184", port: 21443 } } } as TunnelServer;
+    const tuic = { ...vless, outbound: {}, tuic: { address: "2.27.42.184", port: 21444 } } as TunnelServer;
+    const load = { [relayFr!]: 0.1, [nodeIdForEndpoint("2.27.42.184", 21444)!]: 0.1, [relay]: 0.28 };
+    expect(nodeLoadForServer(load, vless)).toBe(0.1);
+    expect(nodeLoadForServer(load, flat)).toBe(0.1);
+    expect(nodeLoadForServer(load, tuic)).toBe(0.1);
+    // Without a port entry the shared host's load still applies.
+    expect(nodeLoadForServer({ [relay]: 0.28 }, vless)).toBe(0.28);
+    expect(nodeLoadForServer({}, vless)).toBeNull();
+    expect(nodeLoadForServer(load, server("de", "203.0.113.7"))).toBeNull();
   });
 });
