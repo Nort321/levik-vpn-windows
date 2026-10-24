@@ -1,9 +1,11 @@
 import { clipboard, dialog, ipcMain, shell } from "electron";
 import type { BrowserWindow } from "electron";
 import { IPC, isDiagnosisAction } from "../shared/contracts";
+import { isDropAnswer, isDropControl } from "../shared/drop";
 import { isRemoteCommand } from "../shared/remote";
 import type { AppSettings, CabinetTarget } from "../shared/contracts";
 import { AppController } from "./appController";
+import { isAbsolute } from "node:path";
 import { listWindowsProcesses, windowsProcessFromPath } from "./windows/processes";
 import { isAllowedExternalUrl, isCabinetTarget } from "./platform/links";
 
@@ -114,6 +116,50 @@ export function registerIpc(controller: AppController, window: BrowserWindow, li
     clipboard.writeText(link);
     await shell.openExternal(new URL(link).toString());
   });
+  ipcMain.handle(IPC.refreshDrop, () => controller.refreshDrop());
+  ipcMain.handle(IPC.sendDropFiles, async (_event, deviceId: unknown, paths: unknown) => {
+    if (typeof deviceId !== "string" || deviceId.length < 1 || deviceId.length > 160) throw new Error("Некорректное устройство");
+    let files: string[];
+    if (paths === null) {
+      const result = await dialog.showOpenDialog(window, {
+        title: "Файлы для передачи",
+        buttonLabel: "Отправить",
+        properties: ["openFile", "multiSelections", "dontAddToRecent"],
+      });
+      if (result.canceled) return;
+      files = result.filePaths;
+    } else if (Array.isArray(paths) && paths.length <= 100 && paths.every(isDroppedPath)) {
+      files = paths;
+    } else {
+      throw new Error("Некорректные файлы");
+    }
+    await controller.sendDropFiles(deviceId, files);
+  });
+  ipcMain.handle(IPC.answerDrop, (_event, transferId: unknown, answer: unknown, code: unknown) => {
+    if (!isTransferId(transferId) || !isDropAnswer(answer) || (code !== null && (typeof code !== "string" || code.length > 16))) {
+      throw new Error("Некорректный ответ");
+    }
+    return controller.answerDrop(transferId, answer, code);
+  });
+  ipcMain.handle(IPC.controlDrop, (_event, transferId: unknown, action: unknown) => {
+    if (!isTransferId(transferId) || !isDropControl(action)) throw new Error("Некорректное действие");
+    return controller.controlDrop(transferId, action);
+  });
+  ipcMain.handle(IPC.chooseDropFolder, async () => {
+    const result = await dialog.showOpenDialog(window, {
+      title: "Папка для полученных файлов",
+      buttonLabel: "Выбрать",
+      defaultPath: controller.snapshot().drop.folder,
+      properties: ["openDirectory", "createDirectory", "dontAddToRecent"],
+    });
+    const folder = result.filePaths[0];
+    if (!result.canceled && folder) controller.setDropFolder(folder);
+  });
+  ipcMain.handle(IPC.showDropFiles, (_event, transferId: unknown) => {
+    if (!isTransferId(transferId)) throw new Error("Некорректная передача");
+    const file = controller.dropSavedFile(transferId);
+    if (file) shell.showItemInFolder(file);
+  });
   ipcMain.handle(IPC.relaunchAsAdmin, () => lifecycle.relaunchAsAdministrator());
   ipcMain.handle(IPC.checkConflicts, () => controller.checkConflicts());
   ipcMain.handle(IPC.closeConflicts, () => controller.closeConflicts());
@@ -136,6 +182,15 @@ export async function openCabinet(controller: AppController, target: CabinetTarg
 async function openAllowedExternal(rawUrl: string): Promise<void> {
   if (!isAllowedExternalUrl(rawUrl)) throw new Error("Открытие внешней ссылки запрещено");
   await shell.openExternal(new URL(rawUrl).toString());
+}
+
+function isTransferId(value: unknown): value is string {
+  return typeof value === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(value);
+}
+
+/** A dropped file: an absolute path; describeSources() then accepts only regular files. */
+function isDroppedPath(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0 && value.length < 4_096 && isAbsolute(value) && !value.includes("\0");
 }
 
 function isSettingsPatch(value: unknown): value is Partial<AppSettings> {

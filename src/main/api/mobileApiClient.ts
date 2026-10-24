@@ -26,6 +26,8 @@ export class MobileApiError extends Error {
     message: string,
     readonly status: number | null = null,
     readonly authenticationRejected = false,
+    /** The website's error code, such as quota_exceeded. */
+    readonly code: string | null = null,
   ) {
     super(message);
   }
@@ -149,6 +151,32 @@ export class MobileApiClient {
     await this.request("DELETE", "/api/mobile/v1/presence", null, accessToken);
   }
 
+  /** LevikDrop, docs/levik-drop.md: this computer can receive files now, with its identity key. */
+  dropPresence(accessToken: string, key: string): Promise<{ ok: true; readyUntil?: unknown }> {
+    return this.request("PUT", "/api/mobile/v1/drop/presence", { key, protocol: 1 }, accessToken);
+  }
+
+  async clearDropPresence(accessToken: string): Promise<void> {
+    await this.request("DELETE", "/api/mobile/v1/drop/presence", null, accessToken);
+  }
+
+  /** The account's apps that could receive files and today's limit; checked by levikDrop/engine.ts. */
+  dropDevices(accessToken: string): Promise<Record<string, unknown>> {
+    return this.request("GET", "/api/mobile/v1/drop/devices", null, accessToken);
+  }
+
+  dropTransfers(accessToken: string): Promise<Record<string, unknown>> {
+    return this.request("GET", "/api/mobile/v1/drop/transfers", null, accessToken);
+  }
+
+  createDropTransfer(accessToken: string, offer: { receiverDeviceId: string; fileCount: number; totalBytes: number }): Promise<Record<string, unknown>> {
+    return this.request("POST", "/api/mobile/v1/drop/transfers", { ...offer }, accessToken);
+  }
+
+  updateDropTransfer(accessToken: string, step: { id: string; action: string; reason?: string }): Promise<Record<string, unknown>> {
+    return this.request("POST", "/api/mobile/v1/drop/transfers/update", { ...step }, accessToken);
+  }
+
   /** Live hints for this account (liveEvents.ts). The caller aborts the stream. */
   async openEvents(accessToken: string, signal: AbortSignal): Promise<ReadableStream<Uint8Array>> {
     const origin = await this.endpoints.resolve();
@@ -241,6 +269,7 @@ export class MobileApiClient {
           apiErrorMessage(code),
           response.status,
           code === "unauthorized",
+          code,
         );
       }
       if (!isRecord(decoded) || decoded.ok !== true) throw new MobileApiError("API отклонил ответ", response.status);
@@ -271,6 +300,15 @@ function apiErrorMessage(code: string): string {
     activation_not_found: "Код активации не найден или срок его действия истёк",
     rate_limited: "Слишком много попыток. Попробуйте позже.",
     app_update_required: "Обновите Levik VPN: эта версия приложения не поддерживает Levik Game.",
+    drop_unavailable: "Передача файлов сейчас недоступна. Попробуйте позже.",
+    subscription_required: "Для передачи файлов нужна активная подписка.",
+    device_not_found: "Устройство не найдено в аккаунте.",
+    device_not_ready: "Устройство сейчас не может принять файлы: откройте на нём Levik VPN.",
+    device_busy: "Одно из устройств уже передаёт файлы. Дождитесь окончания.",
+    quota_exceeded: "Дневной лимит передачи через сервер (20 ГБ) исчерпан. Он обновится завтра.",
+    transfer_not_found: "Передача не найдена.",
+    transfer_ended: "Передача уже завершена.",
+    invalid_action: "Это действие сейчас недоступно.",
   };
   return known[code] ?? code;
 }

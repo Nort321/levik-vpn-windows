@@ -599,3 +599,20 @@ select option { color: var(--text); background-color: var(--select-bg); }
 .remote-commands { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; padding: 14px 0 4px; }
 .remote-command { justify-content: flex-start; }
 .remote-status { min-height: 40px; margin: 8px 0 0; display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 12px; line-height: 1.45; }
+
+/* LevikDrop */
+.drop-devices { min-height: 0; }
+.drop-target.drag-over { border-color: var(--blue); background: var(--surface-hover, rgba(255,255,255,.06)); }
+.drop-folder { word-break: break-all; }
+.drop-error { color: var(--danger-text, #ff919a); }
+.drop-subtitle { margin: 18px 0 8px; font-size: 13px; font-weight: 650; }
+.drop-transfers { display: grid; gap: 8px; }
+.drop-transfer { padding: 12px; }
+.drop-transfer .progress { margin: 10px 0 6px; }
+.drop-transfer-head { display: flex; align-items: center; gap: 12px; min-width: 0; }
+.drop-dialog { width: min(480px, calc(100vw - 40px)); }
+.drop-files { margin: 14px 0 0; padding: 0; list-style: none; display: grid; gap: 6px; max-height: 220px; overflow: auto; }
+.drop-files li { display: flex; justify-content: space-between; gap: 12px; min-width: 0; padding: 8px 10px; border: 1px solid var(--border); border-radius: 10px; }
+.drop-files .process-path { margin-top: 0; flex: none; }
+.drop-code { margin: 14px 0 4px; text-align: center; font-size: 34px; font-weight: 800; letter-spacing: .08em; font-variant-numeric: tabular-nums; }
+.drop-warning { color: var(--warning-text, #ffcf70); }

@@ -1,3 +1,4 @@
+import type { DropAnswer, DropControl, DropSnapshot } from "./drop";
 import type { RemoteCommand, RemoteSnapshot } from "./remote";
 
 export type AppTab = "home" | "servers" | "game" | "stats" | "profile";
@@ -200,6 +201,8 @@ export interface AppSnapshot {
   pendingApprovals: PendingApproval[];
   /** The user's other apps for the remote, docs/app-platform.md "Remote". */
   remote: RemoteSnapshot;
+  /** LevikDrop: files between the user's own devices, docs/levik-drop.md. */
+  drop: DropSnapshot;
   /** A sign-in started on this computer is waiting for approval. */
   loginPending: boolean;
   /** null until the account says whether the road is offered. */
@@ -295,6 +298,19 @@ export interface LevikDesktopApi {
   sendRemoteCommand(deviceId: string, command: RemoteCommand): Promise<void>;
   /** Opens a diagnostics report collected for this app and copies its link. */
   openRemoteNote(commandId: string): Promise<void>;
+  /** LevikDrop: the devices, today's limit and the transfers again. */
+  refreshDrop(): Promise<void>;
+  /** Sends files to another app of the account; null opens the file picker. */
+  sendDropFiles(deviceId: string, paths: string[] | null): Promise<void>;
+  /** The paths of files dropped onto the window (read in the preload script). */
+  dropFilePaths(files: readonly File[]): string[];
+  /** Accept/decline an offer, or confirm/reject the code; `code` is the one the window showed. */
+  answerDrop(transferId: string, answer: DropAnswer, code: string | null): Promise<void>;
+  controlDrop(transferId: string, action: DropControl): Promise<void>;
+  /** Picks the folder received files go to. */
+  chooseDropFolder(): Promise<void>;
+  /** Shows a received file in its folder. */
+  showDropFiles(transferId: string): Promise<void>;
   /** «Пускать ко мне домой»: this computer becomes (or stops being) a home exit. */
   setHomeRoad(enabled: boolean): Promise<void>;
   /** Starts the app again through the UAC prompt and closes this copy. */
@@ -336,6 +352,12 @@ export const IPC = {
   dismissAnnouncement: "levik:dismiss-announcement",
   openCabinet: "levik:open-cabinet",
   setHomeRoad: "levik:set-home-road",
+  refreshDrop: "levik:refresh-drop",
+  sendDropFiles: "levik:send-drop-files",
+  answerDrop: "levik:answer-drop",
+  controlDrop: "levik:control-drop",
+  chooseDropFolder: "levik:choose-drop-folder",
+  showDropFiles: "levik:show-drop-files",
   answerApproval: "levik:answer-approval",
   refreshRemote: "levik:refresh-remote",
   sendRemoteCommand: "levik:send-remote-command",

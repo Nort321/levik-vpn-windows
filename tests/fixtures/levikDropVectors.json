@@ -1,0 +1,28 @@
+{
+  "about": "LevikDrop v1 vectors (docs/levik-drop.md). Private keys: identity S d=01..20, identity R d=21..40, ephemeral S d=41..60, ephemeral R d=61..80 (32 consecutive bytes each); nS=a0..bf, nR=c0..df. record1 is the second record sealed with sr: plaintext 01 {\"t\":\"done\"} at seq 1. data: file 3, offset 262144, bytes \"abc\".",
+  "transfer": "0b9f3c1e-5d2a-4c6b-9e8f-1a2b3c4d5e6f",
+  "spkiS": "3059301306072a8648ce3d020106082a8648ce3d03010703420004515c3d6eb9e396b904d3feca7f54fdcd0cc1e997bf375dca515ad0a6c3b4035f4536be3a50f318fbf9a5475902a221502bef0d57e08c53b2cc0a56f17d9f9354",
+  "spkiR": "3059301306072a8648ce3d020106082a8648ce3d030107034200041f140146bfb1b251f84f4ddbe0d4cdcfd77afd984a9520e35794021f8312bb9eec995a08b1fa7704df3dcc0b50a9665263fb7711f95f9f8a449c5096e47c892b",
+  "helloS": "01010b9f3c1e5d2a4c6b9e8f1a2b3c4d5e6f005b3059301306072a8648ce3d020106082a8648ce3d03010703420004515c3d6eb9e396b904d3feca7f54fdcd0cc1e997bf375dca515ad0a6c3b4035f4536be3a50f318fbf9a5475902a221502bef0d57e08c53b2cc0a56f17d9f935404261efbd3550cf068ef013ed7366ba32f5d6fe557b4b2abce8ade58cba168a55e1788a0b29a56a6abec4084c0c96bd3dcbca6b507f35dbea9e985708479d8bdc9f9bc2a7b0b13bb111caa06b2778a9831bd345a41264113091e93a2d0e0a69de9",
+  "helloR": "02010b9f3c1e5d2a4c6b9e8f1a2b3c4d5e6f005b3059301306072a8648ce3d020106082a8648ce3d030107034200041f140146bfb1b251f84f4ddbe0d4cdcfd77afd984a9520e35794021f8312bb9eec995a08b1fa7704df3dcc0b50a9665263fb7711f95f9f8a449c5096e47c892b04bd5714b9c20400411f1e51dbff63647f05d1d70b55fc200c6cad10c2f4614dc1e5048562f731f54573c04224d973a916a59f526a8268076fc1cfa92a5f143f19c0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedf",
+  "commit": "f9bc2a7b0b13bb111caa06b2778a9831bd345a41264113091e93a2d0e0a69de9",
+  "th": "7d811b27ae680ead9214d5fe9fdadae045e950c5046ef8d083dedd733ee47206",
+  "sr": "6f487adbfbbe22802aab2a0a273a777677399d2cec2e5d06d3c707deba5d7b6c",
+  "rs": "5768e5c4392934cc2890df2cb1c29e766d89b92c004c56082780c0cbd87977f9",
+  "lan": "1382141d975807bbd95b7096f81d075bf899ee4898e86ed3d77956fd4cca461f",
+  "code": "285 170",
+  "record1": "100000000000000001effaeeee7860b836c998d3d27a268798015e4fcc534822a2de577d4056",
+  "dialer": "200b9f3c1e5d2a4c6b9e8f1a2b3c4d5e6ff25fe36f0ea281eac66b5646f89ae1529c1b2c4eaaa264b60652b089042df9dc",
+  "listener": "21ee3ed43322f2af905ff55025196e3be344633dcb22edd74bba646170f4bc58a1",
+  "data": "0200030000000000040000616263",
+  "names": [
+    ["отчёт.pdf", "отчёт.pdf"],
+    ["../../etc/passwd", "__.._etc_passwd"],
+    [".bashrc", "_bashrc"],
+    ["CON.txt", "CON_.txt"],
+    ["a‮gnp.exe", "agnp.exe"],
+    ["name. . ", "name"],
+    ["é.txt", "é.txt"],
+    ["", "file"]
+  ]
+}
