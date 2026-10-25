@@ -1,3 +1,6 @@
+import { ServiceRouteState } from "./vpn/serviceRouteState";
+import { validateServiceRouteConfig } from "./vpn/serviceRouteTransport";
+import { parseServiceRoutePolicy, serviceExitForServer, serviceServerKey, compiledServiceRoutes, type ServiceRouteStatus } from "./vpn/serviceRoutes";
 import { app, net } from "electron";
 import { randomBytes } from "node:crypto";
 import { EventEmitter } from "node:events";
@@ -50,7 +53,7 @@ import {
   verdictOf,
   type RankedServer,
 } from "./vpn/smartAuto";
-import { measureServerLatencies } from "./vpn/serverPinger";
+import { measureServerLatencies, extractServerEndpoint } from "./vpn/serverPinger";
 import { DnsLeakProtection } from "./windows/dnsLeakProtection";
 import { KillSwitchError, WindowsKillSwitch } from "./windows/killSwitch";
 import { AppUpdater } from "./update/appUpdater";
@@ -78,6 +81,7 @@ import type { HomeAction, HomeBeacon, VerifiedHome } from "./platform/levikHome"
 import { expiryNotices, NoticeState } from "./platform/notices";
 import type { AppNotice } from "./platform/notices";
 import {
+  flagEnabled,
   currentAdvice,
   currentNodeLoad,
   mergeFetched,
@@ -232,6 +236,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
   private applyingPendingGameProfile = false;
   private enforcingGameExpiry = false;
   private readonly secureStore = new SecureStore();
+  private readonly serviceRouteState = new ServiceRouteState(this.secureStore);
   private readonly xray = new XrayManager();
   private readonly dnsLeakProtection = new DnsLeakProtection(this.secureStore);
   private readonly killSwitch = new WindowsKillSwitch(() => this.xray.executablePath(), {
@@ -253,6 +258,11 @@ export class AppController extends EventEmitter<AppControllerEvents> {
   private api!: MobileApiClient;
   private accessToken: string | null = null;
   private profile: PreparedTunnelProfile | null = null;
+  private lastServiceRouteReport: string | null = null;
+  private lastServiceRouteReportAt = 0;
+  private serviceRoutesRetry: ReturnType<typeof setTimeout> | null = null;
+  private serviceRoutesApplying: Promise<void> | null = null;
+  private serviceRoutesRollback = false;
   /** The last conflict scan with process ids; the snapshot carries only names. */
   private detectedConflicts: DetectedConflict[] = [];
   private conflictScan: Promise<void> | null = null;
@@ -411,6 +421,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     );
     this.xray.on("log", (line) => this.handleCoreLog(line));
     this.xray.on("exit", (code, expected) => this.handleXrayExit(code, expected));
+    this.xray.on("serviceRoutes", (status) => this.serviceRouteStatusChanged(status));
     this.xray.on("stats", (downloadBytes, uploadBytes) => this.handleTrafficStats(downloadBytes, uploadBytes));
     this.xray.on("gameDown", (movedToTunnel) => {
       const path = this.profile?.gameOnly ? "напрямую" : "через обычный VPN";
@@ -714,7 +725,8 @@ export class AppController extends EventEmitter<AppControllerEvents> {
       if (this.state.settings.preventDnsLeaks) await this.dnsLeakProtection.enable();
       progress.reach("profile", "config_invalid");
       this.gamePassword = randomBytes(24).toString("hex");
-      const config = buildXrayConfig(this.profile, server, this.state.settings, this.gamePassword);
+      await this.refreshServiceRoutePolicy(server);
+      const config = buildXrayConfig(this.serviceProfileFor(server), server, this.state.settings, this.gamePassword);
       this.lastConfig = config;
       this.lastTuic = server.tuic;
       progress.reach("core", "core_start_failed");
@@ -842,6 +854,8 @@ export class AppController extends EventEmitter<AppControllerEvents> {
   }
 
   async shutdown(reason: "quit" | "app_update" = "quit"): Promise<void> {
+    if (this.serviceRoutesRetry) clearTimeout(this.serviceRoutesRetry);
+    this.serviceRoutesRetry = null;
     this.loginGeneration += 1;
     const saved = this.telemetry.finish("system", reason === "app_update" ? "app_update" : null);
     await this.stopConnection("system", null);
@@ -1116,6 +1130,11 @@ export class AppController extends EventEmitter<AppControllerEvents> {
           return;
         }
         if (status.accessToken.length < 32 || status.accessToken.length > 4_096) throw new Error("Некорректная сессия");
+        await this.serviceRouteState.clear();
+        this.xray.serviceRoutes?.stop();
+        if (this.profile) delete this.profile.serviceRoutes;
+        this.lastServiceRouteReport = null; this.lastServiceRouteReportAt = 0;
+        this.patch({ serviceRoutes: null, serviceRouteDetails: [], serviceRouteNotice: null });
         this.accessToken = status.accessToken;
         await this.secureStore.put("access_token", Buffer.from(status.accessToken));
         if (isAccountHint(status.accountHint)) await this.secureStore.put("account_hint", Buffer.from(status.accountHint));
@@ -1142,6 +1161,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     const plaintext = decryptTunnelProfile(this.identity, response.profile);
     try {
       const profile = prepareTunnelProfile(plaintext, subscriptionId);
+      if (this.profile?.subscriptionId === profile.subscriptionId && this.profile.serviceRoutes) profile.serviceRoutes = this.profile.serviceRoutes;
       await this.applyTunnelProfile(profile);
     } finally {
       plaintext.fill(0);
@@ -1285,6 +1305,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
 
   private async applyHome(action: HomeAction): Promise<void> {
     if (action.kind === "sleep") {
+      if (this.xray.serviceRoutes?.active) return;
       this.homeAddresses = localAddresses().join(",");
       this.addLog(`Levik Home: дома «${action.home}» VPN включён на роутере, Levik VPN отключается`);
       await this.stopConnection("system", "home");
@@ -1406,6 +1427,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     switch (event) {
       case "ready":
       case "resync":
+        void this.applyServiceRoutes().catch(() => {});
         this.runCommands();
         this.refreshNotices();
         this.refreshRemoteIfWatched();
@@ -1445,6 +1467,9 @@ export class AppController extends EventEmitter<AppControllerEvents> {
         this.runCommands();
         this.refreshRemoteIfWatched();
         break;
+      case "service_routes":
+        void this.applyServiceRoutes().catch(() => this.patch({ serviceRouteNotice: "Новые маршруты сохранены, но пока не применены." }));
+        break;
       case "rules":
         void this.applyAccountRules();
         break;
@@ -1459,6 +1484,158 @@ export class AppController extends EventEmitter<AppControllerEvents> {
    * server folds them into the tunnel profile: fetch it and, while connected,
    * reconnect when the routing it carries changed.
    */
+  private activeMainServer(): TunnelServer | null {
+    if (!this.xray.serviceRoutes?.active) return this.selectedServer();
+    const exitId = this.xray.serviceRoutes.mainExitId;
+    const pending = this.profile ? this.serviceRouteState.pending(this.profile.subscriptionId) : undefined;
+    const policy = pending?.fingerprint === this.xray.serviceRoutes?.snapshot?.fingerprint ? pending : this.profile?.serviceRoutes;
+    return policy && exitId ? this.profile!.servers.find((server) => serviceExitForServer(policy, server)?.exitId === exitId) ?? null : null;
+  }
+
+  private serviceConnectionDetail(server: TunnelServer | null): string {
+    if (!this.xray.serviceRoutes?.active) return `Защищено через ${server?.name ?? "VPN"}`;
+    const actual = this.activeMainServer();
+    return actual ? `Основной VPN: ${actual.name}. Сервисные маршруты применяются отдельно.`
+      : "Основной выход недоступен. Состояние отдельных маршрутов — в «Моих правилах».";
+  }
+
+  private serviceProfileFor(server: TunnelServer): PreparedTunnelProfile {
+    if (!this.profile) throw new Error("Профиль не загружен");
+    const profile = { ...this.profile };
+    if (!profile.serviceRoutes && !this.serviceRouteState.enrolled(profile.subscriptionId)) return profile;
+    const key = serviceServerKey(server);
+    const policy = key && !this.serviceRouteState.excluded(profile.subscriptionId, key)
+      ? this.serviceRoutesRollback ? this.serviceRouteState.good(profile.subscriptionId) ?? profile.serviceRoutes
+        : this.serviceRouteState.effective(profile.subscriptionId, key) ?? profile.serviceRoutes : undefined;
+    if (policy) profile.serviceRoutes = policy;
+    else delete profile.serviceRoutes;
+    return profile;
+  }
+
+  /** New resource failures preserve the last-good ordinary policy; protected connectivity remains independent. */
+  private async refreshServiceRoutePolicy(server: TunnelServer): Promise<boolean> {
+    const profile = this.profile;
+    if (this.serviceRoutesRollback || !profile || !this.accessToken) return false;
+    await this.serviceRouteState.load().catch(() => {});
+    if (!profile.serviceRoutes && !this.serviceRouteState.enrolled(profile.subscriptionId)
+      && !flagEnabled(this.remoteStored?.config ?? null, "service_routes", this.identity.deviceId())) return false;
+    const endpoint = extractServerEndpoint(server.outbound); const key = serviceServerKey(server);
+    if (!endpoint || !key) return false;
+    const previous = this.serviceRouteState.good(profile.subscriptionId) ?? profile.serviceRoutes;
+    const token = this.accessToken;
+    try {
+      const response = await this.api.serviceRouteProfile(token, profile.subscriptionId,
+        { address: endpoint.host, port: endpoint.port,
+          protocol: "tuic" in server && server.tuic ? "tuic" : String(server.outbound.protocol) });
+      if (this.profile !== profile || this.accessToken !== token || this.selectedServer()?.id !== server.id) return false;
+      if (response.ok !== true || typeof response.applicable !== "boolean") throw new Error("Некорректный ответ политики");
+      if (!response.applicable) {
+        await this.serviceRouteState.classified(profile.subscriptionId, key, false);
+        if (this.profile !== profile || this.accessToken !== token) return false;
+        this.xray.serviceRoutes?.setPolicySuspended(true);
+        if (previous) this.serviceRouteStatusChanged({ revision: previous.revision, fingerprint: previous.fingerprint,
+          state: "suspended", routes: [], detail: "excluded_mode" });
+        this.patch({ serviceRouteNotice: "В текущем способе подключения сервисные маршруты не применяются." });
+        return false;
+      }
+      const policy = parseServiceRoutePolicy(response.profile);
+      if (!policy || !serviceExitForServer(policy, server)) throw new Error("Политика сервисных маршрутов не получена");
+      await this.serviceRouteState.classified(profile.subscriptionId, key, true);
+      if (this.profile !== profile || this.accessToken !== token) return false;
+      this.serviceRouteState.propose(profile.subscriptionId, policy);
+      this.xray.serviceRoutes?.setPolicySuspended(false);
+      if (previous?.fingerprint === policy.fingerprint) this.xray.serviceRoutes?.acknowledgeRevision(policy);
+      return previous?.fingerprint !== policy.fingerprint;
+    } catch {
+      if (this.profile !== profile || this.accessToken !== token) return false;
+      this.patch({ serviceRouteNotice: previous
+        ? "Новые настройки недоступны. Сохраняются последние рабочие маршруты."
+        : "Сервисные маршруты ожидают загрузки; применение ещё не подтверждено." });
+      return false;
+    }
+  }
+
+  private serviceRouteStatusChanged(status: ServiceRouteStatus): void {
+    const profile = this.profile; const token = this.accessToken;
+    if (!profile || !token) return;
+    const candidates = [this.serviceRouteState.pending(profile.subscriptionId), this.serviceRouteState.good(profile.subscriptionId), profile.serviceRoutes];
+    const policy = candidates.find((item) => item?.fingerprint === status.fingerprint);
+    if (!policy) return;
+    const details = status.routes.map((route) => {
+      const rule = policy?.rules.find((item) => item.id === route.id);
+      const exit = policy?.exits.find((item) => item.exitId === route.exitId);
+      return { label: rule?.label ?? "Сервисное правило", state: route.state,
+        exitName: route.state === "blocked" || route.state === "unavailable" ? "Маршрут приостановлен"
+          : exit ? `${exit.name} · ${exit.countryCode}` : rule?.route.kind === "direct" || route.state === "fallback"
+            ? "Напрямую" : "По общему режиму" };
+    });
+    this.patch({ serviceRoutes: status, serviceRouteDetails: details,
+      ...(this.state.status === "connected" && this.xray.serviceRoutes?.active ? { statusDetail: this.serviceConnectionDetail(this.selectedServer()) } : {}) });
+    void (async () => {
+      const applied = await this.serviceRouteState.acknowledge(profile.subscriptionId, status);
+      if (this.profile !== profile || this.accessToken !== token) return;
+      if (applied) { profile.serviceRoutes = applied; this.patch({ serviceRouteNotice: null }); }
+      const serialized = JSON.stringify(status); const now = Date.now();
+      if (serialized === this.lastServiceRouteReport && now - this.lastServiceRouteReportAt < 120000) return;
+      this.lastServiceRouteReport = serialized; this.lastServiceRouteReportAt = now;
+      // Best-effort receipt must not expire a different account after a late 401.
+      try { await this.api.reportServiceRoutes(token, status); }
+      catch { if (this.accessToken === token && this.lastServiceRouteReport === serialized) this.lastServiceRouteReport = null; }
+    })().catch(() => {
+      if (this.profile === profile && this.accessToken === token) this.patch({ serviceRouteNotice: "Маршруты работают, но сохранить подтверждение пока не удалось." });
+    });
+  }
+
+  private applyServiceRoutes(): Promise<void> {
+    if (this.state.busy) {
+      if (!this.serviceRoutesRetry) this.serviceRoutesRetry = setTimeout(() => {
+        this.serviceRoutesRetry = null; void this.applyServiceRoutes().catch(() => {});
+      }, 1000);
+      return Promise.resolve();
+    }
+    this.serviceRoutesApplying ??= this.applyServiceRoutesOnce().finally(() => { this.serviceRoutesApplying = null; });
+    return this.serviceRoutesApplying;
+  }
+
+  private async applyServiceRoutesOnce(): Promise<void> {
+    if (!this.profile || !this.accessToken) return;
+    const server = this.selectedServer();
+    if (!server) return;
+    const changed = await this.refreshServiceRoutePolicy(server);
+    const profile = this.profile;
+    const candidateProfile = this.serviceProfileFor(server); const policy = candidateProfile.serviceRoutes;
+    if (!changed || !policy || !serviceExitForServer(policy, server) || !this.xray.isRunning()) return;
+    const candidate = buildXrayConfig(candidateProfile, server, this.state.settings, this.gamePassword);
+    const compiled = compiledServiceRoutes(candidate);
+    if (compiled && ["unsupported", "error", "suspended"].includes(compiled.status.state)) {
+      this.serviceRouteStatusChanged(compiled.status); this.serviceRouteState.discard(profile.subscriptionId);
+      this.patch({ serviceRouteNotice: "Новые правила сохранены, но этот способ подключения пока не может их применить." });
+      return;
+    }
+    try { await validateServiceRouteConfig(this.xray.executablePath(), candidate); }
+    catch {
+      this.serviceRouteStatusChanged({ revision: policy.revision, fingerprint: policy.fingerprint,
+        state: "error", routes: [], detail: "config_invalid" });
+      this.serviceRouteState.discard(profile.subscriptionId);
+      this.patch({ serviceRouteNotice: "Новые правила не прошли проверку; сохранены предыдущие рабочие маршруты." });
+      return;
+    }
+    await this.stopTunnelForReplacement();
+    try {
+      await this.connect();
+      if (this.xray.serviceRoutes?.snapshot?.state === "error") throw new Error("API не подтвердил применение маршрутов");
+    } catch (error) {
+      this.serviceRouteState.discard(profile.subscriptionId);
+      if (this.profile === profile) {
+        if (this.xray.isRunning()) await this.stopTunnelForReplacement();
+        this.serviceRoutesRollback = true;
+        try { await this.connect(); } finally { this.serviceRoutesRollback = false; }
+      }
+      this.patch({ serviceRouteNotice: "Новая конфигурация не запустилась; восстановлены предыдущие маршруты." });
+      throw error;
+    }
+  }
+
   private async applyAccountRules(): Promise<void> {
     const subscriptionId = this.state.selectedSubscriptionId;
     if (!this.accessToken || !subscriptionId || this.state.busy) return;
@@ -1726,7 +1903,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
       await this.withdrawPresence();
       return;
     }
-    const report = presenceReport(this.state.status, this.selectedServer());
+    const report = presenceReport(this.state.status, this.activeMainServer());
     const fresh = Date.now() - this.sentPresenceAt < PRESENCE_REFRESH_MS - 10_000;
     if (!force && fresh && samePresence(this.sentPresence, report)) return;
     const result = await this.withSession((token) => this.api.reportPresence(token, report));
@@ -1756,6 +1933,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
       if (!fetched) return;
       this.remoteStored = mergeFetched(this.remoteStored, fetched, Date.now(), !outside || this.tunnelActive());
       await this.remoteConfigStore.save(this.remoteStored);
+      void this.applyServiceRoutes().catch(() => {});
       await this.updateAnnouncements();
       void this.checkMaintenance();
     })().catch((error: unknown) => {
@@ -1945,10 +2123,14 @@ export class AppController extends EventEmitter<AppControllerEvents> {
   }
 
   private async loadProfile(): Promise<PreparedTunnelProfile | null> {
+    await this.serviceRouteState.load().catch(() => {});
     const raw = await this.secureStore.get("tunnel_profile");
     if (!raw) return null;
     try {
       const value = JSON.parse(raw.toString("utf8")) as PreparedTunnelProfile;
+      const serviceRoutes = parseServiceRoutePolicy(value.serviceRoutes);
+      const good = this.serviceRouteState.good(value.subscriptionId) ?? serviceRoutes;
+      if (good) value.serviceRoutes = good;
       return Array.isArray(value.servers) && typeof value.subscriptionId === "string" ? value : null;
     } catch {
       await this.secureStore.remove("tunnel_profile");
@@ -1989,6 +2171,9 @@ export class AppController extends EventEmitter<AppControllerEvents> {
   }
 
   private async clearLocalSession(statusDetail: string | null): Promise<void> {
+    if (this.serviceRoutesRetry) clearTimeout(this.serviceRoutesRetry);
+    this.serviceRoutesRetry = null;
+    await this.serviceRouteState.clear();
     await this.drop?.signedOut();
     this.cancelGameProbes();
     this.gameValidatedAt = 0;
@@ -2004,6 +2189,8 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     this.sentPresence = null;
     this.accessToken = null;
     this.profile = null;
+    this.lastServiceRouteReport = null;
+    this.patch({ serviceRoutes: null, serviceRouteNotice: null, serviceRouteDetails: [] });
     this.lastConfig = null;
     this.lastTuic = undefined;
     this.settingsRevision = 0;
@@ -2168,7 +2355,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     this.tunnelHealthCheckRunning = true;
     try {
       let codes = ["no_vpn_network"];
-      const healthy = await this.xray.isHealthy() && await isTunnelHealthy({ onFailure: (failures) => { codes = failures; } });
+      const healthy = await this.xray.isHealthy() && (this.xray.serviceRoutes?.active || await isTunnelHealthy({ onFailure: (failures) => { codes = failures; } }));
       if (generation !== this.connectionGeneration || this.state.status !== "connected") return;
       this.tunnelHealthFailures = healthy ? 0 : this.tunnelHealthFailures + 1;
       this.telemetry.record((session) => {
@@ -2200,6 +2387,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
   }
 
   private async verifyTunnelReadiness(generation: number, onFailure?: (codes: string[]) => void): Promise<void> {
+    if (this.xray.serviceRoutes?.active && await this.xray.isHealthy()) return;
     let failures: string[] = [];
     const healthy = await isTunnelHealthy({
       startup: true,
@@ -2322,6 +2510,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
   }
 
   private connectedDetail(server: TunnelServer | null): string {
+    if (this.xray.serviceRoutes?.active) return this.serviceConnectionDetail(server);
     const name = server?.name ?? "VPN";
     return this.killSwitchFailure
       ? `Защищено через ${name}. Kill Switch не включился (${this.killSwitchFailure})`
@@ -2679,6 +2868,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
   }
 
   private launchTrafficCheck(delayMs: number): void {
+    if (this.xray.serviceRoutes?.active) return;
     const server = this.selectedServer();
     if (!server || !this.state.settings.automaticServer || this.trafficCheck || isHomeRoadServer(server.name)) return;
     // A running match is never moved; the check waits for the next connection.

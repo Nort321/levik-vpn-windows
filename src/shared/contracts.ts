@@ -1,3 +1,4 @@
+import type { ServiceRouteStatus } from "./serviceRoutes";
 import type { DropAnswer, DropControl, DropSnapshot } from "./drop";
 import type { RemoteCommand, RemoteSnapshot } from "./remote";
 
@@ -173,6 +174,9 @@ export interface AppSettings {
 }
 
 export interface AppSnapshot {
+  serviceRoutes?: ServiceRouteStatus | null;
+  serviceRouteNotice?: string | null;
+  serviceRouteDetails?: Array<{ label: string; state: "active" | "fallback" | "blocked" | "unavailable"; exitName: string }>;
   game?: GameSnapshot;
   appVersion: string;
   tab: AppTab;
