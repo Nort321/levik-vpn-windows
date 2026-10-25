@@ -1,3 +1,4 @@
+import type { ServiceRouteStatus } from "../../shared/serviceRoutes";
 import type {
   ApprovalDecisionResponse,
   ApprovalsResponse,
@@ -89,6 +90,14 @@ export class MobileApiClient {
 
   account(accessToken: string): Promise<MobileAccountResponse> {
     return this.request("GET", "/api/mobile/v1/account", null, accessToken);
+  }
+
+  serviceRouteProfile(accessToken: string, subscriptionId: string, endpoint: { address: string; port: number; protocol: string }): Promise<{ ok: true; applicable: boolean; profile?: unknown }> {
+    return this.request("POST", "/api/mobile/v1/service-routes/profile", { subscriptionId, endpoint }, accessToken);
+  }
+
+  async reportServiceRoutes(accessToken: string, status: ServiceRouteStatus): Promise<void> {
+    await this.request("POST", "/api/mobile/v1/service-routes/status", status, accessToken);
   }
 
   tunnelProfile(accessToken: string, subscriptionId: string): Promise<TunnelProfileResponse> {

@@ -7,7 +7,7 @@ import type { ConnectionStatus, TunnelServer } from "../../shared/contracts";
  * An event only names what changed; the app fetches it. "ready" (every new
  * stream) and "resync" mean: fetch everything, something may have been missed.
  */
-export const LIVE_EVENTS = ["ready", "resync", "settings", "devices", "presence", "config", "approvals", "commands", "rules", "notifications", "road"] as const;
+export const LIVE_EVENTS = ["ready", "resync", "settings", "devices", "presence", "config", "approvals", "commands", "rules", "service_routes", "notifications", "road"] as const;
 export type LiveEvent = (typeof LIVE_EVENTS)[number];
 
 const MAX_LINE = 4_096;

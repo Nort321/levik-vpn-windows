@@ -1,3 +1,5 @@
+import { ServiceRouteSession } from "./serviceRouteSession";
+import type { ServiceRouteStatus } from "./serviceRoutes";
 import { app } from "electron";
 import { execFile, spawn } from "node:child_process";
 import type { ChildProcess, ChildProcessWithoutNullStreams } from "node:child_process";
@@ -22,6 +24,7 @@ const execFileAsync = promisify(execFile);
 const CORE_NOISE = /\b(?:proxy\/tun: processing from|app\/dispatcher: sniffed domain|app\/dispatcher: default route for|transport\/internet\/splithttp: XHTTP is dialing|proxy\/vless\/outbound: tunneling request|transport\/internet\/tcp: dialing TCP to|proxy\/dns: handling DNS traffic|app\/dispatcher: taking detour \[levik-dns-out\])/;
 
 interface XrayEvents {
+  serviceRoutes: [status: ServiceRouteStatus];
   log: [line: string];
   exit: [code: number | null, expected: boolean];
   stats: [downloadBytes: number, uploadBytes: number];
@@ -30,6 +33,7 @@ interface XrayEvents {
 }
 
 export class XrayManager extends EventEmitter<XrayEvents> {
+  readonly serviceRoutes = new ServiceRouteSession((status) => this.emit("serviceRoutes", status));
   private process: ChildProcessWithoutNullStreams | null = null;
   private readonly stopping = new WeakSet<ChildProcess>();
   private statsTimer: ReturnType<typeof setInterval> | null = null;
@@ -61,8 +65,8 @@ export class XrayManager extends EventEmitter<XrayEvents> {
   async routeGameThroughTunnel(): Promise<void> {
     const child = this.process; const tag = this.tunnelTag;
     if (!child || !tag) throw new Error("VPN disconnected");
-    await execFileAsync(this.executablePath(), ["api", "bo", `--server=${XRAY_STATS_ENDPOINT}`, "-b", GAME_UDP_BALANCER, tag],
-      { windowsHide: true, timeout: 4_000, maxBuffer: 16 * 1024 });
+    await execFileAsync(this.executablePath(), ["api", "bo", `--server=${this.routingEndpoint()}`, "-b", GAME_UDP_BALANCER, tag],
+      { windowsHide: true, timeout: 4_000, maxBuffer: 16 * 1024, ...(this.apiEnvironment() ? { env: this.apiEnvironment() } : {}) });
     if (this.process !== child) throw new Error("VPN connection changed");
     this.gameViaTunnel = true; this.selectedGameUdpRoute = null; this.gameUdpReady = true;
     await this.multipath?.stop();
@@ -77,8 +81,8 @@ export class XrayManager extends EventEmitter<XrayEvents> {
   async selectGameUdpRoute(index: number | null): Promise<void> {
     const child = this.process;
     if (!child) throw new Error("VPN disconnected");
-    await execFileAsync(this.executablePath(), ["api", "bo", `--server=${XRAY_STATS_ENDPOINT}`, "-b", GAME_UDP_BALANCER,
-      index === null ? GAME_MULTIPATH : gameTag(index)], { windowsHide: true, timeout: 4_000, maxBuffer: 16 * 1024 });
+    await execFileAsync(this.executablePath(), ["api", "bo", `--server=${this.routingEndpoint()}`, "-b", GAME_UDP_BALANCER,
+      index === null ? GAME_MULTIPATH : gameTag(index)], { windowsHide: true, timeout: 4_000, maxBuffer: 16 * 1024, ...(this.apiEnvironment() ? { env: this.apiEnvironment() } : {}) });
     if (this.process !== child) throw new Error("VPN connection changed");
     this.gameUdpFallback = index !== null;
     this.selectedGameUdpRoute = index; this.gameUdpReady = true;
@@ -114,11 +118,13 @@ export class XrayManager extends EventEmitter<XrayEvents> {
     }
     if (Array.isArray(routing.balancers)) for (const balancer of routing.balancers) {
       if (!balancer || typeof balancer !== "object" || !("tag" in balancer)) continue;
+      const serviceTarget = typeof balancer.tag === "string" ? this.serviceRoutes.selectedTarget(balancer.tag) : undefined;
+      if (serviceTarget) Object.assign(balancer, { selector: [serviceTarget] });
       if (balancer.tag === GAME_UDP_BALANCER) Object.assign(balancer, { selector: [this.gameViaTunnel && this.tunnelTag ? this.tunnelTag
         : !this.gameUdpReady ? GAME_BLOCK : this.selectedGameUdpRoute === null ? GAME_MULTIPATH : gameTag(this.selectedGameUdpRoute)] });
     }
     try {
-      await updateXrayRouting(this.executablePath(), XRAY_STATS_ENDPOINT, routing);
+      await updateXrayRouting(this.executablePath(), this.routingEndpoint(), routing, this.apiEnvironment());
       if (this.process !== child) throw new Error("Подключение изменилось");
       this.routing = routing;
     } catch {
@@ -220,6 +226,8 @@ export class XrayManager extends EventEmitter<XrayEvents> {
       }
       this.routing = typeof launchConfig.routing === "object" && launchConfig.routing !== null
         ? structuredClone(launchConfig.routing) as Record<string, unknown> : null;
+      try { await this.serviceRoutes.start(config); }
+      catch (error) { await this.stop(); throw error; }
       this.startStatsPolling();
     } catch (error) {
       await this.stop();
@@ -245,6 +253,7 @@ export class XrayManager extends EventEmitter<XrayEvents> {
     child.once("exit", (code) => {
       if (this.process !== child) return;
       this.stopStatsPolling();
+      this.serviceRoutes.stop();
       const expected = this.stopping.has(child);
       this.process = null;
       this.emit("exit", code, expected);
@@ -265,6 +274,7 @@ export class XrayManager extends EventEmitter<XrayEvents> {
   }
 
   async stop(): Promise<void> {
+    this.serviceRoutes.stop();
     this.routing = null; this.selectedGameUdpRoute = null; this.gameUdpReady = false;
     this.gameUdpFallback = false; this.gameViaTunnel = false; this.tunnelTag = null;
     const multipath = this.multipath; this.multipath = null;
@@ -296,10 +306,19 @@ export class XrayManager extends EventEmitter<XrayEvents> {
     if (index !== null) this.multipath?.setPrimaryRoute(index);
   }
 
+  private routingEndpoint(): string { return this.serviceRoutes.authentication ? "levik-service-api:80" : XRAY_STATS_ENDPOINT; }
+  private apiEnvironment(): NodeJS.ProcessEnv | undefined {
+    const auth = this.serviceRoutes.authentication;
+    if (!auth) return undefined;
+    const proxy = `http://${auth.user}:${auth.password}@127.0.0.1:${auth.port}`;
+    return { ...process.env, HTTPS_PROXY: proxy, HTTP_PROXY: proxy, https_proxy: proxy, http_proxy: proxy, NO_PROXY: "", no_proxy: "" };
+  }
+
   async isHealthy(): Promise<boolean> {
     const child = this.process;
     if (!child) return false;
     try {
+      if (this.serviceRoutes.active) { await this.serviceRoutes.queryStats(); return this.process === child; }
       await execFileAsync(this.executablePath(), [
         "api", "statsquery", `--server=${XRAY_STATS_ENDPOINT}`, "-pattern", "inbound>>>levik-tun-in>>>",
       ], { windowsHide: true, timeout: 3_500, maxBuffer: 256 * 1024 });
@@ -377,6 +396,11 @@ export class XrayManager extends EventEmitter<XrayEvents> {
     if (!child || this.statsQueryRunning === child) return;
     this.statsQueryRunning = child;
     try {
+      if (this.serviceRoutes.active) {
+        const stats = await this.serviceRoutes.queryStats();
+        if (this.process === child) this.emit("stats", stats.downlink, stats.uplink);
+        return;
+      }
       const { stdout } = await execFileAsync(this.executablePath(), [
         "api", "statsquery",
         `--server=${XRAY_STATS_ENDPOINT}`,
@@ -537,9 +561,9 @@ function delay(ms: number): Promise<void> {
   return new Promise<void>((resolve) => setTimeout(resolve, ms));
 }
 
-export async function updateXrayRouting(executable: string, endpoint: string, routing: Record<string, unknown>): Promise<void> {
+export async function updateXrayRouting(executable: string, endpoint: string, routing: Record<string, unknown>, environment?: NodeJS.ProcessEnv): Promise<void> {
   const bytes = Buffer.from(JSON.stringify({ routing }));
-  const child = spawn(executable, ["api", "adrules", `--server=${endpoint}`], { windowsHide: true, stdio: ["pipe", "ignore", "ignore"] });
+  const child = spawn(executable, ["api", "adrules", `--server=${endpoint}`], { windowsHide: true, stdio: ["pipe", "ignore", "ignore"], ...(environment ? { env: environment } : {}) });
   try {
     await Promise.all([writeConfigInput(child, bytes), new Promise<void>((resolve, reject) => {
       const timer = setTimeout(() => { child.kill(); reject(new Error("Game routing timeout")); }, 4_000);

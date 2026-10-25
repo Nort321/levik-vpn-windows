@@ -1,3 +1,4 @@
+import type { ServiceRouteStatus } from "./serviceRoutes";
 import type { RemoteCommand, RemoteSnapshot } from "./remote";
 
 export type AppTab = "home" | "servers" | "game" | "stats" | "profile";
@@ -172,6 +173,9 @@ export interface AppSettings {
 }
 
 export interface AppSnapshot {
+  serviceRoutes?: ServiceRouteStatus | null;
+  serviceRouteNotice?: string | null;
+  serviceRouteDetails?: Array<{ label: string; state: "active" | "fallback" | "blocked" | "unavailable"; exitName: string }>;
   game?: GameSnapshot;
   appVersion: string;
   tab: AppTab;

@@ -481,6 +481,7 @@ function renderProfile(): string {
     <div class="profile-grid">
       ${accountSection}
       ${renderRemoteDevices()}
+      ${renderServiceRoutes()}
       ${renderHomeRoad()}
       <section class="section card"><h2 class="card-title">Авторизовать устройство</h2><div class="card-caption">Введите код, показанный на экране другого устройства.</div><form class="activation-form" id="activation-form"><label for="activation-code">Код активации</label><div class="activation-controls"><input id="activation-code" type="text" inputmode="text" autocomplete="one-time-code" maxlength="19" placeholder="XXXX-XXXX-XXXX-XXXX" value="${escapeAttribute(activationCodeInput)}" ${activationSubmitting ? "disabled" : ""} /><button class="button primary" type="submit" ${activationSubmitting ? "disabled" : ""}>${activationSubmitting ? `<span class="spinner"></span>` : icon("link")} Авторизовать</button></div></form></section>
       <section class="section card"><h2 class="card-title">Настройки</h2><div class="settings-list">
@@ -599,6 +600,21 @@ function renderRemoteDevices(): string {
       ? `<div class="device-list remote-devices">${others.map(remoteDeviceRow).join("")}</div>`
       : `<div class="empty">Других устройств с Levik VPN пока нет</div>`;
   return `<section class="section card" aria-labelledby="remote-devices-title"><div class="section-head"><div><h2 class="card-title" id="remote-devices-title">Мои устройства</h2><div class="card-caption">Пульт помогает другому вашему устройству: подключить VPN, выбрать сервер или собрать диагностику.</div></div><button class="button icon-button" id="remote-refresh-button" aria-label="Обновить список устройств" ${remoteLoading ? "disabled" : ""}>${icon("refresh")}</button></div>${list}</section>`;
+}
+
+function renderServiceRoutes(): string {
+  if (!state) return "";
+  const labels = { applied: "Применено", pending: "Ожидает применения", unavailable: "Есть недоступные маршруты",
+    unsupported: "Этот способ подключения пока не поддерживается", suspended: "Не применяется в текущем способе подключения",
+    error: "Сохранены предыдущие рабочие маршруты" };
+  const status = state.serviceRoutes;
+  const description = state.serviceRouteNotice ?? (status ? labels[status.state] : "Страны для сервисов, доменные маски и быстрые настройки. Применение подтверждается отдельно на каждом устройстве.");
+  const details = state.serviceRouteDetails ?? [];
+  return `<section class="section card" aria-labelledby="service-routes-title"><h2 class="card-title" id="service-routes-title">Мои правила</h2>
+    <p class="card-caption" role="status">${escapeHtml(description)}</p>
+    ${details.slice(0, 8).map((route) => `<div class="setting-row"><div><div class="setting-name">${escapeHtml(route.label)}</div><div class="setting-help">${escapeHtml(route.state === "blocked" || route.state === "unavailable" ? "Выход недоступен; приостановлен только этот маршрут" : `${route.state === "fallback" ? "Резерв: " : ""}${route.exitName}`)}</div></div></div>`).join("")}
+    ${details.length > 8 ? `<p class="card-caption">Ещё правил: ${details.length - 8}</p>` : ""}
+    <button class="button compact" id="service-routes-button">Настроить правила и устройства</button></section>`;
 }
 
 /** «Дорога домой», docs/app-platform.md "Home road": this computer as the home exit. */
@@ -1043,6 +1059,7 @@ function bindPageEvents(): void {
     void run(() => window.levik.setSubscriptionShield(subscriptionId, button.dataset.shieldEnabled !== "true"));
   }));
   document.querySelectorAll<HTMLElement>("[data-renew-subscription-id]").forEach((button) => button.addEventListener("click", () => run(() => window.levik.openCabinet("/dashboard/subscriptions"))));
+  document.getElementById("service-routes-button")?.addEventListener("click", () => run(() => window.levik.openCabinet("/dashboard/rules")));
   document.getElementById("cabinet-button")?.addEventListener("click", () => run(() => window.levik.openCabinet("/dashboard")));
   document.getElementById("home-road-cabinet-button")?.addEventListener("click", () => run(() => window.levik.openCabinet("/dashboard/road")));
   document.getElementById("home-road-switch")?.addEventListener("click", () => void toggleHomeRoad());

@@ -1,3 +1,4 @@
+import { withServiceRoutes } from "./serviceRoutes";
 import type { AppSettings, TunnelServer } from "../../shared/contracts";
 import type { PreparedTunnelProfile } from "./tunnelProfile";
 import { XRAY_STATS_ENDPOINT } from "./xrayStats";
@@ -58,6 +59,9 @@ export function buildXrayConfig(
   const gameOnly = profile.gameOnly === true;
   const processBypass = !gameOnly && settings.splitTunnelMode === "bypass" && processes.length > 0;
 
+  const includedAppRule: Record<string, unknown> | undefined = settings.splitTunnelMode === "only" && processes.length
+    ? { type: "field", process: processes, network: "tcp,udp", outboundTag: server.tag } : undefined;
+
   const rules: Record<string, unknown>[] = [
     // Probe the selected VPN even when application/domain rules bypass it. Levik Game alone
     // has no ordinary VPN: its game nodes carry only the relay, so the probe (and the game's
@@ -94,9 +98,7 @@ export function buildXrayConfig(
         ? [{ type: "field", process: processes, network: "tcp,udp", outboundTag: "direct", ruleTag: "process-bypass" }]
         : []),
       ...(!gameRules.length ? [{ type: "field", ip: LOCAL_CIDRS, outboundTag: "direct" }] : []),
-      ...(settings.splitTunnelMode === "only" && processes.length
-        ? [{ type: "field", process: processes, network: "tcp,udp", outboundTag: server.tag }]
-        : []),
+      ...(includedAppRule ? [includedAppRule] : []),
       ...(settings.splitTunnelMode === "only" ? [{ type: "field", network: "tcp,udp", outboundTag: "direct" }] : []),
       ...(proxyDomains.length ? [{ type: "field", domain: unique(proxyDomains), outboundTag: server.tag }] : []),
       ...(profile.directCidrs.length ? [{ type: "field", ip: profile.directCidrs, outboundTag: "direct" }] : []),
@@ -111,7 +113,7 @@ export function buildXrayConfig(
     rules.push({ type: "field", network: "tcp,udp", outboundTag: "direct" });
   }
 
-  return {
+  return withServiceRoutes({
     // Temporary bypass diagnostics: Xray emits ruleTag hits (including tcp:/udp:)
     // at info level. Keep ordinary connections at the existing warning level.
     log: { loglevel: processBypass ? "info" : "warning" },
@@ -175,7 +177,10 @@ export function buildXrayConfig(
     },
     policy: { system: { statsInboundDownlink: true, statsInboundUplink: true, statsOutboundDownlink: true, statsOutboundUplink: true } },
     stats: {},
-  };
+  }, { policy: profile.serviceRoutes, selected: server, servers: profile.servers,
+    automaticServer: settings.automaticServer,
+    ...(settings.splitTunnelMode === "only" ? { onlyProcesses: processes, insertionIndex: includedAppRule ? rules.indexOf(includedAppRule) : rules.length } : {}), directTag: "direct",
+    prepareOutbound: (candidate) => withBootstrapResolution(withAlternateXhttpMux(withAntiDpi(candidate, settings))), gameOnly: profile.gameOnly });
 }
 
 /** Where game UDP goes when Game falls back: the path of the tunnel health probe — the
