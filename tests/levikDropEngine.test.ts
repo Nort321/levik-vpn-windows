@@ -4,7 +4,7 @@ import { connect, createServer } from "node:net";
 import type { Server, Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { DropEngine } from "../src/main/platform/levikDrop/engine";
 import type { DropApi } from "../src/main/platform/levikDrop/engine";
 import { FrameSocket } from "../src/main/platform/levikDrop/framing";
@@ -269,6 +269,9 @@ describe("LevikDrop engine", () => {
     const senderPrompt = await until(() => transferOf(pc.engine)?.prompt, "sender prompt");
     expect(senderPrompt.kind).toBe("confirm");
     expect(senderPrompt.code).toMatch(/^\d{3} \d{3}$/);
+    await vi.waitFor(() => expect(Reflect.get(transferOf(mac.engine) ?? {}, "verificationCode")).toBe(senderPrompt.code), { timeout: 500 });
+    expect(transferOf(mac.engine)?.files).toBeNull();
+    expect(transferOf(mac.engine)?.prompt).toBeNull();
     const id = transferOf(pc.engine)?.id ?? "";
     await expect(pc.engine.answer(id, "confirm", "000 000")).rejects.toThrow(/Код изменился/);
     await pc.engine.answer(id, "confirm", senderPrompt.code);
@@ -281,6 +284,7 @@ describe("LevikDrop engine", () => {
     await until(() => transferOf(pc.engine)?.state === "done" && transferOf(mac.engine)?.state === "done", "done");
     expect((await readFile(join(mac.folder, "photo.jpg"))).equals(content)).toBe(true);
     expect(mac.engine.savedFile(id)).toBe(join(mac.folder, "photo.jpg"));
+    expect(transferOf(mac.engine)?.verificationCode).toBeNull();
     // The receiver completes; the sender may learn it from the website before the `done` record.
     expect(site.steps).toEqual(expect.arrayContaining(["receiver:accept", "receiver:complete"]));
 
@@ -291,6 +295,7 @@ describe("LevikDrop engine", () => {
       return transfer?.id !== id && transfer?.prompt ? transfer : null;
     }, "second offer");
     expect(second.prompt).toEqual({ kind: "offer", code: null, trust: "trusted" });
+    expect(second.verificationCode).toBeNull();
     expect(transferOf(pc.engine)?.prompt).toBeNull();
     await mac.engine.answer(second.id, "accept", null);
     await until(() => transferOf(mac.engine)?.state === "done", "second done");

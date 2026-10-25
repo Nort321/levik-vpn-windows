@@ -667,6 +667,8 @@ function dropTransferRow(transfer: DropTransfer): string {
   const open = isOpenDropState(transfer.state);
   const busy = dropBusy.has(transfer.id);
   const title = transfer.role === "sender" ? `На «${transfer.peerName}»` : `С «${transfer.peerName}»`;
+  const verification = open && transfer.role === "receiver" && transfer.verificationCode && !transfer.prompt
+    ? `<div class="drop-code" aria-label="Код сверки ${escapeAttribute(transfer.verificationCode)}">${escapeHtml(transfer.verificationCode)}</div><p class="card-caption">После подтверждения кода на отправителе появится список файлов.</p>` : "";
   const buttons: string[] = [];
   if (transfer.prompt) buttons.push(`<button class="button compact primary" data-drop-prompt="${escapeAttribute(transfer.id)}">${transfer.prompt.kind === "offer" ? "Принять или отклонить" : "Сверить код"}</button>`);
   if (transfer.state === "active") buttons.push(dropControlButton(transfer, "pause", "Пауза", busy));
@@ -679,6 +681,7 @@ function dropTransferRow(transfer: DropTransfer): string {
   return `<div class="drop-transfer card-flat"><div class="drop-transfer-head"><span class="process-icon">${icon(transfer.role === "sender" ? "upload" : "download")}</span><span class="process-copy"><span class="process-name">${escapeHtml(title)}</span><span class="process-path">${escapeHtml(dropFilesText(transfer))}</span></span></div>
     ${progress}
     <p class="remote-status" aria-live="polite">${escapeHtml(dropStatusText(transfer))}</p>
+    ${verification}
     ${buttons.length ? `<div class="subscription-actions">${buttons.join("")}</div>` : ""}</div>`;
 }
 

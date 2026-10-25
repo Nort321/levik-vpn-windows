@@ -75,6 +75,7 @@ interface Live {
   samples: Array<[number, number]>;
   path: "relay" | "lan" | null;
   link: LinkStatus | null;
+  verificationCode: string | null;
 }
 
 type Answer = "yes" | "no" | "superseded";
@@ -573,6 +574,7 @@ export class DropEngine extends EventEmitter<DropEngineEvents> {
     if (live) {
       live.path = null;
       live.link = null;
+      live.verificationCode = null;
     }
   }
 
@@ -585,7 +587,7 @@ export class DropEngine extends EventEmitter<DropEngineEvents> {
   private liveFor(id: string): Live {
     let live = this.live.get(id);
     if (!live) {
-      live = { done: 0, samples: [], path: null, link: null };
+      live = { done: 0, samples: [], path: null, link: null, verificationCode: null };
       this.live.set(id, live);
     }
     return live;
@@ -610,6 +612,7 @@ export class DropEngine extends EventEmitter<DropEngineEvents> {
         if (!this.current(generation)) return;
         const live = this.liveFor(id);
         live.link = status;
+        if (status !== "session") live.verificationCode = null;
         if (status !== "session") live.path = null;
         if (status !== "session") this.supersede(id);
         this.changed();
@@ -642,10 +645,12 @@ export class DropEngine extends EventEmitter<DropEngineEvents> {
         return answer === "yes";
       },
       events: {
-        keyed: (_code: string, _trust: Trust, key: Buffer) => {
+        keyed: (code: string, trust: Trust, key: Buffer) => {
           if (!this.current(generation)) return;
           peerKey = key;
           this.protocolFailures.delete(id);
+          this.liveFor(id).verificationCode = stored.role === "receiver" && trust !== "trusted" ? code : null;
+          this.changed();
         },
         path: (path: "relay" | "lan") => {
           if (!this.current(generation)) return;
@@ -774,6 +779,7 @@ export class DropEngine extends EventEmitter<DropEngineEvents> {
     const live = this.liveFor(id);
     live.path = null;
     live.samples = [];
+    live.verificationCode = null;
     const stored = this.store.find(id);
     try {
       switch (outcome.kind) {
@@ -824,6 +830,7 @@ export class DropEngine extends EventEmitter<DropEngineEvents> {
     const live = this.liveFor(id);
     live.link = null;
     live.path = null;
+    live.verificationCode = null;
     const transfer = this.web.get(id);
     const code = error === undefined ? null : this.options.errorCode(error);
     try {
@@ -874,6 +881,7 @@ export class DropEngine extends EventEmitter<DropEngineEvents> {
       path: live?.path ?? null,
       link: this.links.has(transfer.id) ? live?.link ?? "connecting" : null,
       prompt: prompt ? { kind: prompt.kind, code: prompt.code, trust: prompt.trust } : null,
+      verificationCode: live?.verificationCode ?? null,
       folder: stored?.role === "receiver" ? stored.folder : null,
       saved: stored?.role === "receiver" ? stored.targets?.some((target) => target.final !== null) ?? false : false,
       createdAt: transfer.createdAt,
