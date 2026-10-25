@@ -143,6 +143,9 @@ export class DropEngine extends EventEmitter<DropEngineEvents> {
   private identity: Identity | null = null;
   private loaded: Promise<void> | null = null;
   private running = false;
+  private generation = 0;
+  private stopping: Promise<void> | null = null;
+  private signingOut: Promise<void> | null = null;
   private presenceTimer: ReturnType<typeof setTimeout> | null = null;
   private refreshTimer: ReturnType<typeof setTimeout> | null = null;
   private refreshing: Promise<void> | null = null;
@@ -183,16 +186,22 @@ export class DropEngine extends EventEmitter<DropEngineEvents> {
 
   /** Signed in: ready to receive, links for open transfers. */
   async start(): Promise<void> {
+    const requested = this.generation;
+    await this.signingOut;
+    await this.stopping;
+    if (requested !== this.generation) return;
     if (this.running) return;
+    const generation = ++this.generation;
     this.running = true;
     try {
       await this.load();
     } catch (error) {
+      if (!this.current(generation)) return;
       this.running = false;
       this.options.log(`LevikDrop: ${error instanceof Error ? error.message : "ключ недоступен"}`);
       return;
     }
-    if (!this.running) return;
+    if (!this.current(generation)) return;
     this.reportPresence();
     this.refresh();
   }
@@ -201,6 +210,12 @@ export class DropEngine extends EventEmitter<DropEngineEvents> {
   async stop(): Promise<void> {
     const wasRunning = this.running;
     this.running = false;
+    this.generation++;
+    this.refreshing = null;
+    this.refreshAgain = false;
+    this.creating = 0;
+    // Dispatch before awaiting file cleanup, while the caller still owns its session.
+    const presence = wasRunning ? this.options.api.clearPresence().catch(() => {}) : Promise.resolve();
     if (this.presenceTimer) clearTimeout(this.presenceTimer);
     if (this.refreshTimer) clearTimeout(this.refreshTimer);
     this.presenceTimer = null;
@@ -208,13 +223,29 @@ export class DropEngine extends EventEmitter<DropEngineEvents> {
     for (const id of [...this.links.keys()]) this.stopLink(id);
     for (const prompt of this.prompts.values()) prompt.resolve("superseded");
     this.prompts.clear();
-    for (const files of this.targets.values()) await files.closeWriting();
-    if (wasRunning) await this.options.api.clearPresence().catch(() => {});
-    await this.store.flush();
+    const previous = this.stopping;
+    const files = [...this.targets.values()];
+    const stopping = (async () => {
+      await previous;
+      await this.loaded?.catch(() => {});
+      for (const file of files) await file.closeWriting();
+      await presence;
+      await this.store.flush();
+    })();
+    this.stopping = stopping;
+    try { await stopping; }
+    finally { if (this.stopping === stopping) this.stopping = null; }
   }
 
   /** Sign-out ends this app's transfers on the website; partial files go here. */
-  async signedOut(): Promise<void> {
+  signedOut(): Promise<void> {
+    if (this.signingOut) return this.signingOut;
+    const pending = this.clearSignedOut();
+    this.signingOut = pending.finally(() => { this.signingOut = null; });
+    return this.signingOut;
+  }
+
+  private async clearSignedOut(): Promise<void> {
     await this.stop();
     for (const stored of this.store.transfers) {
       if (stored.role === "receiver" && stored.targets && !stored.finished) await removePartials(stored.targets);
@@ -223,8 +254,16 @@ export class DropEngine extends EventEmitter<DropEngineEvents> {
     this.web.clear();
     this.webLoaded = false;
     this.devices = [];
+    this.available = false;
+    this.loadedAt = null;
+    this.quota = null;
+    this.error = null;
+    this.resuming.clear();
+    this.protocolFailures.clear();
+    this.announced.clear();
     this.live.clear();
     this.targets.clear();
+    await this.store.flush();
     this.changed();
   }
 
@@ -235,12 +274,14 @@ export class DropEngine extends EventEmitter<DropEngineEvents> {
       this.refreshAgain = true;
       return;
     }
+    const generation = this.generation;
     this.refreshing = this.load()
-      .then(() => this.fetch())
+      .then(() => { if (this.current(generation)) return this.fetch(generation); })
       .catch((error: unknown) => {
-        this.error = this.errorText(error);
+        if (this.current(generation)) this.error = this.errorText(error);
       })
       .finally(() => {
+        if (!this.current(generation)) return;
         this.refreshing = null;
         this.changed();
         if (this.refreshAgain) {
@@ -285,7 +326,9 @@ export class DropEngine extends EventEmitter<DropEngineEvents> {
 
   async send(deviceId: string, paths: readonly string[]): Promise<void> {
     if (!this.running) throw new Error("Войдите в Levik Account");
+    const generation = this.generation;
     await this.load();
+    this.assertCurrent(generation);
     if ([...this.web.values()].some((transfer) => isOpenDropState(transfer.state))) {
       throw new Error("Дождитесь окончания текущей передачи: за раз передаётся один набор файлов.");
     }
@@ -293,11 +336,13 @@ export class DropEngine extends EventEmitter<DropEngineEvents> {
     if (unique.length < 1) return;
     if (unique.length > this.limits.maxFiles) throw new Error(`За раз можно передать до ${this.limits.maxFiles} файлов.`);
     const files = await describeSources(unique);
+    this.assertCurrent(generation);
     const total = files.reduce((sum, file) => sum + file.size, 0);
     if (total > this.limits.maxBytes) throw new Error("За раз можно передать до 2 ГБ.");
     this.creating++;
     try {
       const response = await this.options.api.create({ receiverDeviceId: deviceId, fileCount: files.length, totalBytes: total });
+      this.assertCurrent(generation);
       const transfer = record(response) ? parseWebTransfer(response.transfer) : null;
       if (!transfer) throw new Error("Сайт ответил непонятно. Попробуйте ещё раз.");
       const stored: StoredSender = { id: transfer.id, role: "sender", peerDeviceId: transfer.peerDeviceId, files, finished: false };
@@ -305,8 +350,7 @@ export class DropEngine extends EventEmitter<DropEngineEvents> {
       this.web.set(transfer.id, transfer);
       this.ensureLink(transfer.id);
     } finally {
-      this.creating--;
-      this.changed();
+      if (this.current(generation)) { this.creating--; this.changed(); }
     }
   }
 
@@ -372,15 +416,16 @@ export class DropEngine extends EventEmitter<DropEngineEvents> {
 
   // Website --------------------------------------------------------------------------
 
-  private async fetch(): Promise<void> {
+  private async fetch(generation: number): Promise<void> {
     const [list, devices] = await Promise.all([
       this.options.api.transfers(),
       this.options.api.devices().catch((error: unknown) => {
         const code = this.options.errorCode(error);
-        if (code === "drop_unavailable" || code?.startsWith("http_4")) this.available = false;
+        if (this.current(generation) && (code === "drop_unavailable" || code?.startsWith("http_4"))) this.available = false;
         return null;
       }),
     ]);
+    if (!this.current(generation)) return;
     if (record(devices)) {
       this.available = devices.available === true;
       this.devices = parseDropDevices(devices.devices);
@@ -407,21 +452,24 @@ export class DropEngine extends EventEmitter<DropEngineEvents> {
     }
     this.loadedAt = Date.now();
     this.error = null;
-    await this.reconcile();
+    await this.reconcile(generation);
   }
 
-  private async step(id: string, action: string, reason?: string): Promise<void> {
+  private async step(id: string, action: string, reason?: string, generation = this.generation): Promise<void> {
+    this.assertCurrent(generation);
     try {
       const response = await this.options.api.update({ id, action, ...(reason ? { reason } : {}) });
+      this.assertCurrent(generation);
       const transfer = record(response) ? parseWebTransfer(response.transfer) : null;
       if (transfer) this.web.set(id, transfer);
     } catch (error) {
+      if (!this.current(generation)) return;
       const code = this.options.errorCode(error);
       // Already over on the website: the list says how.
       if (code !== "transfer_ended" && code !== "transfer_not_found" && code !== "invalid_action") throw error;
       this.refresh();
     } finally {
-      this.changed();
+      if (this.current(generation)) this.changed();
     }
   }
 
@@ -429,8 +477,9 @@ export class DropEngine extends EventEmitter<DropEngineEvents> {
     void this.step(id, action, reason).catch((error: unknown) => this.options.log(`LevikDrop: ${this.errorText(error)}`));
   }
 
-  private async reconcile(): Promise<void> {
+  private async reconcile(generation: number): Promise<void> {
     for (const transfer of this.web.values()) {
+      if (!this.current(generation)) return;
       const stored = this.store.find(transfer.id);
       if (isOpenDropState(transfer.state)) {
         if (transfer.role === "sender") {
@@ -460,6 +509,7 @@ export class DropEngine extends EventEmitter<DropEngineEvents> {
           this.announced.add(transfer.id);
           this.emit("notify", { title: "Файлы получены", body: `${dropFileCount(transfer.fileCount)} от «${transfer.peerName}». Они в папке «${stored.folder ?? this.options.defaultFolder}».` });
         }
+        if (!this.current(generation)) return;
         stored.finished = true;
         this.store.save();
         this.targets.delete(transfer.id);
@@ -467,8 +517,10 @@ export class DropEngine extends EventEmitter<DropEngineEvents> {
     }
     if (!this.webLoaded) return;
     for (const stored of [...this.store.transfers]) {
+      if (!this.current(generation)) return;
       if (this.web.has(stored.id)) continue;
       if (stored.role === "receiver" && stored.targets && !stored.finished) await removePartials(stored.targets);
+      if (!this.current(generation)) return;
       this.store.remove(stored.id);
     }
   }
@@ -484,9 +536,11 @@ export class DropEngine extends EventEmitter<DropEngineEvents> {
     if (!this.running) return;
     const identity = this.identity;
     if (!identity) return;
+    const generation = this.generation;
     void this.options.api.presence(identity.spki.toString("base64url")).then(
-      () => this.schedulePresence(PRESENCE_MS),
+      () => { if (this.current(generation)) this.schedulePresence(PRESENCE_MS); },
       (error: unknown) => {
+        if (!this.current(generation)) return;
         const code = this.options.errorCode(error);
         if (code !== "drop_unavailable" && !code?.startsWith("http_404")) this.options.log(`LevikDrop: ${this.errorText(error)}`);
         this.schedulePresence(code === "drop_unavailable" || code?.startsWith("http_4") ? PRESENCE_RETRY_MS : PRESENCE_MS);
@@ -538,9 +592,12 @@ export class DropEngine extends EventEmitter<DropEngineEvents> {
   }
 
   private hostFor(id: string): LinkHost {
+    const generation = this.generation;
     return {
       connect: async () => {
+        this.assertCurrent(generation);
         const response = await this.options.api.update({ id, action: "connect" });
+        this.assertCurrent(generation);
         this.resuming.delete(id);
         const transfer = record(response) ? parseWebTransfer(response.transfer) : null;
         if (transfer) this.web.set(id, transfer);
@@ -548,20 +605,22 @@ export class DropEngine extends EventEmitter<DropEngineEvents> {
         if (!connection) throw new Error("no relay connection");
         return connection;
       },
-      work: (allowLan) => this.workFor(id, allowLan),
+      work: (allowLan) => { this.assertCurrent(generation); return this.workFor(id, allowLan); },
       status: (status) => {
+        if (!this.current(generation)) return;
         const live = this.liveFor(id);
         live.link = status;
         if (status !== "session") live.path = null;
         if (status !== "session") this.supersede(id);
         this.changed();
       },
-      outcome: (outcome) => void this.onOutcome(id, outcome),
-      stopped: (reason, error) => void this.onStopped(id, reason, error),
+      outcome: (outcome) => { if (this.current(generation)) void this.onOutcome(id, outcome); },
+      stopped: (reason, error) => { if (this.current(generation)) void this.onStopped(id, reason, error); },
     };
   }
 
   private workFor(id: string, allowLan: boolean): SenderWork | ReceiverWork {
+    const generation = this.generation;
     const stored = this.store.find(id);
     const transfer = this.web.get(id);
     const identity = this.identity;
@@ -578,19 +637,22 @@ export class DropEngine extends EventEmitter<DropEngineEvents> {
       confirm: async (code: string, trust: Trust): Promise<boolean> => {
         if (!peerKey) return false;
         const answer = await this.ask(id, { kind: "confirm", code, trust }, peerKey);
+        if (!this.current(generation)) return false;
         if (answer === "yes") await this.pins.pin(stored.peerDeviceId, peerKey);
         return answer === "yes";
       },
       events: {
         keyed: (_code: string, _trust: Trust, key: Buffer) => {
+          if (!this.current(generation)) return;
           peerKey = key;
           this.protocolFailures.delete(id);
         },
         path: (path: "relay" | "lan") => {
+          if (!this.current(generation)) return;
           this.liveFor(id).path = path;
           this.changed();
         },
-        progress: (done: number) => this.progress(id, done),
+        progress: (done: number) => { if (this.current(generation)) this.progress(id, done); },
       },
     };
     if (stored.role === "sender") return { ...common, role: "sender", files: stored.files };
@@ -600,6 +662,7 @@ export class DropEngine extends EventEmitter<DropEngineEvents> {
       manifest: stored.manifest,
       targets: this.targetFilesFor(stored),
       decide: async (manifest, code, trust) => {
+        if (!this.current(generation)) return null;
         stored.manifest = manifest;
         this.store.save();
         this.changed();
@@ -607,6 +670,7 @@ export class DropEngine extends EventEmitter<DropEngineEvents> {
           if (!peerKey) return null;
           this.announceOffer(id, manifest);
           const answer = await this.ask(id, { kind: "offer", code: trust === "trusted" ? null : code, trust }, peerKey);
+          if (!this.current(generation)) return null;
           if (answer === "superseded") return null;
           if (answer === "no") {
             await this.decline(id);
@@ -614,9 +678,11 @@ export class DropEngine extends EventEmitter<DropEngineEvents> {
           }
           if (trust !== "trusted") await this.pins.pin(stored.peerDeviceId, peerKey);
         }
-        const files = await this.prepareTargets(stored, manifest);
+        const files = await this.prepareTargets(stored, manifest, generation);
+        if (!this.current(generation)) return null;
         if (stored.decision !== "accepted") {
-          await this.step(id, "accept");
+          await this.step(id, "accept", undefined, generation);
+          if (!this.current(generation)) return null;
           stored.decision = "accepted";
           this.store.save();
         }
@@ -639,13 +705,15 @@ export class DropEngine extends EventEmitter<DropEngineEvents> {
     return files;
   }
 
-  private async prepareTargets(stored: StoredReceiver, manifest: ManifestFile[]): Promise<TargetFiles> {
+  private async prepareTargets(stored: StoredReceiver, manifest: ManifestFile[], generation: number): Promise<TargetFiles> {
     const folder = this.store.folder ?? this.options.defaultFolder;
     const needed = manifest.reduce((sum, file) => sum + file.size, 0);
     const free = await freeBytes(folder);
+    this.assertCurrent(generation);
     if (free !== null && free < needed + 64 * 1024 * 1024) throw new TransferFailure("storage_full");
     stored.folder = folder;
     stored.targets = await planTargets(folder, manifest);
+    if (!this.current(generation)) { await removePartials(stored.targets); this.assertCurrent(generation); }
     this.store.save();
     const files = this.targetFilesFor(stored);
     if (!files) throw new Error("no target files");
@@ -701,6 +769,7 @@ export class DropEngine extends EventEmitter<DropEngineEvents> {
   }
 
   private async onOutcome(id: string, outcome: SessionOutcome): Promise<void> {
+    const generation = this.generation;
     this.supersede(id);
     const live = this.liveFor(id);
     live.path = null;
@@ -716,41 +785,41 @@ export class DropEngine extends EventEmitter<DropEngineEvents> {
           if (failures >= PROTOCOL_FAILURES) {
             this.stopLink(id);
             await this.discard(id);
-            await this.step(id, "fail", "protocol");
+            await this.step(id, "fail", "protocol", generation);
           }
           return;
         }
         case "done":
           this.links.delete(id);
-          await this.step(id, "complete");
+          await this.step(id, "complete", undefined, generation);
           return;
         case "declined":
           this.links.delete(id);
           return;
         case "paused":
           this.links.delete(id);
-          if (outcome.by === "self") await this.step(id, "pause", "user");
+          if (outcome.by === "self") await this.step(id, "pause", "user", generation);
           return;
         case "cancelled":
           this.links.delete(id);
           await this.discard(id);
-          await this.step(id, "cancel");
+          await this.step(id, "cancel", undefined, generation);
           return;
         case "failed":
           this.links.delete(id);
           await this.discard(id);
-          await this.step(id, "fail", outcome.reason);
+          await this.step(id, "fail", outcome.reason, generation);
           return;
       }
     } catch (error) {
-      this.options.log(`LevikDrop: ${this.errorText(error)}`);
+      if (this.current(generation)) this.options.log(`LevikDrop: ${this.errorText(error)}`);
     } finally {
-      if (stored) this.store.save();
-      this.refresh();
+      if (this.current(generation)) { if (stored) this.store.save(); this.refresh(); }
     }
   }
 
   private async onStopped(id: string, reason: string, error?: unknown): Promise<void> {
+    const generation = this.generation;
     this.links.delete(id);
     const live = this.liveFor(id);
     live.link = null;
@@ -759,7 +828,7 @@ export class DropEngine extends EventEmitter<DropEngineEvents> {
     const code = error === undefined ? null : this.options.errorCode(error);
     try {
       if ((reason === "limit" || code === "quota_exceeded") && transfer?.role === "sender" && transfer.state === "active") {
-        await this.step(id, "pause", "quota");
+        await this.step(id, "pause", "quota", generation);
       } else if (code === "subscription_required") {
         this.error = this.errorText(error);
       } else if (error !== undefined && code !== "transfer_ended" && code !== "transfer_not_found") {
@@ -769,6 +838,7 @@ export class DropEngine extends EventEmitter<DropEngineEvents> {
     } catch (stepError) {
       this.options.log(`LevikDrop: ${this.errorText(stepError)}`);
     }
+    if (!this.current(generation)) return;
     this.resuming.delete(id);
     this.changed();
     this.scheduleRefresh();
@@ -813,6 +883,11 @@ export class DropEngine extends EventEmitter<DropEngineEvents> {
 
   private errorText(error: unknown): string {
     return error instanceof Error ? error.message : "ошибка LevikDrop";
+  }
+
+  private current(generation: number): boolean { return this.running && generation === this.generation; }
+  private assertCurrent(generation: number): void {
+    if (!this.current(generation)) throw new Error("Сессия передачи файлов изменилась");
   }
 
   /** Coalesced: progress comes many times a second. */

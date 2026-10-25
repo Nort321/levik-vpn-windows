@@ -1130,11 +1130,13 @@ export class AppController extends EventEmitter<AppControllerEvents> {
           return;
         }
         if (status.accessToken.length < 32 || status.accessToken.length > 4_096) throw new Error("Некорректная сессия");
+        await this.drop?.signedOut();
         await this.serviceRouteState.clear();
         this.xray.serviceRoutes?.stop();
         if (this.profile) delete this.profile.serviceRoutes;
         this.lastServiceRouteReport = null; this.lastServiceRouteReportAt = 0;
         this.patch({ serviceRoutes: null, serviceRouteDetails: [], serviceRouteNotice: null });
+        if (generation !== this.loginGeneration) return;
         this.accessToken = status.accessToken;
         await this.secureStore.put("access_token", Buffer.from(status.accessToken));
         if (isAccountHint(status.accountHint)) await this.secureStore.put("account_hint", Buffer.from(status.accountHint));
@@ -1680,16 +1682,22 @@ export class AppController extends EventEmitter<AppControllerEvents> {
 
   /** The website's LevikDrop routes for this session; withSession clears an expired one. */
   private dropApi(): DropApi {
+    const request = async <Result>(operation: (token: string) => Promise<Result>): Promise<Result> => {
+      const owner = this.requireToken();
+      const result = await this.withSession(operation);
+      if (this.accessToken !== owner) throw new Error("Сессия передачи файлов изменилась");
+      return result;
+    };
     return {
-      presence: (key) => this.withSession((token) => this.api.dropPresence(token, key)),
+      presence: (key) => request((token) => this.api.dropPresence(token, key)),
       clearPresence: async () => {
         const token = this.accessToken;
         if (token) await this.api.clearDropPresence(token);
       },
-      devices: () => this.withSession((token) => this.api.dropDevices(token)),
-      transfers: () => this.withSession((token) => this.api.dropTransfers(token)),
-      create: (offer) => this.withSession((token) => this.api.createDropTransfer(token, offer)),
-      update: (step) => this.withSession((token) => this.api.updateDropTransfer(token, step)),
+      devices: () => request((token) => this.api.dropDevices(token)),
+      transfers: () => request((token) => this.api.dropTransfers(token)),
+      create: (offer) => request((token) => this.api.createDropTransfer(token, offer)),
+      update: (step) => request((token) => this.api.updateDropTransfer(token, step)),
     };
   }
 
@@ -2940,16 +2948,17 @@ export class AppController extends EventEmitter<AppControllerEvents> {
   }
 
   private async withSession<Result>(operation: (accessToken: string) => Promise<Result>): Promise<Result> {
+    const token = this.requireToken();
     try {
-      return await operation(this.requireToken());
+      return await operation(token);
     } catch (error) {
-      if (isAuthenticationRejected(error)) {
+      if (isAuthenticationRejected(error) && this.accessToken === token) {
         try {
           await this.stopConnection("error", "auth_deadline");
         } catch (cleanupError) {
           this.addLog(`Завершение истёкшей сессии: ${messageOf(cleanupError)}`);
         }
-        await this.clearLocalSession("Сессия истекла. Войдите снова.");
+        if (this.accessToken === token) await this.clearLocalSession("Сессия истекла. Войдите снова.");
       }
       throw error;
     }
