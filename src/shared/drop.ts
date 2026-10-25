@@ -46,7 +46,7 @@ export interface DropTransfer {
   /** waiting: the other app is not connected yet. */
   link: "connecting" | "waiting" | "session" | "retrying" | null;
   prompt: DropPrompt | null;
-  /** Ephemeral receiver code visible before the sender releases the manifest. */
+  /** Ephemeral session code, including when only the peer needs verification. */
   verificationCode?: string | null;
   /** Receiver: where the files go. */
   folder: string | null;
@@ -121,7 +121,7 @@ const FAILURE_TEXT: Record<string, string> = {
 /** One line under the transfer. */
 export function dropStatusText(transfer: DropTransfer): string {
   const peer = transfer.peerName;
-  if (transfer.role === "receiver" && transfer.verificationCode && !transfer.prompt && isOpenDropState(transfer.state)) return "Сверьте код с отправителем";
+  if (transfer.role === "receiver" && transfer.verificationCode && !transfer.prompt && transfer.state === "offered" && transfer.files === null) return "Сверьте код с отправителем";
   switch (transfer.state) {
     case "offered":
       if (transfer.role === "sender") {

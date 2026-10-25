@@ -645,11 +645,11 @@ export class DropEngine extends EventEmitter<DropEngineEvents> {
         return answer === "yes";
       },
       events: {
-        keyed: (code: string, trust: Trust, key: Buffer) => {
+        keyed: (code: string, _trust: Trust, key: Buffer) => {
           if (!this.current(generation)) return;
           peerKey = key;
           this.protocolFailures.delete(id);
-          this.liveFor(id).verificationCode = stored.role === "receiver" && trust !== "trusted" ? code : null;
+          this.liveFor(id).verificationCode = code;
           this.changed();
         },
         path: (path: "relay" | "lan") => {

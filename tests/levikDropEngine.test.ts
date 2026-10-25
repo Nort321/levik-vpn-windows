@@ -295,7 +295,8 @@ describe("LevikDrop engine", () => {
       return transfer?.id !== id && transfer?.prompt ? transfer : null;
     }, "second offer");
     expect(second.prompt).toEqual({ kind: "offer", code: null, trust: "trusted" });
-    expect(second.verificationCode).toBeNull();
+    expect(second.verificationCode).toMatch(/^\d{3} \d{3}$/);
+    expect(transferOf(pc.engine)?.verificationCode).toBe(second.verificationCode);
     expect(transferOf(pc.engine)?.prompt).toBeNull();
     await mac.engine.answer(second.id, "accept", null);
     await until(() => transferOf(mac.engine)?.state === "done", "second done");
@@ -324,4 +325,20 @@ describe("LevikDrop engine", () => {
     await until(() => transferOf(pc.engine)?.state === "cancelled" && transferOf(pc.engine)?.prompt === null, "cancelled at the receiver");
     await expect(mac.engine.send("pc", [join(root, "missing.bin")])).rejects.toThrow(/Не удалось открыть/);
   });
+  it("keeps a readable sender code when the receiver declined before pinning", async () => {
+    const {root,pc,mac}=await world();const source=join(root,"retry.txt");await writeFile(source,"same trusted sender, new receiver trust");
+    await pc.engine.send("mac",[source]);const confirm=await until(()=>transferOf(pc.engine)?.prompt,"first sender code");
+    const firstId=transferOf(pc.engine)!.id;await pc.engine.answer(firstId,"confirm",confirm.code);
+    const offer=await until(()=>transferOf(mac.engine)?.prompt,"first receiver offer");await mac.engine.answer(firstId,"decline",offer.code);
+    await until(()=>transferOf(pc.engine)?.state==="declined","declined");
+    await pc.engine.send("mac",[source]);
+    const second=await until(()=>{const transfer=transferOf(mac.engine);return transfer?.id!==firstId&&transfer?.prompt?transfer:null;},"second receiver offer");
+    expect(second.prompt?.trust).toBe("new");expect(second.prompt?.code).toMatch(/^\d{3} \d{3}$/);
+    const sender=pc.engine.snapshot().transfers.find(transfer=>transfer.id===second.id);
+    expect(sender?.prompt).toBeNull();expect(sender?.verificationCode).toBe(second.prompt?.code);
+    await mac.engine.answer(second.id,"accept",second.prompt?.code??null);
+    await until(()=>transferOf(mac.engine)?.state==="done","retry done");
+    expect(await readFile(join(mac.folder,"retry.txt"),"utf8")).toBe("same trusted sender, new receiver trust");
+  });
+
 });
