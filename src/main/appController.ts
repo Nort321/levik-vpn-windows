@@ -174,6 +174,7 @@ const HOME_ROAD_REFRESH_MS = 6 * 60 * 60_000;
 /** Repeated connection failures look for conflicting apps at most this often. */
 const CONFLICT_RESCAN_MS = 15_000;
 const NOT_ELEVATED_MESSAGE = "Levik VPN запущен без прав администратора и не может создать туннель. Нажмите «Перезапустить от имени администратора».";
+const GAME_ONLY_MESSAGE = "Тариф Levik Game — это не VPN: через Levik идут только матчи выбранных игр. Включите Game на вкладке Game или получите пробный VPN в кабинете.";
 
 const DEFAULT_SETTINGS: AppSettings = {
   gameEnabled: false,
@@ -694,6 +695,11 @@ export class AppController extends EventEmitter<AppControllerEvents> {
       if (!subscriptionId) throw new Error("Выберите активную подписку");
       await this.loadTunnelProfile(subscriptionId);
     }
+    // «Только Game» carries nothing but the chosen games' matches: never start it as a VPN.
+    if (this.profile?.gameOnly && !this.state.settings.gameEnabled) {
+      this.patch({ statusDetail: GAME_ONLY_MESSAGE });
+      throw new Error(GAME_ONLY_MESSAGE);
+    }
     // A new session chooses by current latencies: the ones measured when the app started may be hours old.
     // A server switch inside a session keeps the server it was given.
     const stale = !this.telemetry.active && Date.now() - this.latenciesMeasuredAt > LATENCY_FRESH_MS;
@@ -846,6 +852,12 @@ export class AppController extends EventEmitter<AppControllerEvents> {
       this.xray.updateGameOptions({ protection: next.gameProtection !== false,
         preferredExitId: this.profile?.game?.servers.find((server) => server.id === preference)?.nodeId ?? preference ?? null,
         exitScope: gameExitScope(next) });
+    }
+    // Turning Game off on «Только Game» leaves nothing for the tunnel to carry.
+    if (this.profile?.gameOnly && previous.gameEnabled && !next.gameEnabled && this.connectionRequested()
+      && generation === this.connectionGeneration) {
+      await this.disconnect();
+      return;
     }
     if (reconnect && generation === this.connectionGeneration) {
       await this.stopTunnelForReplacement();

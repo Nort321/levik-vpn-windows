@@ -169,6 +169,26 @@ describe("Game controller", () => {
     expect(order).toEqual(["exit:0", "check", "tunnel"]);
     expect(app.snapshot().game?.message).toContain("обычный VPN");
   });
+  it("never starts «Только Game» as a VPN while Game is off", async () => {
+    const app = new AppController();
+    const state = Reflect.get(app, "state") as AppSnapshot;
+    state.settings = { ...state.settings, gameEnabled: false };
+    Reflect.set(app, "profile", { subscriptionId: "one", gameOnly: true, servers: [server("a")], game: { enabled: true, servers: [server("a")] } });
+    const start = vi.fn();
+    Reflect.set(app, "xray", { isRunning: () => false, start });
+    await expect(app.connect()).rejects.toThrow("это не VPN");
+    expect(start).not.toHaveBeenCalled();
+    expect(app.snapshot().statusDetail).toContain("пробный VPN");
+  });
+  it("disconnects «Только Game» when Game is turned off", async () => {
+    const { app, state } = controller();
+    Reflect.set(app, "profile", { subscriptionId: "one", gameOnly: true, game: { enabled: true, servers: [server("a"), server("b")] } });
+    Reflect.set(app, "secureStore", { put: vi.fn().mockResolvedValue(undefined) });
+    const disconnect = vi.spyOn(app, "disconnect").mockResolvedValue(undefined);
+    state.busy = false;
+    await app.updateSettings({ gameEnabled: false }, "sync");
+    expect(disconnect).toHaveBeenCalledOnce();
+  });
   it("rejects renderer attempts to enable Game without an authorized profile", async () => {
     const app = new AppController();
     await expect(app.updateSettings({ gameEnabled: true, gameIds: ["valorant"] })).rejects.toThrow("Game Squad");

@@ -574,6 +574,13 @@ select option { color: var(--text); background-color: var(--select-bg); }
 .game-notice svg { width: 22px; height: 22px; flex-shrink: 0; color: var(--warning); }
 .game-notice.is-info { background: color-mix(in srgb, var(--blue) 9%, transparent); border-color: color-mix(in srgb, var(--blue) 28%, transparent); }
 .game-notice.is-info svg { color: var(--blue-bright); }
+.game-notice .button { margin-left: auto; flex-shrink: 0; }
+.game-only-card { justify-content: center; gap: 14px; }
+.game-only-mark { display: grid; place-items: center; width: 112px; height: 112px; margin: 10px 0; border-radius: 50%; background: color-mix(in srgb, var(--blue) 12%, transparent); color: var(--blue-bright); }
+.game-only-mark svg { width: 52px; height: 52px; }
+.game-only-text { max-width: 420px; margin: 0; color: var(--muted); font-size: 13px; line-height: 1.6; }
+.game-only-actions { display: flex; flex-wrap: wrap; justify-content: center; gap: 10px; }
+.game-only-trial .button { margin-top: 14px; width: 100%; }
 @media (max-width: 760px) {
   .game-flow { grid-template-columns: 1fr; gap: 14px; }
   .game-flow-origin { display: none; }

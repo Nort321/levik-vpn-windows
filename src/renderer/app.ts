@@ -128,8 +128,8 @@ function render(preserveScroll = true): void {
           ${navButton("profile", "Профиль", "profile")}
         </nav>
         <div class="sidebar-status">
-          <div class="status-line"><span class="status-dot ${escapeHtml(state.status)}"></span><span>${statusTitle(state.status)}</span></div>
-          <div class="status-subtitle">${escapeHtml(state.statusDetail ?? "VPN готов к подключению")}</div>
+          <div class="status-line"><span class="status-dot ${escapeHtml(state.status)}"></span><span>${state.game?.only && state.status === "connected" ? "Game включён" : statusTitle(state.status)}</span></div>
+          <div class="status-subtitle">${escapeHtml(state.statusDetail ?? (state.game?.only ? "Тариф Levik Game, без VPN" : "VPN готов к подключению"))}</div>
         </div>
       </aside>
       <main class="content"><div class="content-inner">${renderElevationNotice()}${renderUpdateNotice()}${renderConflicts()}${renderAnnouncements()}${renderTelemetryNotice()}${renderPage()}</div></main>
@@ -230,7 +230,32 @@ function gameEgressExplanation(exit: GameExitComparison | undefined): string {
 
 function renderGameOnlyNotice(): string {
   if (!state?.game?.only) return "";
-  return `<div class="game-notice is-info" role="note">${icon("game")}<span><strong>Тариф Levik Game.</strong> Через Levik идут только матчи выбранных игр, весь остальной интернет — напрямую. Подключитесь, отметьте игры на вкладке Game и нажмите «Включить Game».</span></div>`;
+  return `<div class="game-notice is-info" role="note">${icon("game")}<span><strong>Тариф Levik Game — это не VPN.</strong> Через Levik идут только матчи выбранных игр, сайты и приложения — напрямую. Отметьте игры ниже и нажмите «Включить Game».</span><button class="button compact" data-vpn-trial>Пробный VPN</button></div>`;
+}
+
+/** «Только Game» has no VPN to switch on: the home page leads to Game and to the VPN trial. */
+function renderGameOnlyHome(): string {
+  if (!state) return "";
+  const gameOn = state.settings.gameEnabled === true && ["connected", "connecting", "reconnecting"].includes(state.status);
+  const busy = state.busy || ["connecting", "disconnecting", "reconnecting"].includes(state.status);
+  return `
+    <header class="page-header"><div><h1>Главная</h1><div class="subtitle">Тариф Levik Game</div></div></header>
+    <div class="home-grid">
+      <section class="connection-card card game-only-card">
+        <div class="connection-label">Levik Game</div>
+        <div class="connection-title ${gameOn ? "connected" : ""}">${gameOn ? "Game включён" : "Game выключен"}</div>
+        <div class="game-only-mark" aria-hidden="true">${icon("game")}</div>
+        <p class="game-only-text">Это не VPN. Через Levik идут только матчи выбранных игр, а сайты, YouTube и мессенджеры открываются напрямую, как без Levik.</p>
+        <div class="game-only-actions">
+          <button class="button primary" data-tab="game">${icon("game")} ${gameOn ? "Маршрут игры" : "Выбрать игры и включить"}</button>
+          ${gameOn ? `<button class="button" id="game-only-off" ${busy ? "disabled" : ""}>${icon("power")} Выключить Game</button>` : ""}
+        </div>
+        ${state.status === "error" && state.statusDetail ? `<div class="connection-detail">${escapeHtml(state.statusDetail)}</div>` : ""}
+      </section>
+      <div class="side-stack">
+        <section class="compact-card card game-only-trial"><h2 class="card-title">Нужен VPN для сайтов?</h2><div class="card-caption">Пробный VPN на 3 дня: обычные серверы для дома и мобильные для белых списков. Карта не нужна.</div><button class="button primary" data-vpn-trial>${icon("shield")} Получить 3 дня бесплатно</button></section>
+      </div>
+    </div>`;
 }
 
 function renderGame(): string {
@@ -267,7 +292,7 @@ function renderGame(): string {
       <label class="game-consent game-mode"><input id="game-protection" type="checkbox" ${state.settings.gameProtection !== false ? "checked" : ""} ${busy ? "disabled" : ""}/><span>Защита от потерь <small>${escapeHtml(protectionText)}</small></span></label>
       ${runtime?.protection.limitedByUpload ? `<p class="game-upload-notice" role="status">${escapeHtml(runtime.protection.reason ?? "Канал отдачи перегружен: временно оставлена одна копия. Защита восстановится после разгрузки.")}</p>` : ""}
       ${carrying ? `<div class="game-metrics">${decision?.exitId !== "direct" ? `<div><span>A · ПК → выбранный выход</span><strong>${metric(selected?.access?.latencyMs)}</strong></div><div><span>B · выход → сервер игры</span><strong>${metric(selected?.egress?.latencyMs, selected?.egress?.approximate, selected?.egress?.method === "ttl-hop")}</strong></div>` : `<div><span>Маршрут текущего UDP</span><strong>Напрямую</strong></div><div><span>Резервирование через Levik</span><strong>Не применяется</strong></div>`}<div><span>D · оценка прямого пути</span><strong>${metric(direct?.latencyMs, direct?.approximate, direct?.method === "ttl-hop")}</strong></div></div><p class="game-selection">${decision?.exitId !== "direct" ? escapeHtml(gameEgressExplanation(selected)) + " " : ""}Это оценки сети. Пинг самого матча показывает игра.</p>` : ""}
-      <div class="game-hero-bottom"><span class="muted">${enabled && state.status === "connected" ? "Действующие UDP-потоки не переносятся между выходами" : "Обычный сервер: " + escapeHtml(selectedServer()?.name ?? "автовыбор")}</span><button class="button ${enabled ? "" : "primary"}" id="game-toggle" ${busy || (!enabled && (!gameProcesses(state.settings).length || !game.routes.length)) ? "disabled" : ""}>${icon("power")} ${enabled ? "Выключить Game" : "Включить Game"}</button></div>
+      <div class="game-hero-bottom"><span class="muted">${enabled && state.status === "connected" ? "Действующие UDP-потоки не переносятся между выходами" : (game.only ? "Без VPN: через Levik идут только матчи" : "Обычный сервер: " + escapeHtml(selectedServer()?.name ?? "автовыбор"))}</span><button class="button ${enabled ? "" : "primary"}" id="game-toggle" ${busy || (!enabled && (!gameProcesses(state.settings).length || !game.routes.length)) ? "disabled" : ""}>${icon("power")} ${enabled ? "Выключить Game" : "Включить Game"}</button></div>
     </section>
     ${renderGameOnlyNotice()}
     ${renderGameInsights()}
@@ -389,6 +414,7 @@ function applyGameFilter(): void {
 
 function renderHome(): string {
   if (!state) return "";
+  if (state.game?.only) return renderGameOnlyHome();
   const connected = state.status === "connected";
   const transitional = ["connecting", "disconnecting", "reconnecting"].includes(state.status);
   const disconnectAction = ["connected", "connecting", "reconnecting"].includes(state.status) || (state.status === "error" && state.settings.killSwitch);
@@ -1140,6 +1166,8 @@ function navButton(tab: AppTab, label: string, iconName: IconName): string {
 }
 
 function bindCommonEvents(): void {
+  document.querySelectorAll<HTMLElement>("[data-vpn-trial]").forEach((button) => button.addEventListener("click", () => void run(() => window.levik.openCabinet("/dashboard"))));
+  document.getElementById("game-only-off")?.addEventListener("click", () => void run(() => window.levik.updateSettings({ gameEnabled: false })));
   document.querySelectorAll<HTMLElement>("[data-tab]").forEach((button) => button.addEventListener("click", () => {
     const tab = button.dataset.tab;
     if (tab === "home" || tab === "servers" || tab === "stats" || tab === "profile" || (tab === "game" && state?.game?.available)) {
