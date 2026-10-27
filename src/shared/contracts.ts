@@ -277,6 +277,8 @@ export interface LevikDesktopApi {
   selectServer(serverId: string): Promise<void>;
   /** The best server of a country, docs/app-platform.md "Server list". */
   selectCountry(countryCode: string): Promise<void>;
+  /** «Автоматически» in the server list: Smart Auto picks the server, docs/app-platform.md "Smart Auto". */
+  selectAutomatic(): Promise<void>;
   connect(): Promise<void>;
   disconnect(): Promise<void>;
   updateSettings(patch: Partial<AppSettings>): Promise<void>;
@@ -340,6 +342,7 @@ export const IPC = {
   selectSubscription: "levik:select-subscription",
   selectServer: "levik:select-server",
   selectCountry: "levik:select-country",
+  selectAutomatic: "levik:select-automatic",
   connect: "levik:connect",
   disconnect: "levik:disconnect",
   updateSettings: "levik:update-settings",

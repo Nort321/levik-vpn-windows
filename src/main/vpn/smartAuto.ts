@@ -8,7 +8,7 @@ import type { ProtocolAdvice } from "../platform/remoteConfig";
  * Smart Auto, docs/app-platform.md "Smart Auto": the automatic server is the
  * one that carries traffic on this network, answers fast and is not busy.
  *
- *     score = latency × (1 + 2 × load) × history × advice      (lower is better)
+ *     score = latency × 1 / (1 − load) × history × advice × quality      (lower is better)
  *
  * The history is the computer's own record of which protocols passed a real
  * download on which network. It stays on the computer; a network is named by
@@ -25,9 +25,13 @@ export interface SmartCandidate {
   latencyMs: number | null;
   /** True when no answer means the server is down (TCP); a UDP server may just not answer probes. */
   silenceMeansDown: boolean;
-  /** 0 (idle) to 1 (full); null when the website did not say. */
+  /** 0 (idle) to 1 (full), already aged by [agedLoad]; null when the website did not say. */
   load: number | null;
   verdict: ProtocolVerdict;
+  /** How this node works from the user's operator, 1 typical; null when unknown. */
+  quality?: number | null;
+  /** The node stayed full: no new automatic connections while others remain. */
+  full?: boolean;
 }
 
 export interface RankedServer {
@@ -42,33 +46,120 @@ export const UNKNOWN_LATENCY_MS = 400;
 export const UNKNOWN_LOAD = 0.35;
 /** A running connection moves only to a server this much better. */
 export const SWITCH_MARGIN = 0.75;
-const LOAD_WEIGHT = 2;
-const OVERLOADED = 0.9;
-const OVERLOAD_FACTOR = 2;
+/** The load curve stops here: a full node is twenty times as slow, not infinitely. */
+const MAX_LOAD = 0.95;
+/** A load reading counts fully this long, then fades into "unknown" until [LOAD_FORGET_MS]. */
+export const LOAD_TRUST_MS = 2 * 60_000;
+export const LOAD_FORGET_MS = 15 * 60_000;
+/** Servers this close to the best share new connections, so not everyone lands on one. */
+const SPREAD_MARGIN = 1.15;
+const SPREAD_MAX = 3;
 const HISTORY_FACTOR: Record<ProtocolVerdict, number> = { works: 0.8, unknown: 1, suspect: 2, blocked: 10 };
 const UNANSWERED_PROTOCOLS = new Set(["hysteria", "hysteria2", "tuic", "wireguard"]);
 
-/** Best first. Protocols seen blocked here are left out unless nothing else is left. */
-export function rankSmart(candidates: readonly SmartCandidate[], advice: ProtocolAdvice | null): RankedServer[] {
+/**
+ * Best first. Protocols seen blocked here and nodes that stayed full are left
+ * out unless nothing else is left. [spread] (0..1, see [spreadSeed]) picks
+ * among the servers within 15 % of the best, so the computers that see the
+ * same free node do not all land on it at once.
+ */
+export function rankSmart(candidates: readonly SmartCandidate[], advice: ProtocolAdvice | null, spread: number | null = null): RankedServer[] {
   const reachable = candidates.filter((item) => item.latencyMs !== null || !item.silenceMeansDown);
   const allowed = reachable.filter((item) => item.verdict !== "blocked");
   // Everything blocked or silent: better to try something than nothing.
   const pool = allowed.length ? allowed : reachable.length ? reachable : [...candidates];
-  return pool
+  const roomy = pool.filter((item) => !item.full);
+  const ranked = (roomy.length ? roomy : pool)
     .map((item) => ({ id: item.id, protocol: item.protocol, score: smartScore(item, advice) }))
     .sort((left, right) => left.score - right.score || (left.id < right.id ? -1 : left.id > right.id ? 1 : 0));
+  return spread === null ? ranked : spreadTop(ranked, spread);
 }
 
 export function smartScore(candidate: SmartCandidate, advice: ProtocolAdvice | null): number {
   const latency = Math.max(1, candidate.latencyMs ?? UNKNOWN_LATENCY_MS);
-  const load = Math.min(1, Math.max(0, candidate.load ?? UNKNOWN_LOAD));
-  const loadFactor = (1 + LOAD_WEIGHT * load) * (load >= OVERLOADED ? OVERLOAD_FACTOR : 1);
+  return latency * loadFactor(candidate.load) * HISTORY_FACTOR[candidate.verdict] * operatorFactor(candidate, advice) * qualityFactor(candidate.quality);
+}
+
+/**
+ * A node's share of a busy uplink shrinks like a queue: half full doubles the
+ * cost, 80 % makes it five times, a full one twenty times.
+ */
+export function loadFactor(load: number | null): number {
+  const value = Math.min(MAX_LOAD, Math.max(0, load ?? UNKNOWN_LOAD));
+  return 1 / (1 - value);
+}
+
+function operatorFactor(candidate: SmartCandidate, advice: ProtocolAdvice | null): number {
   // The computer's own experience outweighs the operator average.
-  const operator = candidate.verdict === "works" || !advice ? 1
-    : advice.avoid.includes(candidate.protocol) ? 3
-      : advice.preferred.includes(candidate.protocol) ? 0.85
-        : 1;
-  return latency * loadFactor * HISTORY_FACTOR[candidate.verdict] * operator;
+  if (candidate.verdict === "works" || !advice) return 1;
+  if (advice.avoid.includes(candidate.protocol)) return 3;
+  return advice.preferred.includes(candidate.protocol) ? 0.85 : 1;
+}
+
+function qualityFactor(quality: number | null | undefined): number {
+  return typeof quality === "number" && Number.isFinite(quality) ? Math.min(1.6, Math.max(0.7, quality)) : 1;
+}
+
+/** An old reading fades into [UNKNOWN_LOAD]: the node may have filled up or emptied since. */
+export function agedLoad(load: number | null, ageMs: number): number | null {
+  if (load === null || ageMs >= LOAD_FORGET_MS) return null;
+  const trust = ageMs <= LOAD_TRUST_MS ? 1 : 1 - (ageMs - LOAD_TRUST_MS) / (LOAD_FORGET_MS - LOAD_TRUST_MS);
+  return trust * load + (1 - trust) * UNKNOWN_LOAD;
+}
+
+/**
+ * The same for ten minutes on this computer and different on the next one:
+ * a random salt that never leaves the computer and the current ten minutes.
+ */
+export function spreadSeed(salt: string, now: number): number {
+  const bucket = Math.floor(now / (10 * 60_000));
+  return createHash("sha256").update(`levik-spread-v1|${salt}|${bucket}`).digest().readUInt32BE(0) / 0x1_0000_0000;
+}
+
+/** Moves one of the near-best servers to the front, the better ones more often. */
+export function spreadTop(ranked: readonly RankedServer[], spread: number): RankedServer[] {
+  const best = ranked[0];
+  if (!best) return [];
+  const close = ranked.slice(0, SPREAD_MAX).filter((item) => item.score <= best.score * SPREAD_MARGIN);
+  if (close.length < 2) return [...ranked];
+  const weights = close.map((item) => 1 / Math.max(item.score, 1e-9));
+  let target = Math.min(0.999_999, Math.max(0, spread)) * weights.reduce((sum, weight) => sum + weight, 0);
+  let chosen = close[close.length - 1]!;
+  for (const [index, item] of close.entries()) {
+    target -= weights[index]!;
+    if (target < 0) {
+      chosen = item;
+      break;
+    }
+  }
+  return [chosen, ...ranked.filter((item) => item !== chosen)];
+}
+
+/** Stage 4, docs/app-platform.md "Smart Auto": when a running automatic connection leaves a full node. */
+export const OVERLOAD_CONFIRM_MS = 5 * 60_000;
+export const OVERLOAD_MOVE_COOLDOWN_MS = 30 * 60_000;
+/** The new server must be at least this much better: a move costs a reconnect. */
+export const OVERLOAD_MOVE_MARGIN = 0.6;
+
+/**
+ * Moves only when the node has been full for five minutes by fresh readings,
+ * the connection is idle (nothing is cut), the last such move was half an
+ * hour ago and a clearly better server has room.
+ */
+export function overloadMoveDue(input: {
+  fullSince: number | null;
+  loadAgeMs: number;
+  idle: boolean;
+  lastMoveAt: number | null;
+  currentScore: number | null;
+  bestScore: number | null;
+  now: number;
+}): boolean {
+  const { fullSince, loadAgeMs, idle, lastMoveAt, currentScore, bestScore, now } = input;
+  if (fullSince === null || now - fullSince < OVERLOAD_CONFIRM_MS || loadAgeMs > LOAD_TRUST_MS + 60_000) return false;
+  if (!idle || (lastMoveAt !== null && now - lastMoveAt < OVERLOAD_MOVE_COOLDOWN_MS)) return false;
+  if (currentScore === null || bestScore === null) return false;
+  return bestScore < currentScore * OVERLOAD_MOVE_MARGIN;
 }
 
 /** The next rung after a failed traffic check: a protocol not tried yet, else any untried server. */
@@ -234,6 +325,11 @@ export class ProtocolHistoryStore {
 
   current(): ProtocolHistory {
     return this.history;
+  }
+
+  /** The random salt of this install; it never leaves the computer. */
+  localSalt(): string {
+    return this.salt;
   }
 
   update(change: (history: ProtocolHistory) => ProtocolHistory): Promise<void> {

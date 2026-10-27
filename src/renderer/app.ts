@@ -443,7 +443,7 @@ function renderHome(): string {
         <label class="home-server-picker">
           <span class="home-server-flag" aria-hidden="true">${countryFlagSvg(server?.countryCode ?? null)}</span>
           <select id="home-server-select" aria-label="Сервер быстрого подключения" ${state.servers.length && !state.busy ? "" : "disabled"}>
-            ${state.servers.length ? groupByCountry(state.servers).map(serverOptions).join("") : `<option>Сервер не выбран</option>`}
+            ${state.servers.length ? `<option value="auto" ${state.settings.automaticServer ? "selected" : ""}>${escapeHtml(state.settings.automaticServer && automaticServerName() ? `Автоматически · ${automaticServerName()}` : "Автоматически")}</option>${groupByCountry(state.servers).map(serverOptions).join("")}` : `<option>Сервер не выбран</option>`}
           </select>
         </label>
         <div class="connection-detail">${escapeHtml(state.statusDetail ?? "Нажмите кнопку, чтобы включить защиту")}</div>
@@ -460,7 +460,7 @@ function renderServers(): string {
   return `
     <header class="page-header"><div><h1>VPN-серверы</h1><div class="subtitle">Выберите точку подключения Levik VPN</div></div><div class="toolbar"><button class="button icon-button ${favoritesOnly ? "active" : ""}" id="favorites-filter-button" aria-label="Показать избранные" aria-pressed="${favoritesOnly}">${icon("star")}</button><button class="button icon-button" id="ping-button" aria-label="Измерить задержку">${icon("pulse")}</button><button class="button icon-button" id="refresh-button" aria-label="Обновить профиль">${icon("refresh")}</button></div></header>
     <label class="server-search"><span>${icon("search")}</span><input id="server-search-input" type="search" placeholder="Поиск по серверу или стране" autocomplete="off" value="${escapeAttribute(serverSearchQuery)}" /></label>
-    ${state.servers.length ? `<div class="server-list">${groupByCountry(state.servers).map(countryCard).join("")}</div><div class="empty card-flat server-empty" hidden>Серверы не найдены</div>` : `<div class="empty card-flat">Для выбранной подписки нет совместимых серверов</div>`}`;
+    ${state.servers.length ? `<div class="server-list">${autoCard()}${groupByCountry(state.servers).map(countryCard).join("")}</div><div class="empty card-flat server-empty" hidden>Серверы не найдены</div>` : `<div class="empty card-flat">Для выбранной подписки нет совместимых серверов</div>`}`;
 }
 
 const maintenanceTime = new Intl.DateTimeFormat("ru-RU", { hour: "2-digit", minute: "2-digit" });
@@ -473,6 +473,31 @@ function serverLoadLabel(load: number | undefined): { level: "free" | "busy" | "
   return { level: "full", text: "загружен" };
 }
 
+/** The server picked by hand; null while Smart Auto chooses. */
+function manualServerId(): string | null {
+  return state && !state.settings.automaticServer ? state.selectedServerId : null;
+}
+
+/** «Германия · Франкфурт» for the server Smart Auto is on now. */
+function automaticServerName(): string | null {
+  if (!state?.selectedServerId) return null;
+  for (const country of groupByCountry(state.servers)) {
+    const node = country.nodes.find((item) => item.variants.some((variant) => variant.id === state?.selectedServerId));
+    if (node) return country.nodes.length > 1 ? `${countryTitle(country)} · ${node.label}` : countryTitle(country);
+  }
+  return null;
+}
+
+/** «Автоматически» first in the list, as on Android, docs/app-platform.md "Smart Auto". */
+function autoCard(): string {
+  if (!state) return "";
+  const automatic = state.settings.automaticServer;
+  const current = automatic ? automaticServerName() : null;
+  const latency = current && state.selectedServerId ? ` · ${latencyLabel(state.serverLatencies[state.selectedServerId])}` : "";
+  const meta = current ? `Сейчас: ${escapeHtml(current)}${escapeHtml(latency)}` : "Быстрый и свободный сервер, который работает в вашей сети";
+  return `<div class="server-card auto-card ${automatic ? "selected" : ""}" data-server-filter="автоматически авто smart auto" data-server-favorite="false"><button class="server-select" id="auto-server-button" aria-pressed="${automatic}" aria-label="Автоматически: Levik выбирает лучший сервер"><span class="server-flag auto-flag" aria-hidden="true">${icon("servers")}</span><span class="server-copy"><span class="server-name">Автоматически</span><span class="server-meta">${meta}</span></span><span class="radio"></span></button></div>`;
+}
+
 /** Quick-connect choices: one per server, «Германия · Франкфурт» when the country has several. */
 function serverOptions(country: CountryGroup): string {
   const title = countryTitle(country);
@@ -480,7 +505,7 @@ function serverOptions(country: CountryGroup): string {
     const variant = activeVariant(node, state?.selectedServerId ?? null);
     const name = country.nodes.length > 1 ? `${title} · ${node.label}` : title;
     const text = node.variants.length > 1 ? `${name} · ${serverProtocolShortLabel(variant)}` : name;
-    return `<option value="${escapeAttribute(variant.id)}" ${variant.id === state?.selectedServerId ? "selected" : ""}>${escapeHtml(text)}</option>`;
+    return `<option value="${escapeAttribute(variant.id)}" ${variant.id === manualServerId() ? "selected" : ""}>${escapeHtml(text)}</option>`;
   }).join("");
 }
 
@@ -490,7 +515,7 @@ function countryCard(country: CountryGroup): string {
   const selectedId = state?.selectedServerId ?? null;
   const code = country.countryCode;
   const title = countryTitle(country);
-  const selectedNode = country.nodes.find((node) => node.variants.some((variant) => variant.id === selectedId)) ?? null;
+  const selectedNode = country.nodes.find((node) => node.variants.some((variant) => variant.id === manualServerId())) ?? null;
   const favorite = country.nodes.some(isFavoriteNode);
   const expanded = expandedCountries.has(code);
   const latencies = country.nodes
@@ -510,7 +535,7 @@ function countryCard(country: CountryGroup): string {
 /** A country with one server, or an entry that is never grouped: one card as before. */
 function serverCard(node: CountryServer, country: CountryGroup): string {
   const server = activeVariant(node, state?.selectedServerId ?? null);
-  const selected = node.variants.some((variant) => variant.id === state?.selectedServerId);
+  const selected = node.variants.some((variant) => variant.id === manualServerId());
   const favorite = isFavoriteNode(node);
   const title = countryTitle(country);
   const maintenance = maintenanceLabel(node);
@@ -522,7 +547,7 @@ function serverCard(node: CountryServer, country: CountryGroup): string {
 /** One server inside an opened country. */
 function countryNodeRow(node: CountryServer, countryTitle: string): string {
   const server = activeVariant(node, state?.selectedServerId ?? null);
-  const selected = node.variants.some((variant) => variant.id === state?.selectedServerId);
+  const selected = node.variants.some((variant) => variant.id === manualServerId());
   const maintenance = maintenanceLabel(node);
   const name = `${countryTitle}, ${node.label}`;
   return `<div class="country-node ${selected ? "selected" : ""}"><button class="server-select" data-server-id="${escapeAttribute(server.id)}" aria-label="Выбрать ${escapeAttribute(name)}${maintenance ? `, ${escapeAttribute(maintenance.toLocaleLowerCase("ru"))}` : ""}"><span class="server-copy"><span class="server-name">${escapeHtml(node.label)}</span><span class="server-meta">${serverStatus(server, maintenance)}</span>${maintenance ? `<span class="server-maintenance">${escapeHtml(maintenance)}</span>` : ""}</span><span class="radio"></span></button>${favoriteButton(node, server)}${protocolSwitch(node, server, name)}</div>`;
@@ -606,7 +631,6 @@ function renderProfile(): string {
       <section class="section card"><h2 class="card-title">Авторизовать устройство</h2><div class="card-caption">Введите код, показанный на экране другого устройства.</div><form class="activation-form" id="activation-form"><label for="activation-code">Код активации</label><div class="activation-controls"><input id="activation-code" type="text" inputmode="text" autocomplete="one-time-code" maxlength="19" placeholder="XXXX-XXXX-XXXX-XXXX" value="${escapeAttribute(activationCodeInput)}" ${activationSubmitting ? "disabled" : ""} /><button class="button primary" type="submit" ${activationSubmitting ? "disabled" : ""}>${activationSubmitting ? `<span class="spinner"></span>` : icon("link")} Авторизовать</button></div></form></section>
       <section class="section card"><h2 class="card-title">Настройки</h2><div class="settings-list">
         ${selectSetting("Маршрутизация", "Как направлять системный трафик", "routing-mode", state.settings.routingMode, [["global","Весь трафик"],["bypassRu","Обход ресурсов РФ"],["blockedOnly","Только заблокированное"]])}
-        ${switchSetting("Автовыбор сервера", "Выбирать сервер с минимальной задержкой", "automaticServer", state.settings.automaticServer)}
         ${switchSetting("Автовосстановление", "Перезапускать туннель после сбоя", "autoReconnect", state.settings.autoReconnect)}
         ${switchSetting("Автоподключение", "Подключаться при запуске Levik VPN", "autoConnectOnLaunch", state.settings.autoConnectOnLaunch)}
         ${switchSetting("Kill Switch", "Не выпускать трафик мимо активного туннеля", "killSwitch", state.settings.killSwitch)}
@@ -1194,7 +1218,11 @@ function bindPageEvents(): void {
   document.getElementById("power-button")?.addEventListener("click", () => run(() => state && (["connected", "connecting", "reconnecting"].includes(state.status) || (state.status === "error" && state.settings.killSwitch)) ? window.levik.disconnect() : window.levik.connect()));
   document.getElementById("home-server-select")?.addEventListener("change", (event) => {
     const serverId = (event.target as HTMLSelectElement).value;
-    if (serverId && serverId !== state?.selectedServerId) void run(() => window.levik.selectServer(serverId));
+    if (serverId === "auto") {
+      if (!state?.settings.automaticServer) void run(() => window.levik.selectAutomatic());
+    } else if (serverId && serverId !== manualServerId()) {
+      void run(() => window.levik.selectServer(serverId));
+    }
   });
   document.getElementById("refresh-button")?.addEventListener("click", () => run(() => window.levik.refreshAccount()));
   document.getElementById("ping-button")?.addEventListener("click", () => run(() => window.levik.pingServers()));
@@ -1206,6 +1234,7 @@ function bindPageEvents(): void {
     serverSearchQuery = (event.target as HTMLInputElement).value;
     applyServerFilter();
   });
+  document.getElementById("auto-server-button")?.addEventListener("click", () => run(() => window.levik.selectAutomatic()));
   document.querySelectorAll<HTMLElement>("[data-server-id]").forEach((button) => button.addEventListener("click", () => run(() => window.levik.selectServer(button.dataset.serverId ?? ""))));
   document.querySelectorAll<HTMLElement>("[data-country-code]").forEach((button) => button.addEventListener("click", () => run(() => window.levik.selectCountry(button.dataset.countryCode ?? ""))));
   document.querySelectorAll<HTMLButtonElement>("[data-country-toggle]").forEach((button) => button.addEventListener("click", () => {

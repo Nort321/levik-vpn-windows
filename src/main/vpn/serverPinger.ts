@@ -15,7 +15,29 @@ interface ServerEndpoint {
   port: number;
 }
 
+/** Probes per server, started this far apart: one lost SYN no longer adds a second. */
+const PROBES = 3;
+const PROBE_STAGGER_MS = 150;
+
+/**
+ * The median of three probes, or the faster of two when one went
+ * unanswered: a single probe that lost its first packet looked a second
+ * slower than the server is.
+ */
 export async function measureServerLatency(server: TunnelServer): Promise<number | null> {
+  const probes = Array.from({ length: PROBES }, (_, index) =>
+    new Promise<void>((resolve) => setTimeout(resolve, index * PROBE_STAGGER_MS)).then(() => probeServerLatency(server)));
+  return robustLatency(await Promise.all(probes));
+}
+
+export function robustLatency(values: ReadonlyArray<number | null>): number | null {
+  const answered = values.filter((value): value is number => value !== null).sort((left, right) => left - right);
+  if (answered.length === 0) return null;
+  if (answered.length === 2) return answered[0]!;
+  return answered[Math.floor(answered.length / 2)]!;
+}
+
+async function probeServerLatency(server: TunnelServer): Promise<number | null> {
   const endpoint = extractServerEndpoint(server.outbound);
   if (!endpoint) return null;
   const protocol = firstString(server.outbound.protocol, server.outbound.type)?.toLowerCase() ?? "";

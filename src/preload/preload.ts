@@ -12,6 +12,7 @@ const api: LevikDesktopApi = {
   selectSubscription: (subscriptionId) => ipcRenderer.invoke(IPC.selectSubscription, subscriptionId),
   selectServer: (serverId) => ipcRenderer.invoke(IPC.selectServer, serverId),
   selectCountry: (countryCode) => ipcRenderer.invoke(IPC.selectCountry, countryCode),
+  selectAutomatic: () => ipcRenderer.invoke(IPC.selectAutomatic),
   connect: () => ipcRenderer.invoke(IPC.connect),
   disconnect: () => ipcRenderer.invoke(IPC.disconnect),
   updateSettings: (patch: Partial<AppSettings>) => ipcRenderer.invoke(IPC.updateSettings, patch),

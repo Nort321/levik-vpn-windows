@@ -21,6 +21,7 @@ export type TimelineEvent =
   | { t: number; e: "net"; type: NetworkType; state: "available" | "lost" | "changed" }
   | { t: number; e: "power"; state: PowerState }
   | { t: number; e: "recovery"; action: RecoveryAction }
+  | { t: number; e: "check"; nid: string; ms: number; ok: boolean }
   | { t: number; e: "pause" }
   | { t: number; e: "unpause" };
 
@@ -150,6 +151,12 @@ export class SessionRecorder {
 
   recovery(action: RecoveryAction): void {
     this.push({ t: 0, e: "recovery", action });
+  }
+
+  /** Smart Auto's traffic check on a node: its time feeds node quality on the website. */
+  trafficCheck(nodeId: string, ms: number, ok: boolean): void {
+    if (!/^n1[0-9a-f]{20}$/.test(nodeId)) return;
+    this.push({ t: 0, e: "check", nid: nodeId, ms: Math.min(60_000, Math.max(0, Math.round(ms))), ok });
   }
 
   end(by: EndBy, code: string | null): void {

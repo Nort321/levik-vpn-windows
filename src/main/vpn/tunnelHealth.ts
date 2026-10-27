@@ -1,3 +1,4 @@
+import { performance } from "node:perf_hooks";
 import { request } from "node:http";
 import { connect, type TLSSocket } from "node:tls";
 import type { Socket } from "node:net";
@@ -103,9 +104,18 @@ const TRAFFIC_CHECK_TARGETS: ReadonlyArray<{ host: string; path: string }> = [
  * handshake probe above says nothing about it.
  */
 export async function carriesTraffic(shouldContinue: () => boolean = () => true): Promise<boolean> {
+  return await measureTraffic(shouldContinue) !== null;
+}
+
+/**
+ * [carriesTraffic] with the time it took, retries included; null when it
+ * failed. The time feeds node quality, docs/app-platform.md "Node quality".
+ */
+export async function measureTraffic(shouldContinue: () => boolean = () => true): Promise<number | null> {
+  const startedAt = performance.now();
   for (let round = 0; round < TRAFFIC_CHECK_ROUNDS; round++) {
     if (round > 0) await sleep(TRAFFIC_CHECK_RETRY_MS);
-    if (!shouldContinue()) return false;
+    if (!shouldContinue()) return null;
     const results = TRAFFIC_CHECK_TARGETS.map((target) => downloadThroughTunnel(target.host, target.path));
     // The first success settles it; slower downloads finish by their own deadline.
     const passed = await new Promise<boolean>((resolve) => {
@@ -118,10 +128,14 @@ export async function carriesTraffic(shouldContinue: () => boolean = () => true)
         });
       }
     });
-    if (passed) return true;
+    if (passed) return Math.max(1, Math.round(performance.now() - startedAt));
   }
-  return false;
+  return null;
 }
+
+
+/** What a failed check counts as in node quality: its own deadline. */
+export const FAILED_TRAFFIC_CHECK_MS = TRAFFIC_CHECK_DEADLINE_MS;
 
 function downloadThroughTunnel(host: string, path: string): Promise<boolean> {
   return new Promise((resolve) => {

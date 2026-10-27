@@ -268,6 +268,8 @@ function tunnelController() {
   Reflect.set(controller, "killSwitch", killSwitch);
   Reflect.set(controller, "dnsLeakProtection", dns);
   Reflect.set(controller, "secureStore", { put: vi.fn(async () => {}) });
+  // No live load in tests: Smart Auto ranks by the config's load, as with an older website.
+  Reflect.set(controller, "liveLoadClient", { fetch: vi.fn(async () => ({ kind: "unsupported" })) });
   Reflect.set(controller, "state", {
     ...controller.snapshot(), busy: false, servers: profile.servers,
     selectedServerId: first.id, selectedSubscriptionId: "sub",
