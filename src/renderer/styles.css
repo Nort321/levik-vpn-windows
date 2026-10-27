@@ -291,6 +291,24 @@ select option { color: var(--text); background-color: var(--select-bg); }
 .server-maintenance { display: block; color: var(--warning); font-size: 12px; font-weight: 600; margin-top: 4px; }
 .radio { width: 18px; height: 18px; border: 2px solid var(--muted); border-radius: 50%; }
 .selected .radio { border-color: var(--blue); box-shadow: inset 0 0 0 4px var(--surface-strong); background: var(--blue); }
+.country-card { flex-wrap: wrap; }
+.country-card.expanded { grid-column: 1 / -1; }
+.country-card.expanded:hover { transform: none; }
+.country-toggle { width: 40px; height: 40px; flex: none; display: grid; place-items: center; border: 0; border-radius: 11px; color: var(--muted); background: transparent; cursor: pointer; transition: 150ms ease; }
+.country-toggle:hover { color: var(--text); background: rgba(255,255,255,.05); }
+.country-toggle svg { width: 20px; height: 20px; transition: transform 180ms ease; }
+.country-card.expanded .country-toggle svg { transform: rotate(180deg); }
+.country-favorite { display: inline-flex; margin-left: 7px; vertical-align: -2px; color: var(--warning); }
+.country-favorite svg { width: 14px; height: 14px; fill: currentColor; }
+.country-servers { flex-basis: 100%; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; padding: 2px 6px 6px; }
+.country-servers[hidden] { display: none; }
+.country-node { min-width: 0; display: flex; flex-wrap: wrap; align-items: center; border: 1px solid var(--border); border-radius: 12px; background: var(--surface-item, rgba(255,255,255,.027)); transition: 150ms ease; }
+.country-node:hover { background: var(--surface-hover, rgba(255,255,255,.05)); }
+.country-node.selected { border-color: rgba(54,135,255,.58); background: rgba(54,135,255,.105); }
+.country-node .server-select { padding: 10px 12px; }
+.country-node .protocol-switch { padding: 0 12px 10px; }
+.country-card.selected .country-node:not(.selected) .radio { border-color: var(--muted); box-shadow: none; background: transparent; }
+@media (prefers-reduced-motion: reduce) { .country-toggle svg { transition: none; } }
 
 .stats-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
 .stat-card { padding: 20px; min-height: 132px; }
@@ -424,6 +442,7 @@ select option { color: var(--text); background-color: var(--select-bg); }
   .content { padding: 28px 25px 40px; }
   .home-grid { grid-template-columns: 1fr; }
   .server-list { grid-template-columns: 1fr; }
+  .country-servers { grid-template-columns: 1fr; }
 }
 
 .telemetry-notice { display: flex; align-items: center; justify-content: space-between; gap: 20px; padding: 18px 22px; margin-bottom: 22px; }

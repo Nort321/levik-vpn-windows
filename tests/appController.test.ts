@@ -103,6 +103,61 @@ describe("AppController login lifecycle", () => {
     expect(controller.snapshot().serverMaintenance).toEqual({ de1: now + 3_600_000 });
   });
 
+  it("moves to the same country before maintenance, abroad when it has no other server", async () => {
+    const server = (id: string, address: string, countryCode: string) => ({
+      id, tag: id, name: id.toUpperCase(), countryCode, outbound: { protocol: "vless", settings: { vnext: [{ address }] } },
+    });
+    const controller = new AppController();
+    controller.cancelLogin();
+    const now = Date.now();
+    const windows = ["de1.example.net", "de2.example.net"].map((host) => ({ nodeId: nodeIdForHost(host), startsAt: now + 60_000, endsAt: now + 3_600_000 }));
+    Reflect.set(controller, "remoteStored", { config: { maintenance: windows, nodeLoad: {} }, fetchedAt: now });
+    Reflect.set(controller, "xray", { isRunning: () => true });
+    const state = Reflect.get(controller, "state") as Record<string, unknown>;
+    Object.assign(state, {
+      status: "connected",
+      busy: false,
+      servers: [server("de1", "de1.example.net", "DE"), server("de2", "de2.example.net", "DE"), server("nl1", "nl1.example.net", "NL")],
+      selectedServerId: "de1",
+      serverLatencies: { de1: 20, de2: 60, nl1: 40 },
+    });
+    const selectServer = vi.spyOn(controller, "selectServer").mockResolvedValue();
+    const check = Reflect.get(controller, "checkMaintenance") as () => Promise<void>;
+
+    await check.call(controller);
+    expect(selectServer).toHaveBeenCalledWith("nl1");
+
+    // Only de1 is under maintenance now: slower de2 wins over faster nl1 abroad.
+    Reflect.set(controller, "remoteStored", { config: { maintenance: windows.slice(0, 1), nodeLoad: {} }, fetchedAt: now });
+    selectServer.mockClear();
+    await check.call(controller);
+    expect(selectServer).toHaveBeenCalledWith("de2");
+  });
+
+  it("chooses the best server of a country and keeps one already selected", async () => {
+    const server = (id: string, address: string, countryCode: string) => ({
+      id, tag: id, name: id.toUpperCase(), countryCode, outbound: { protocol: "vless", settings: { vnext: [{ address }] } },
+    });
+    const controller = new AppController();
+    controller.cancelLogin();
+    const state = Reflect.get(controller, "state") as Record<string, unknown>;
+    Object.assign(state, {
+      servers: [server("nl1", "nl1.example.net", "NL"), server("de1", "de1.example.net", "DE"), server("de2", "de2.example.net", "DE")],
+      selectedServerId: "nl1",
+      serverLatencies: { nl1: 10, de1: 90, de2: 30 },
+    });
+    const selectServer = vi.spyOn(controller, "selectServer").mockResolvedValue();
+
+    await controller.selectCountry("de");
+    expect(selectServer).toHaveBeenCalledWith("de2");
+
+    state.selectedServerId = "de1";
+    selectServer.mockClear();
+    await controller.selectCountry("DE");
+    expect(selectServer).not.toHaveBeenCalled();
+    await expect(controller.selectCountry("FI")).rejects.toThrow("Страна не найдена");
+  });
+
   it("keeps a live match on its server even right before maintenance", async () => {
     const server = (id: string, address: string) => ({
       id, tag: id, name: id.toUpperCase(), countryCode: "DE", outbound: { protocol: "vless", settings: { vnext: [{ address }] } },

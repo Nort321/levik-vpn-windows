@@ -113,6 +113,7 @@ import {
   unionNodeLists,
 } from "./platform/favoriteNodes";
 import { avoidMaintenance, IdleMeter, maintenanceFor, maintenanceMove } from "./platform/maintenance";
+import { countryServers } from "../shared/serverGroups";
 import { captivePortal, checkServices, diagnosisSummary, diagnosisVerdict, parseDiagnoseReport, vpnPhase } from "./platform/diagnosis";
 import { gameExitScope, gameProcesses, GAMES, normalizeGameIds } from "../shared/games";
 import { discoverInstalledGames } from "./windows/installedGames";
@@ -674,6 +675,19 @@ export class AppController extends EventEmitter<AppControllerEvents> {
       if (reconnect && generation === this.connectionGeneration) this.patch({ status: "error", statusDetail: messageOf(error), sessionStartedAt: null });
       throw error;
     }
+  }
+
+  /**
+   * The best server of a country, docs/app-platform.md "Server list". A server
+   * of the country that is already selected stays.
+   */
+  async selectCountry(countryCode: string): Promise<void> {
+    const servers = countryServers(this.state.servers, countryCode);
+    if (!servers.length) throw new Error("Страна не найдена");
+    if (servers.some((server) => server.id === this.state.selectedServerId)) return;
+    if (servers.some((server) => this.state.serverLatencies[server.id] === undefined)) await this.pingServers();
+    const best = this.bestServer(countryServers(this.state.servers, countryCode));
+    if (best) await this.selectServer(best.id);
   }
 
   async connect(trigger: SessionTrigger = "user"): Promise<void> {
@@ -2784,8 +2798,13 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     // A running game is not idle. A live match is never moved, not even right before the work:
     // its UDP crosses the game nodes, and the tunnel recovers after the match.
     if (move === "stay" || (move === "when-idle" && (!this.idleMeter.idle(now) || this.gamePlaying)) || this.liveMatch()) return;
-    const target = this.bestServer(this.state.servers.filter((item) => item.id !== current.id));
-    if (!target || maintenanceFor(this.maintenanceWindows(), nodeIdForServer(target), now)) return;
+    // The same country first, docs/app-platform.md "Server list".
+    const others = this.state.servers.filter((item) => item.id !== current.id);
+    const neighbours = countryServers(others, current.countryCode);
+    const target = [neighbours, others]
+      .map((pool) => this.bestServer(pool))
+      .find((item) => item && !maintenanceFor(this.maintenanceWindows(), nodeIdForServer(item), now));
+    if (!target) return;
     this.maintenanceMoving = true;
     try {
       this.addLog(`Обслуживание сервера ${current.name}: переключение на ${target.name}`);

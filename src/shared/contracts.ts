@@ -275,6 +275,8 @@ export interface LevikDesktopApi {
   refreshAccount(): Promise<void>;
   selectSubscription(subscriptionId: string): Promise<void>;
   selectServer(serverId: string): Promise<void>;
+  /** The best server of a country, docs/app-platform.md "Server list". */
+  selectCountry(countryCode: string): Promise<void>;
   connect(): Promise<void>;
   disconnect(): Promise<void>;
   updateSettings(patch: Partial<AppSettings>): Promise<void>;
@@ -337,6 +339,7 @@ export const IPC = {
   refreshAccount: "levik:refresh-account",
   selectSubscription: "levik:select-subscription",
   selectServer: "levik:select-server",
+  selectCountry: "levik:select-country",
   connect: "levik:connect",
   disconnect: "levik:disconnect",
   updateSettings: "levik:update-settings",

@@ -40,6 +40,10 @@ export function registerIpc(controller: AppController, window: BrowserWindow, li
     if (typeof serverId !== "string") throw new Error("Некорректный сервер");
     return controller.selectServer(serverId);
   });
+  ipcMain.handle(IPC.selectCountry, (_event, countryCode: unknown) => {
+    if (typeof countryCode !== "string" || !/^[A-Za-z]{2}$/.test(countryCode)) throw new Error("Некорректная страна");
+    return controller.selectCountry(countryCode);
+  });
   ipcMain.handle(IPC.connect, () => controller.connect());
   ipcMain.handle(IPC.disconnect, () => controller.disconnect());
   ipcMain.handle(IPC.updateSettings, (_event, patch: unknown) => {

@@ -1,6 +1,6 @@
 import type { AppSettings, AppSnapshot, AppTab, DiagnosisAction, DiagnosisSummary, TunnelServer, WindowsProcess, PendingApproval, GameExitComparison, GameSessionRecord } from "../shared/contracts";
 import { isDiagnosisAction } from "../shared/contracts";
-import { activeVariant, groupServers, serverProtocolShortLabel, type ServerGroup } from "../shared/serverGroups";
+import { activeVariant, countryName, groupByCountry, serverProtocolShortLabel, type CountryGroup, type CountryServer } from "../shared/serverGroups";
 import { shouldShowLogin } from "../shared/sessionState";
 import { mergeProcessList, normalizeProcessSelection, processStatusLabel, resolveProcessCompanions, sortProcessList } from "../shared/processes";
 import QRCode from "qrcode";
@@ -39,6 +39,8 @@ let serverSearchQuery = "";
 let gameSearchQuery = "";
 let openGameSession: string | null = null;
 let favoritesOnly = false;
+/** Countries whose servers are open in the server list. */
+const expandedCountries = new Set<string>();
 let devicesSubscriptionId: string | null = null;
 let supportDialog: { creating: boolean; url: string | null } | null = null;
 let homeRoadSaving = false;
@@ -441,11 +443,7 @@ function renderHome(): string {
         <label class="home-server-picker">
           <span class="home-server-flag" aria-hidden="true">${countryFlagSvg(server?.countryCode ?? null)}</span>
           <select id="home-server-select" aria-label="Сервер быстрого подключения" ${state.servers.length && !state.busy ? "" : "disabled"}>
-            ${state.servers.length ? groupServers(state.servers).map((group) => {
-              const variant = activeVariant(group, state?.selectedServerId ?? null);
-              const label = group.variants.length > 1 ? `${groupTitle(group)} · ${serverProtocolShortLabel(variant)}` : variant.name;
-              return `<option value="${escapeAttribute(variant.id)}" ${variant.id === state?.selectedServerId ? "selected" : ""}>${escapeHtml(label)}</option>`;
-            }).join("") : `<option>Сервер не выбран</option>`}
+            ${state.servers.length ? groupByCountry(state.servers).map(serverOptions).join("") : `<option>Сервер не выбран</option>`}
           </select>
         </label>
         <div class="connection-detail">${escapeHtml(state.statusDetail ?? "Нажмите кнопку, чтобы включить защиту")}</div>
@@ -462,7 +460,7 @@ function renderServers(): string {
   return `
     <header class="page-header"><div><h1>VPN-серверы</h1><div class="subtitle">Выберите точку подключения Levik VPN</div></div><div class="toolbar"><button class="button icon-button ${favoritesOnly ? "active" : ""}" id="favorites-filter-button" aria-label="Показать избранные" aria-pressed="${favoritesOnly}">${icon("star")}</button><button class="button icon-button" id="ping-button" aria-label="Измерить задержку">${icon("pulse")}</button><button class="button icon-button" id="refresh-button" aria-label="Обновить профиль">${icon("refresh")}</button></div></header>
     <label class="server-search"><span>${icon("search")}</span><input id="server-search-input" type="search" placeholder="Поиск по серверу или стране" autocomplete="off" value="${escapeAttribute(serverSearchQuery)}" /></label>
-    ${state.servers.length ? `<div class="server-list">${groupServers(state.servers).map(serverCard).join("")}</div><div class="empty card-flat server-empty" hidden>Серверы не найдены</div>` : `<div class="empty card-flat">Для выбранной подписки нет совместимых серверов</div>`}`;
+    ${state.servers.length ? `<div class="server-list">${groupByCountry(state.servers).map(countryCard).join("")}</div><div class="empty card-flat server-empty" hidden>Серверы не найдены</div>` : `<div class="empty card-flat">Для выбранной подписки нет совместимых серверов</div>`}`;
 }
 
 const maintenanceTime = new Intl.DateTimeFormat("ru-RU", { hour: "2-digit", minute: "2-digit" });
@@ -475,34 +473,104 @@ function serverLoadLabel(load: number | undefined): { level: "free" | "busy" | "
   return { level: "full", text: "загружен" };
 }
 
-function serverCard(group: ServerGroup): string {
-  const server = activeVariant(group, state?.selectedServerId ?? null);
-  const selected = group.variants.some((variant) => variant.id === state?.selectedServerId);
-  const favorite = group.variants.some((variant) => state?.settings.favoriteServerIds.includes(variant.id));
-  const latency = state?.serverLatencies[server.id];
-  const load = serverLoadLabel(state?.serverLoad[server.id]);
-  const title = groupTitle(group);
-  const maintenanceEnd = group.variants.map((variant) => state?.serverMaintenance[variant.id]).find((end) => end !== undefined);
-  const maintenance = maintenanceEnd === undefined ? "" : `Обслуживание до ${maintenanceTime.format(maintenanceEnd)}`;
-  const filter = `${title} ${group.variants.map((variant) => `${variant.name} ${serverProtocolShortLabel(variant)}`).join(" ")} ${countryLabel(server.countryCode)} ${server.countryCode}`.toLocaleLowerCase("ru");
-  const protocolSwitch = group.variants.length > 1
-    ? `<div class="protocol-switch" role="radiogroup" aria-label="Протокол: ${escapeAttribute(title)}">${group.variants.map((variant) => {
-      const active = variant.id === server.id;
-      return `<button class="protocol-option ${active ? "active" : ""}" role="radio" aria-checked="${active}" data-server-id="${escapeAttribute(variant.id)}">${escapeHtml(serverProtocolShortLabel(variant))}</button>`;
-    }).join("")}</div>`
-    : "";
-  return `<div class="server-card ${selected ? "selected" : ""}" data-server-filter="${escapeAttribute(filter)}" data-server-favorite="${favorite}"><button class="server-select" data-server-id="${escapeAttribute(server.id)}" aria-label="Выбрать ${escapeAttribute(title)}${maintenance ? `, ${escapeAttribute(maintenance.toLocaleLowerCase("ru"))}` : ""}"><span class="server-flag" aria-hidden="true">${countryFlagSvg(server.countryCode)}</span><span class="server-copy"><span class="server-name">${escapeHtml(title)}</span><span class="server-meta">${escapeHtml(countryLabel(server.countryCode))} · ${escapeHtml(serverProtocol(server))} · ${latency === undefined ? "не измерен" : latency === null ? "нет ответа" : `${latency} мс`}${load && !maintenance ? ` · <span class="server-load ${load.level}">${load.text}</span>` : ""}</span>${maintenance ? `<span class="server-maintenance">${escapeHtml(maintenance)}</span>` : ""}</span><span class="radio"></span></button><button class="favorite-button ${favorite ? "active" : ""}" data-favorite-server-id="${escapeAttribute(server.id)}" data-favorite-group-ids="${escapeAttribute(group.variants.map((variant) => variant.id).join(","))}" aria-label="${favorite ? "Удалить из избранного" : "Добавить в избранное"}" aria-pressed="${favorite}">${icon("star")}</button>${protocolSwitch}</div>`;
+/** Quick-connect choices: one per server, «Германия · Франкфурт» when the country has several. */
+function serverOptions(country: CountryGroup): string {
+  const title = countryTitle(country);
+  return country.nodes.map((node) => {
+    const variant = activeVariant(node, state?.selectedServerId ?? null);
+    const name = country.nodes.length > 1 ? `${title} · ${node.label}` : title;
+    const text = node.variants.length > 1 ? `${name} · ${serverProtocolShortLabel(variant)}` : name;
+    return `<option value="${escapeAttribute(variant.id)}" ${variant.id === state?.selectedServerId ? "selected" : ""}>${escapeHtml(text)}</option>`;
+  }).join("");
 }
 
-/** A multi-protocol server is named by its country; a single entry keeps its own name. */
-function groupTitle(group: ServerGroup): string {
-  const first = group.variants[0]!;
-  if (group.variants.length === 1) return first.name;
-  try {
-    return new Intl.DisplayNames(["ru"], { type: "region" }).of(group.countryCode) ?? first.name;
-  } catch {
-    return first.name;
-  }
+/** docs/app-platform.md "Server list": a country with several servers opens into them. */
+function countryCard(country: CountryGroup): string {
+  if (country.nodes.length === 1) return serverCard(country.nodes[0]!, country);
+  const selectedId = state?.selectedServerId ?? null;
+  const code = country.countryCode;
+  const title = countryTitle(country);
+  const selectedNode = country.nodes.find((node) => node.variants.some((variant) => variant.id === selectedId)) ?? null;
+  const favorite = country.nodes.some(isFavoriteNode);
+  const expanded = expandedCountries.has(code);
+  const latencies = country.nodes
+    .map((node) => state?.serverLatencies[activeVariant(node, selectedId).id])
+    .filter((value): value is number => typeof value === "number");
+  const latency = selectedNode
+    ? latencyLabel(state?.serverLatencies[activeVariant(selectedNode, selectedId).id])
+    : latencies.length ? `от ${Math.min(...latencies)} мс` : "не измерен";
+  const summary = [`${country.nodes.length} ${serverCountWord(country.nodes.length)}`, selectedNode?.label, latency].filter(Boolean).join(" · ");
+  const filter = [title, code, ...country.nodes.flatMap((node) => [node.label, ...node.variants.map((variant) => `${variant.name} ${serverProtocolShortLabel(variant)}`)])]
+    .join(" ").toLocaleLowerCase("ru");
+  const listId = `country-servers-${code}`;
+  const action = selectedNode ? `${title}, выбран: ${selectedNode.label}` : `Выбрать лучший сервер: ${title}`;
+  return `<div class="server-card country-card ${selectedNode ? "selected" : ""} ${expanded ? "expanded" : ""}" data-server-filter="${escapeAttribute(filter)}" data-server-favorite="${favorite}"><button class="server-select" data-country-code="${escapeAttribute(code)}" aria-label="${escapeAttribute(action)}"><span class="server-flag" aria-hidden="true">${countryFlagSvg(code)}</span><span class="server-copy"><span class="server-name">${escapeHtml(title)}${favorite ? `<span class="country-favorite" aria-hidden="true">${icon("star")}</span>` : ""}</span><span class="server-meta">${escapeHtml(summary)}</span></span><span class="radio"></span></button><button class="country-toggle" data-country-toggle="${escapeAttribute(code)}" aria-expanded="${expanded}" aria-controls="${escapeAttribute(listId)}" aria-label="${escapeAttribute(`Серверы: ${title}`)}">${icon("chevron")}</button><div class="country-servers" id="${escapeAttribute(listId)}" role="group" aria-label="${escapeAttribute(`Серверы: ${title}`)}" ${expanded ? "" : "hidden"}>${country.nodes.map((node) => countryNodeRow(node, title)).join("")}</div></div>`;
+}
+
+/** A country with one server, or an entry that is never grouped: one card as before. */
+function serverCard(node: CountryServer, country: CountryGroup): string {
+  const server = activeVariant(node, state?.selectedServerId ?? null);
+  const selected = node.variants.some((variant) => variant.id === state?.selectedServerId);
+  const favorite = isFavoriteNode(node);
+  const title = countryTitle(country);
+  const maintenance = maintenanceLabel(node);
+  const place = country.countryCode ? (node.labelled ? `${node.label} · ` : "") : `${countryLabel(server.countryCode)} · `;
+  const filter = `${title} ${node.label} ${node.variants.map((variant) => `${variant.name} ${serverProtocolShortLabel(variant)}`).join(" ")} ${countryLabel(server.countryCode)} ${server.countryCode}`.toLocaleLowerCase("ru");
+  return `<div class="server-card ${selected ? "selected" : ""}" data-server-filter="${escapeAttribute(filter)}" data-server-favorite="${favorite}"><button class="server-select" data-server-id="${escapeAttribute(server.id)}" aria-label="Выбрать ${escapeAttribute(title)}${maintenance ? `, ${escapeAttribute(maintenance.toLocaleLowerCase("ru"))}` : ""}"><span class="server-flag" aria-hidden="true">${countryFlagSvg(server.countryCode)}</span><span class="server-copy"><span class="server-name">${escapeHtml(title)}</span><span class="server-meta">${escapeHtml(place)}${serverStatus(server, maintenance)}</span>${maintenance ? `<span class="server-maintenance">${escapeHtml(maintenance)}</span>` : ""}</span><span class="radio"></span></button>${favoriteButton(node, server)}${protocolSwitch(node, server, title)}</div>`;
+}
+
+/** One server inside an opened country. */
+function countryNodeRow(node: CountryServer, countryTitle: string): string {
+  const server = activeVariant(node, state?.selectedServerId ?? null);
+  const selected = node.variants.some((variant) => variant.id === state?.selectedServerId);
+  const maintenance = maintenanceLabel(node);
+  const name = `${countryTitle}, ${node.label}`;
+  return `<div class="country-node ${selected ? "selected" : ""}"><button class="server-select" data-server-id="${escapeAttribute(server.id)}" aria-label="Выбрать ${escapeAttribute(name)}${maintenance ? `, ${escapeAttribute(maintenance.toLocaleLowerCase("ru"))}` : ""}"><span class="server-copy"><span class="server-name">${escapeHtml(node.label)}</span><span class="server-meta">${serverStatus(server, maintenance)}</span>${maintenance ? `<span class="server-maintenance">${escapeHtml(maintenance)}</span>` : ""}</span><span class="radio"></span></button>${favoriteButton(node, server)}${protocolSwitch(node, server, name)}</div>`;
+}
+
+/** Protocol, latency and load; HTML. */
+function serverStatus(server: TunnelServer, maintenance: string): string {
+  const load = serverLoadLabel(state?.serverLoad[server.id]);
+  return `${escapeHtml(serverProtocol(server))} · ${latencyLabel(state?.serverLatencies[server.id])}${load && !maintenance ? ` · <span class="server-load ${load.level}">${load.text}</span>` : ""}`;
+}
+
+function latencyLabel(latency: number | null | undefined): string {
+  return latency === undefined ? "не измерен" : latency === null ? "нет ответа" : `${latency} мс`;
+}
+
+function maintenanceLabel(node: CountryServer): string {
+  const end = node.variants.map((variant) => state?.serverMaintenance[variant.id]).find((value) => value !== undefined);
+  return end === undefined ? "" : `Обслуживание до ${maintenanceTime.format(end)}`;
+}
+
+function isFavoriteNode(node: CountryServer): boolean {
+  return node.variants.some((variant) => state?.settings.favoriteServerIds.includes(variant.id));
+}
+
+function favoriteButton(node: CountryServer, server: TunnelServer): string {
+  const favorite = isFavoriteNode(node);
+  return `<button class="favorite-button ${favorite ? "active" : ""}" data-favorite-server-id="${escapeAttribute(server.id)}" data-favorite-group-ids="${escapeAttribute(node.variants.map((variant) => variant.id).join(","))}" aria-label="${favorite ? "Удалить из избранного" : "Добавить в избранное"}" aria-pressed="${favorite}">${icon("star")}</button>`;
+}
+
+function protocolSwitch(node: CountryServer, server: TunnelServer, title: string): string {
+  if (node.variants.length < 2) return "";
+  return `<div class="protocol-switch" role="radiogroup" aria-label="Протокол: ${escapeAttribute(title)}">${node.variants.map((variant) => {
+    const active = variant.id === server.id;
+    return `<button class="protocol-option ${active ? "active" : ""}" role="radio" aria-checked="${active}" data-server-id="${escapeAttribute(variant.id)}">${escapeHtml(serverProtocolShortLabel(variant))}</button>`;
+  }).join("")}</div>`;
+}
+
+/** A country is named in Russian; an entry that is never grouped keeps its own name. */
+function countryTitle(country: CountryGroup): string {
+  return (country.countryCode ? countryName(country.countryCode) : null) ?? country.nodes[0]!.label;
+}
+
+function serverCountWord(count: number): string {
+  const tens = count % 100;
+  const ones = count % 10;
+  if (tens >= 11 && tens <= 14) return "серверов";
+  if (ones === 1) return "сервер";
+  return ones >= 2 && ones <= 4 ? "сервера" : "серверов";
 }
 
 function renderStats(): string {
@@ -1139,6 +1207,17 @@ function bindPageEvents(): void {
     applyServerFilter();
   });
   document.querySelectorAll<HTMLElement>("[data-server-id]").forEach((button) => button.addEventListener("click", () => run(() => window.levik.selectServer(button.dataset.serverId ?? ""))));
+  document.querySelectorAll<HTMLElement>("[data-country-code]").forEach((button) => button.addEventListener("click", () => run(() => window.levik.selectCountry(button.dataset.countryCode ?? ""))));
+  document.querySelectorAll<HTMLButtonElement>("[data-country-toggle]").forEach((button) => button.addEventListener("click", () => {
+    const code = button.dataset.countryToggle ?? "";
+    const expanded = !expandedCountries.has(code);
+    if (expanded) expandedCountries.add(code);
+    else expandedCountries.delete(code);
+    button.setAttribute("aria-expanded", String(expanded));
+    button.closest(".country-card")?.classList.toggle("expanded", expanded);
+    const list = document.getElementById(button.getAttribute("aria-controls") ?? "");
+    if (list) list.hidden = !expanded;
+  }));
   document.querySelectorAll<HTMLElement>("[data-favorite-server-id]").forEach((button) => button.addEventListener("click", () => {
     const currentState = state;
     const serverId = button.dataset.favoriteServerId;
@@ -1580,6 +1659,7 @@ function countryLabel(countryCode: string | null): string {
 function countryFlagSvg(countryCode: string | null): string {
   const normalized = countryCode?.trim().toUpperCase() ?? "";
   const shapes: Readonly<Record<string, string>> = {
+    EE: '<path fill="#0072ce" d="M0 0h24v5.34H0z"/><path fill="#1a1a1a" d="M0 5.33h24v5.34H0z"/><path fill="#fff" d="M0 10.66h24V16H0z"/>',
     DE: '<path fill="#1a1a1a" d="M0 0h24v5.34H0z"/><path fill="#d00" d="M0 5.33h24v5.34H0z"/><path fill="#ffce00" d="M0 10.66h24V16H0z"/>',
     NL: '<path fill="#ae1c28" d="M0 0h24v5.34H0z"/><path fill="#fff" d="M0 5.33h24v5.34H0z"/><path fill="#21468b" d="M0 10.66h24V16H0z"/>',
     FI: '<path fill="#fff" d="M0 0h24v16H0z"/><path fill="#003580" d="M0 6h24v4H0zM7 0h4v16H7z"/>',
@@ -1634,10 +1714,11 @@ function escapeAttribute(value: string): string {
   return escapeHtml(value.replace(/[\r\n]/g, ""));
 }
 
-type IconName = "game" | "shield" | "home" | "servers" | "stats" | "profile" | "power" | "refresh" | "server" | "clock" | "download" | "upload" | "support" | "logout" | "login" | "external" | "process" | "close" | "check" | "search" | "star" | "pulse" | "browse" | "save" | "devices" | "unlink" | "renew" | "update" | "install" | "qr" | "link" | "remote";
+type IconName = "chevron" | "game" | "shield" | "home" | "servers" | "stats" | "profile" | "power" | "refresh" | "server" | "clock" | "download" | "upload" | "support" | "logout" | "login" | "external" | "process" | "close" | "check" | "search" | "star" | "pulse" | "browse" | "save" | "devices" | "unlink" | "renew" | "update" | "install" | "qr" | "link" | "remote";
 
 function icon(name: IconName): string {
   const paths: Record<IconName, string> = {
+    chevron: '<path d="m6 9 6 6 6-6"/>',
     game: '<path d="M7 7h10c2 0 3 2 3.5 4l1 6c.4 2-1.5 3-3 1l-2-2h-9l-2 2c-1.5 2-3.4 1-3-1l1-6C4 9 5 7 7 7Z"/><path d="M7 10v5M4.5 12.5h5M16 11h.01M18 14h.01"/>',
     shield: '<path d="M12 3 4.8 6v4.8c0 4.5 2.9 7.5 7.2 9.3 4.3-1.8 7.2-4.8 7.2-9.3V6z"/><path d="m8.4 12 2.2 2.2 5-5"/>',
     home: '<path d="m3 11 9-8 9 8"/><path d="M5 10v10h14V10M9 20v-6h6v6"/>',
