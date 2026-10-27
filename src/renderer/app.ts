@@ -7,8 +7,9 @@ import QRCode from "qrcode";
 import { GAMES, gameProcesses } from "../shared/games";
 import { isFinalState, REMOTE_COMMANDS, REMOTE_COMMAND_LABELS, remoteIdleHint, remoteStatusText } from "../shared/remote";
 import type { IssuedCommand, RemoteCommand, RemoteDevice } from "../shared/remote";
-import { dropFileCount, dropStatusText, formatDropBytes, isOpenDropState } from "../shared/drop";
+import { dropStatusText, formatDropBytes, isOpenDropState } from "../shared/drop";
 import type { DropControl, DropDevice, DropTransfer } from "../shared/drop";
+import { dropAmountText, dropDeviceStatus, dropFilesText, dropPercent, mountDropUi } from "./dropUi";
 
 const SUPPORT_CHAT_URL = "https://t.me/leviksupportbot";
 
@@ -57,8 +58,6 @@ let remotePollTimer: ReturnType<typeof setInterval> | null = null;
 const REMOTE_STALE_MS = 60_000;
 const REMOTE_POLL_MS = 5_000;
 const REMOTE_PLATFORM_LABELS: Record<RemoteDevice["platform"], string> = { android: "Android", windows: "Windows", macos: "macOS", linux: "Linux" };
-/** LevikDrop prompts the user closed with «Позже»; the transfer card opens them again. */
-const hiddenDropPrompts = new Set<string>();
 /** Transfers with a button pressed and not answered yet. */
 const dropBusy = new Set<string>();
 let dropSendingTo: string | null = null;
@@ -66,6 +65,18 @@ let dropRequestedAt = 0;
 const DROP_STALE_MS = 30_000;
 
 const root = requiredElement("app");
+const dropUi = mountDropUi({
+  drop: () => (state && state.account && state.drop.available && !shouldShowLogin(state) ? state.drop : null),
+  icon,
+  busy: (id) => dropBusy.has(id),
+  sendingTo: () => dropSendingTo,
+  send: (deviceId, paths) => void sendDropFiles(deviceId, paths),
+  answer: (transfer, answer) => void dropAction(transfer.id, () => window.levik.answerDrop(transfer.id, answer, transfer.prompt?.code ?? null)),
+  control: (id, action) => void dropAction(id, () => window.levik.controlDrop(id, action)),
+  showFiles: (id) => void run(() => window.levik.showDropFiles(id)),
+  toast: (message) => showToast(message),
+  fileManagerHint: "Перетащите файлы из Проводника",
+});
 
 void window.levik.snapshot().then((snapshot) => {
   state = snapshot;
@@ -108,6 +119,7 @@ function render(preserveScroll = true): void {
   document.documentElement.dataset.theme = state.settings.theme;
   if (activeTab === "game" && !state.game?.available) activeTab = "home";
   renderedSnapshotKey = snapshotRenderKey(state);
+  dropUi.update();
   if (shouldShowLogin(state)) {
     renderLogin();
     return;
@@ -138,8 +150,7 @@ function render(preserveScroll = true): void {
     ${devicesSubscriptionId ? renderDevicesDialog(devicesSubscriptionId) : ""}
     ${supportDialog ? renderSupportDialog(supportDialog) : ""}
     ${remoteDeviceId ? renderRemoteDialog(remoteDeviceId) : ""}
-    ${renderApprovalDialog()}
-    ${renderDropPrompt()}`;
+    ${renderApprovalDialog()}`;
   bindCommonEvents();
   bindPageEvents();
   bindApprovalDialog();
@@ -643,7 +654,7 @@ function renderRemoteDevices(): string {
   return `<section class="section card" aria-labelledby="remote-devices-title"><div class="section-head"><div><h2 class="card-title" id="remote-devices-title">Мои устройства</h2><div class="card-caption">Пульт помогает другому вашему устройству: подключить VPN, выбрать сервер или собрать диагностику.</div></div><button class="button icon-button" id="remote-refresh-button" aria-label="Обновить список устройств" ${remoteLoading ? "disabled" : ""}>${icon("refresh")}</button></div>${list}</section>`;
 }
 
-// LevikDrop, docs/levik-drop.md ---------------------------------------------------------
+// LevikDrop, docs/levik-drop.md: the profile section; the corner card and the drop zone are in dropUi.ts.
 
 function renderDrop(): string {
   const drop = state?.drop;
@@ -655,7 +666,7 @@ function renderDrop(): string {
     ? `Сегодня через сервер: ${formatDropBytes(drop.quota.usedBytes)} из ${formatDropBytes(drop.quota.limitBytes)}. По локальной сети — без лимита.`
     : "";
   const transfers = drop.transfers.slice(0, 12);
-  return `<section class="section card" aria-labelledby="drop-title"><div class="section-head"><div><h2 class="card-title" id="drop-title">Передача файлов</h2><div class="card-caption">Между вашими устройствами: шифруется на устройстве и нигде не хранится. До ${drop.limits.maxFiles} файлов и ${formatDropBytes(drop.limits.maxBytes)} за раз — выберите устройство или перетащите файлы на него.</div></div><button class="button icon-button" id="drop-refresh-button" aria-label="Обновить передачу файлов">${icon("refresh")}</button></div>
+  return `<section class="section card" aria-labelledby="drop-title"><div class="section-head"><div><h2 class="card-title" id="drop-title">Передача файлов</h2><div class="card-caption">Между вашими устройствами: шифруется на устройстве и нигде не хранится. До ${drop.limits.maxFiles} файлов и ${formatDropBytes(drop.limits.maxBytes)} за раз — выберите устройство или перетащите файлы в окно Levik VPN.</div></div><button class="button icon-button" id="drop-refresh-button" aria-label="Обновить передачу файлов">${icon("refresh")}</button></div>
     ${devices}
     <div class="settings-list"><div class="setting-row"><div><div class="setting-name">Папка для полученных файлов</div><div class="setting-help drop-folder">${escapeHtml(drop.folder)}</div></div><button class="button compact" id="drop-folder-button">${icon("browse")} Изменить</button></div></div>
     ${quota ? `<p class="card-caption">${escapeHtml(quota)}</p>` : ""}
@@ -666,27 +677,9 @@ function renderDrop(): string {
 
 function dropDeviceRow(device: DropDevice): string {
   const busy = state?.drop.transfers.some((transfer) => isOpenDropState(transfer.state)) ?? false;
-  const status = !device.supported
-    ? "Обновите Levik VPN на этом устройстве"
-    : device.ready ? (busy ? "Готово, когда закончится текущая передача" : "Готово принять файлы") : device.platform === "android" ? "Откройте Levik на телефоне" : "Levik VPN на нём не запущен";
   const disabled = !device.ready || busy || dropSendingTo !== null;
-  return `<div class="device-row drop-target" data-drop-device-id="${escapeAttribute(device.deviceId)}" data-drop-ready="${device.ready && !busy}"><span class="process-icon">${icon("devices")}</span><span class="process-copy"><span class="process-name">${escapeHtml(device.name)}</span><span class="process-path">${REMOTE_PLATFORM_LABELS[device.platform]} · <span class="presence ${device.ready ? "online" : ""}">${escapeHtml(status)}</span></span></span><button class="button compact" data-drop-send="${escapeAttribute(device.deviceId)}" aria-label="Отправить файлы на ${escapeAttribute(device.name)}" ${disabled ? "disabled" : ""}>${dropSendingTo === device.deviceId ? `<span class="spinner"></span>` : icon("upload")} Отправить файлы</button></div>`;
-}
-
-function dropPercent(transfer: DropTransfer): number {
-  return transfer.totalBytes > 0 ? Math.min(100, Math.round((transfer.doneBytes / transfer.totalBytes) * 100)) : transfer.state === "done" ? 100 : 0;
-}
-
-function dropAmountText(transfer: DropTransfer): string {
-  const amount = `${formatDropBytes(transfer.doneBytes)} из ${formatDropBytes(transfer.totalBytes)}`;
-  return transfer.bytesPerSecond ? `${amount} · ${formatDropBytes(Math.round(transfer.bytesPerSecond))}/с` : amount;
-}
-
-function dropFilesText(transfer: DropTransfer): string {
-  const files = transfer.files;
-  if (!files?.length) return `${dropFileCount(transfer.fileCount)}, ${formatDropBytes(transfer.totalBytes)}`;
-  const names = files.slice(0, 3).map((file) => file.name).join(", ");
-  return files.length > 3 ? `${names} и ещё ${files.length - 3}` : names;
+  const online = device.ready && device.supported;
+  return `<div class="device-row drop-device"><span class="process-icon">${icon("devices")}<span class="drop-presence ${online ? "online" : ""}" aria-hidden="true"></span></span><span class="process-copy"><span class="process-name">${escapeHtml(device.name)}</span><span class="process-path">${REMOTE_PLATFORM_LABELS[device.platform]} · <span class="presence ${device.ready ? "online" : ""}">${escapeHtml(dropDeviceStatus(device, busy))}</span></span></span><button class="button compact" data-drop-send="${escapeAttribute(device.deviceId)}" aria-label="Отправить файлы на ${escapeAttribute(device.name)}" ${disabled ? "disabled" : ""}>${dropSendingTo === device.deviceId ? `<span class="spinner"></span>` : icon("upload")} Отправить файлы</button></div>`;
 }
 
 function dropTransferRow(transfer: DropTransfer): string {
@@ -704,7 +697,8 @@ function dropTransferRow(transfer: DropTransfer): string {
   const progress = open || transfer.state === "done"
     ? `<span class="progress" role="progressbar" aria-label="Передано" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${dropPercent(transfer)}"><span class="progress-fill" data-drop-progress="${escapeAttribute(transfer.id)}" data-progress="${dropPercent(transfer)}"></span></span><span class="process-path" data-drop-amount="${escapeAttribute(transfer.id)}">${escapeHtml(dropAmountText(transfer))}</span>`
     : "";
-  return `<div class="drop-transfer card-flat"><div class="drop-transfer-head"><span class="process-icon">${icon(transfer.role === "sender" ? "upload" : "download")}</span><span class="process-copy"><span class="process-name">${escapeHtml(title)}</span><span class="process-path">${escapeHtml(dropFilesText(transfer))}</span></span></div>
+  const tone = transfer.state === "done" ? "is-done" : transfer.state === "failed" || transfer.state === "expired" ? "is-failed" : open ? `is-${transfer.state}` : "is-ended";
+  return `<div class="drop-transfer card-flat ${tone}"><div class="drop-transfer-head"><span class="process-icon">${icon(transfer.state === "done" ? "check" : transfer.role === "sender" ? "upload" : "download")}</span><span class="process-copy"><span class="process-name">${escapeHtml(title)}</span><span class="process-path">${escapeHtml(dropFilesText(transfer))}</span></span></div>
     ${progress}
     <p class="remote-status" aria-live="polite">${escapeHtml(dropStatusText(transfer))}</p>
     ${verification}
@@ -713,43 +707,6 @@ function dropTransferRow(transfer: DropTransfer): string {
 
 function dropControlButton(transfer: DropTransfer, action: DropControl, label: string, busy: boolean): string {
   return `<button class="button compact ${action === "cancel" ? "danger" : ""}" data-drop-control="${action}" data-drop-id="${escapeAttribute(transfer.id)}" ${busy ? "disabled" : ""}>${label}</button>`;
-}
-
-function visibleDropPrompt(): DropTransfer | null {
-  return state?.drop.transfers.find((transfer) => transfer.prompt && !hiddenDropPrompts.has(promptKey(transfer))) ?? null;
-}
-
-/** A new session brings a new code: the prompt shows again. */
-function promptKey(transfer: DropTransfer): string {
-  return `${transfer.id}:${transfer.prompt?.kind ?? ""}:${transfer.prompt?.code ?? ""}`;
-}
-
-function renderDropPrompt(): string {
-  const transfer = visibleDropPrompt();
-  const prompt = transfer?.prompt;
-  if (!transfer || !prompt) return "";
-  const busy = dropBusy.has(transfer.id);
-  const changed = prompt.trust === "changed"
-    ? `<p class="approval-text drop-warning">Ключ «${escapeHtml(transfer.peerName)}» изменился — например, после переустановки Levik VPN. Продолжайте, только если коды совпадают.</p>`
-    : "";
-  const code = prompt.code
-    ? `<p class="approval-text">Проверьте, что на «${escapeHtml(transfer.peerName)}» показан этот же код. Так никто посередине не подменит устройство.</p><div class="drop-code" aria-label="Код ${escapeAttribute(prompt.code)}">${escapeHtml(prompt.code)}</div>`
-    : "";
-  if (prompt.kind === "confirm") {
-    return `<div class="dialog-backdrop"><section class="process-dialog approval-dialog drop-dialog card" role="alertdialog" aria-modal="true" aria-labelledby="drop-prompt-title" data-drop-prompt-id="${escapeAttribute(transfer.id)}">
-      <header class="dialog-header"><div><h2 id="drop-prompt-title">Сверьте код</h2><p>${transfer.role === "sender" ? "Отправка на" : "Получение с"} «${escapeHtml(transfer.peerName)}»</p></div></header>
-      ${changed}${code}
-      <footer class="dialog-actions"><button class="button" data-drop-later ${busy ? "disabled" : ""}>Позже</button><span class="dialog-spacer"></span><button class="button danger" data-drop-answer="reject" ${busy ? "disabled" : ""}>Коды разные</button><button class="button primary" data-drop-answer="confirm" ${busy ? "disabled" : ""}>${icon("check")} Коды совпадают</button></footer>
-    </section></div>`;
-  }
-  const files = (transfer.files ?? []).map((file) => `<li><span class="process-name">${escapeHtml(file.name)}</span><span class="process-path">${formatDropBytes(file.size)}</span></li>`).join("");
-  return `<div class="dialog-backdrop"><section class="process-dialog approval-dialog drop-dialog card" role="alertdialog" aria-modal="true" aria-labelledby="drop-prompt-title" data-drop-prompt-id="${escapeAttribute(transfer.id)}">
-    <header class="dialog-header"><div><h2 id="drop-prompt-title">Файлы с «${escapeHtml(transfer.peerName)}»</h2><p>${dropFileCount(transfer.fileCount)}, ${formatDropBytes(transfer.totalBytes)} · сохранятся в ${escapeHtml(state?.drop.folder ?? "")}</p></div></header>
-    <ul class="drop-files">${files}</ul>
-    ${changed}${code}
-    <p class="approval-text">Файлы не открываются сами. Принимайте только то, что отправляли вы.</p>
-    <footer class="dialog-actions"><button class="button" data-drop-later ${busy ? "disabled" : ""}>Позже</button><span class="dialog-spacer"></span><button class="button danger" data-drop-answer="decline" ${busy ? "disabled" : ""}>Отклонить</button><button class="button primary" data-drop-answer="accept" ${busy ? "disabled" : ""}>${icon("download")} ${prompt.code ? "Код совпадает, принять" : "Принять"}</button></footer>
-  </section></div>`;
 }
 
 function loadDropIfStale(): void {
@@ -797,28 +754,6 @@ function bindDrop(): void {
     const deviceId = button.dataset.dropSend;
     if (deviceId) void sendDropFiles(deviceId, null);
   }));
-  document.querySelectorAll<HTMLElement>("[data-drop-device-id]").forEach((row) => {
-    row.addEventListener("dragover", (event) => {
-      if (row.dataset.dropReady !== "true" || !event.dataTransfer?.types.includes("Files")) return;
-      event.preventDefault();
-      event.dataTransfer.dropEffect = "copy";
-      row.classList.add("drag-over");
-    });
-    row.addEventListener("dragleave", () => row.classList.remove("drag-over"));
-    row.addEventListener("drop", (event) => {
-      event.preventDefault();
-      row.classList.remove("drag-over");
-      const deviceId = row.dataset.dropDeviceId;
-      const files = event.dataTransfer ? Array.from(event.dataTransfer.files) : [];
-      if (!deviceId || row.dataset.dropReady !== "true" || files.length === 0) return;
-      const paths = window.levik.dropFilePaths(files);
-      if (paths.length === 0) {
-        showToast("Перетащите файлы из Проводника");
-        return;
-      }
-      void sendDropFiles(deviceId, paths);
-    });
-  });
   document.querySelectorAll<HTMLButtonElement>("[data-drop-control]").forEach((button) => button.addEventListener("click", () => {
     const id = button.dataset.dropId;
     const action = (["pause", "resume", "cancel"] as const).find((item) => item === button.dataset.dropControl);
@@ -829,30 +764,9 @@ function bindDrop(): void {
     if (id) void run(() => window.levik.showDropFiles(id));
   }));
   document.querySelectorAll<HTMLButtonElement>("[data-drop-prompt]").forEach((button) => button.addEventListener("click", () => {
-    const transfer = state?.drop.transfers.find((item) => item.id === button.dataset.dropPrompt);
-    if (!transfer) return;
-    hiddenDropPrompts.delete(promptKey(transfer));
-    render();
+    const id = button.dataset.dropPrompt;
+    if (id) dropUi.reveal(id);
   }));
-  const dialog = document.querySelector<HTMLElement>(".drop-dialog");
-  const id = dialog?.dataset.dropPromptId;
-  const transfer = state?.drop.transfers.find((item) => item.id === id);
-  if (!dialog || !id || !transfer) return;
-  const hide = (): void => {
-    hiddenDropPrompts.add(promptKey(transfer));
-    render();
-  };
-  dialog.querySelectorAll<HTMLButtonElement>("[data-drop-answer]").forEach((button) => button.addEventListener("click", () => {
-    const answer = (["accept", "decline", "confirm", "reject"] as const).find((item) => item === button.dataset.dropAnswer);
-    if (answer) void dropAction(id, () => window.levik.answerDrop(id, answer, transfer.prompt?.code ?? null));
-  }));
-  dialog.querySelector<HTMLButtonElement>("[data-drop-later]")?.addEventListener("click", hide);
-  dialog.addEventListener("keydown", (event) => {
-    if (event.key !== "Escape" || dropBusy.has(id)) return;
-    event.preventDefault();
-    hide();
-  });
-  if (!dialog.contains(document.activeElement)) dialog.querySelector<HTMLButtonElement>("[data-drop-answer]:last-of-type")?.focus({ preventScroll: true });
 }
 
 // Files dropped outside a device never open in the window.
@@ -1601,6 +1515,7 @@ function updateLiveData(): void {
     const line = document.querySelector<HTMLElement>(`[data-drop-amount="${CSS.escape(transfer.id)}"]`);
     if (line) line.textContent = dropAmountText(transfer);
   }
+  dropUi.live();
   const logView = document.querySelector<HTMLElement>(".log-view");
   if (logView) {
     const previousHeight = logView.scrollHeight;

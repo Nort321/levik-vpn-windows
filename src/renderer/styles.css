@@ -608,18 +608,147 @@ select option { color: var(--text); background-color: var(--select-bg); }
 .remote-status { min-height: 40px; margin: 8px 0 0; display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 12px; line-height: 1.45; }
 
 /* LevikDrop */
+/* LevikDrop: profile section ---------------------------------------------------------- */
 .drop-devices { min-height: 0; }
-.drop-target.drag-over { border-color: var(--blue); background: var(--surface-hover, rgba(255,255,255,.06)); }
+.drop-device .process-icon { position: relative; }
+.drop-presence { position: absolute; right: -2px; bottom: -2px; width: 10px; height: 10px; border: 2px solid var(--surface-strong); border-radius: 50%; background: var(--muted); }
+.drop-presence.online { background: var(--green); animation: drop-presence 2.4s ease-out infinite; }
+@keyframes drop-presence { 0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--green) 55%, transparent); } 70%, 100% { box-shadow: 0 0 0 7px transparent; } }
 .drop-folder { word-break: break-all; }
 .drop-error { color: var(--danger-text, #ff919a); }
 .drop-subtitle { margin: 18px 0 8px; font-size: 13px; font-weight: 650; }
 .drop-transfers { display: grid; gap: 8px; }
 .drop-transfer { padding: 12px; }
 .drop-transfer .progress { margin: 10px 0 6px; }
+.drop-transfer .progress-fill { transition: width 400ms ease; }
+.drop-transfer.is-active .progress-fill { position: relative; overflow: hidden; }
+.drop-transfer.is-active .progress-fill::after { content: ""; position: absolute; inset: 0; background: linear-gradient(90deg, transparent, rgba(255,255,255,.45), transparent); transform: translateX(-100%); animation: dock-shimmer 1.4s ease-in-out infinite; }
+.drop-transfer.is-done .process-icon { color: var(--green); background: color-mix(in srgb, var(--green) 14%, transparent); }
+.drop-transfer.is-done .progress-fill { background: var(--green); }
+.drop-transfer.is-failed .process-icon { color: var(--danger-text, #ff919a); background: color-mix(in srgb, var(--red) 12%, transparent); }
+.drop-transfer.is-ended .process-icon, .drop-transfer.is-paused .process-icon { color: var(--muted); background: color-mix(in srgb, var(--muted) 12%, transparent); }
 .drop-transfer-head { display: flex; align-items: center; gap: 12px; min-width: 0; }
-.drop-dialog { width: min(480px, calc(100vw - 40px)); }
-.drop-files { margin: 14px 0 0; padding: 0; list-style: none; display: grid; gap: 6px; max-height: 220px; overflow: auto; }
-.drop-files li { display: flex; justify-content: space-between; gap: 12px; min-width: 0; padding: 8px 10px; border: 1px solid var(--border); border-radius: 10px; }
-.drop-files .process-path { margin-top: 0; flex: none; }
 .drop-code { margin: 14px 0 4px; text-align: center; font-size: 34px; font-weight: 800; letter-spacing: .08em; font-variant-numeric: tabular-nums; }
-.drop-warning { color: var(--warning-text, #ffcf70); }
+
+/* LevikDrop: the card in the corner, dropUi.ts ------------------------------------------ */
+.drop-dock { position: fixed; right: 24px; bottom: 24px; z-index: 18; width: min(360px, calc(100vw - 48px)); display: flex; flex-direction: column; align-items: flex-end; gap: 10px; pointer-events: none; }
+.dock-stack { position: relative; width: 100%; display: flex; flex-direction: column; gap: 10px; transition: opacity 200ms ease, transform 200ms ease; }
+.dock-stack:empty { display: none; }
+.dock-stack.is-collapsed { position: absolute; right: 0; bottom: 0; opacity: 0; transform: translateY(14px) scale(.97); visibility: hidden; transition: opacity 180ms ease, transform 180ms ease, visibility 0s 180ms; }
+.dock-card { pointer-events: auto; position: relative; padding: 14px; overflow: hidden; border: 1px solid var(--border); border-radius: 18px; background: var(--surface); box-shadow: var(--shadow), 0 2px 10px rgba(0,0,0,.12); backdrop-filter: blur(20px); transform-origin: bottom right; animation: dock-in 380ms cubic-bezier(.2,.9,.3,1.15) both; }
+.dock-card::before { content: ""; position: absolute; inset: 0 0 auto; height: 2px; background: linear-gradient(90deg, transparent, var(--blue-bright), transparent); background-size: 50% 100%; background-repeat: no-repeat; opacity: 0; }
+.dock-card[data-phase="offer"]::before, .dock-card[data-phase="confirm"]::before { opacity: 1; animation: dock-scan 2.2s linear infinite; }
+.dock-card[data-phase="done"] { border-color: color-mix(in srgb, var(--green) 35%, var(--border)); }
+.dock-card[data-phase="failed"] { border-color: color-mix(in srgb, var(--red) 35%, var(--border)); }
+.dock-card.is-leaving { pointer-events: none; animation: dock-out 240ms ease-in forwards; }
+@keyframes dock-in { from { opacity: 0; transform: translateY(18px) scale(.95); } to { opacity: 1; transform: none; } }
+@keyframes dock-out { to { opacity: 0; transform: translateX(28px) scale(.97); } }
+@keyframes dock-scan { from { background-position: -100% 0; } to { background-position: 200% 0; } }
+.dock-head { display: flex; align-items: center; gap: 12px; min-width: 0; }
+.dock-badge { position: relative; width: 40px; height: 40px; flex: none; display: grid; place-items: center; border-radius: 13px; color: var(--blue-bright); background: color-mix(in srgb, var(--blue) 14%, transparent); }
+.dock-badge svg { width: 20px; height: 20px; }
+.dock-badge::after { content: ""; position: absolute; inset: -1px; border: 2px solid currentColor; border-radius: inherit; opacity: 0; }
+.dock-badge.is-attention::after, .dock-badge.is-waiting::after { animation: dock-ring 1.8s ease-out infinite; }
+.dock-badge.is-active svg { animation: dock-bob 1.1s ease-in-out infinite; }
+.dock-badge.is-done { color: var(--green); background: color-mix(in srgb, var(--green) 16%, transparent); animation: dock-pop 460ms cubic-bezier(.2,.9,.3,1.5) both; }
+.dock-badge.is-failed { color: var(--danger-text, #ff919a); background: color-mix(in srgb, var(--red) 14%, transparent); animation: dock-shake 380ms ease both; }
+.dock-badge.is-paused, .dock-badge.is-muted { color: var(--muted); background: color-mix(in srgb, var(--muted) 14%, transparent); }
+.dock-check { stroke-width: 2.4; }
+.dock-check path { stroke-dasharray: 1; stroke-dashoffset: 1; animation: dock-draw 420ms 140ms ease-out forwards; }
+@keyframes dock-ring { 0% { opacity: .55; transform: scale(1); } 100% { opacity: 0; transform: scale(1.45); } }
+@keyframes dock-bob { 50% { transform: translateY(-2px); } }
+@keyframes dock-pop { from { transform: scale(.6); } to { transform: scale(1); } }
+@keyframes dock-draw { to { stroke-dashoffset: 0; } }
+@keyframes dock-shake { 20%, 60% { transform: translateX(-3px); } 40%, 80% { transform: translateX(3px); } }
+.dock-titles { flex: 1; min-width: 0; }
+.dock-title { margin: 0; overflow: hidden; font-size: 14px; font-weight: 700; text-overflow: ellipsis; white-space: nowrap; }
+.dock-subtitle { margin: 2px 0 0; overflow: hidden; color: var(--muted); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.dock-icon-button { width: 30px; height: 30px; flex: none; display: grid; place-items: center; padding: 0; border: 0; border-radius: 9px; color: var(--muted); background: transparent; cursor: pointer; transition: 150ms ease; }
+.dock-icon-button:hover { color: var(--text); background: var(--button-hover, rgba(255,255,255,.075)); }
+.dock-icon-button:focus-visible, .dock-pill:focus-visible { outline: 3px solid var(--focus-ring, rgba(54,135,255,.45)); outline-offset: 2px; }
+.dock-icon-button svg { width: 16px; height: 16px; }
+.dock-body { margin-top: 12px; }
+.dock-body:empty { display: none; }
+.dock-body.is-swapping { animation: dock-swap 280ms ease both; }
+@keyframes dock-swap { from { opacity: 0; transform: translateY(6px); } }
+.dock-status { margin: 8px 0 0; color: var(--muted); font-size: 12px; line-height: 1.45; }
+.dock-status.is-done { color: var(--green); font-weight: 650; }
+.dock-card[data-phase="failed"] .dock-status { color: var(--danger-text, #ff919a); }
+.dock-note { margin: 10px 0 0; color: var(--muted); font-size: 11.5px; line-height: 1.45; }
+.dock-warning { margin: 10px 0 0; color: var(--warning-text, #ffcf70); font-size: 12px; line-height: 1.45; }
+.dock-meta { margin: 8px 0 0; min-width: 0; display: flex; gap: 4px; color: var(--muted); font-size: 11.5px; white-space: nowrap; }
+.dock-folder { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.dock-files { margin: 0; padding: 0; display: grid; gap: 6px; max-height: 190px; overflow: auto; list-style: none; }
+.dock-files li { min-width: 0; display: flex; align-items: center; gap: 10px; padding: 7px 9px; border: 1px solid var(--border); border-radius: 11px; background: var(--surface-subtle, rgba(255,255,255,.025)); animation: dock-item 320ms ease both; }
+.dock-files li:nth-child(2), .drop-tile:nth-child(2) { animation-delay: 50ms; }
+.dock-files li:nth-child(3), .drop-tile:nth-child(3) { animation-delay: 100ms; }
+.dock-files li:nth-child(4), .drop-tile:nth-child(4) { animation-delay: 150ms; }
+.dock-files li:nth-child(5), .drop-tile:nth-child(5) { animation-delay: 200ms; }
+.dock-files .dock-more { justify-content: center; border-style: dashed; color: var(--muted); font-size: 12px; }
+@keyframes dock-item { from { opacity: 0; transform: translateX(10px); } }
+.dock-ext { min-width: 34px; height: 24px; flex: none; display: grid; place-items: center; padding: 0 5px; border-radius: 7px; color: var(--blue-bright); background: color-mix(in srgb, var(--blue) 14%, transparent); font-size: 9.5px; font-weight: 800; letter-spacing: .03em; }
+.dock-file-name { flex: 1; min-width: 0; overflow: hidden; font-size: 12.5px; text-overflow: ellipsis; white-space: nowrap; }
+.dock-file-size { flex: none; color: var(--muted); font-size: 11.5px; font-variant-numeric: tabular-nums; }
+.dock-code { margin: 8px 0 2px; display: flex; justify-content: center; gap: 5px; }
+.dock-digit { width: 30px; height: 40px; display: grid; place-items: center; border: 1px solid var(--border); border-radius: 9px; background: var(--surface-subtle, rgba(255,255,255,.035)); font-size: 22px; font-weight: 800; font-variant-numeric: tabular-nums; animation: dock-digit 380ms cubic-bezier(.2,.9,.3,1.3) both; }
+.dock-digit:nth-child(2) { animation-delay: 40ms; }
+.dock-digit:nth-child(3) { animation-delay: 80ms; }
+.dock-digit:nth-child(5) { animation-delay: 140ms; }
+.dock-digit:nth-child(6) { animation-delay: 180ms; }
+.dock-digit:nth-child(7) { animation-delay: 220ms; }
+.dock-digit-gap { width: 8px; }
+@keyframes dock-digit { from { opacity: 0; transform: translateY(8px) scale(.9); } }
+.dock-bar { position: relative; display: block; height: 6px; overflow: hidden; border-radius: 999px; background: rgba(142,164,196,.16); }
+.dock-bar > span { position: relative; display: block; width: 0; height: 100%; overflow: hidden; border-radius: inherit; background: linear-gradient(90deg, var(--blue), var(--blue-bright)); transition: width 400ms ease; }
+.dock-bar.is-moving > span::after { content: ""; position: absolute; inset: 0; background: linear-gradient(90deg, transparent, rgba(255,255,255,.45), transparent); transform: translateX(-100%); animation: dock-shimmer 1.4s ease-in-out infinite; }
+.dock-bar.is-indeterminate > span { width: 35%; animation: dock-indeterminate 1.3s ease-in-out infinite; }
+.dock-card[data-phase="done"] .dock-bar > span { background: var(--green); }
+.dock-card[data-phase="paused"] .dock-bar > span { background: var(--muted); }
+@keyframes dock-shimmer { to { transform: translateX(100%); } }
+@keyframes dock-indeterminate { from { transform: translateX(-100%); } to { transform: translateX(290%); } }
+.dock-progress-meta { margin-top: 8px; min-width: 0; display: flex; align-items: baseline; gap: 8px; }
+.dock-percent { font-size: 18px; font-weight: 800; font-variant-numeric: tabular-nums; }
+.dock-amount { flex: 1; min-width: 0; overflow: hidden; color: var(--muted); font-size: 11.5px; font-variant-numeric: tabular-nums; text-overflow: ellipsis; white-space: nowrap; }
+.dock-chip { flex: none; padding: 3px 8px; border-radius: 999px; color: var(--blue-bright); background: color-mix(in srgb, var(--blue) 13%, transparent); font-size: 10.5px; font-weight: 650; }
+.dock-actions { margin-top: 12px; display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
+.dock-pill { pointer-events: auto; max-width: 100%; min-height: 44px; display: inline-flex; align-items: center; gap: 10px; padding: 6px 16px 6px 6px; border: 1px solid var(--border); border-radius: 999px; color: var(--text); background: var(--surface); box-shadow: var(--shadow); backdrop-filter: blur(20px); cursor: pointer; font-size: 12.5px; font-weight: 600; animation: dock-in 300ms cubic-bezier(.2,.9,.3,1.15) both; }
+.dock-pill[hidden] { display: none; }
+.dock-pill:hover { border-color: var(--border-hover, rgba(151,177,214,.26)); }
+.dock-pill-ring { --progress: 0deg; position: relative; width: 32px; height: 32px; flex: none; display: grid; place-items: center; border-radius: 50%; color: var(--blue-bright); background: conic-gradient(var(--blue) var(--progress), rgba(142,164,196,.2) 0); }
+.dock-pill-ring::before { content: ""; position: absolute; inset: 3px; border-radius: 50%; background: var(--surface-strong); }
+.dock-pill-ring svg { position: relative; width: 15px; height: 15px; }
+.dock-pill-ring.is-attention { background: var(--blue); animation: dock-glow 1.8s ease-out infinite; }
+.dock-pill-ring.is-done { color: var(--green); background: var(--green); }
+.dock-pill-ring.is-failed { color: var(--danger-text, #ff919a); background: var(--red); }
+@keyframes dock-glow { 0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--blue) 55%, transparent); } 70%, 100% { box-shadow: 0 0 0 9px transparent; } }
+.dock-pill-text { overflow: hidden; font-variant-numeric: tabular-nums; text-overflow: ellipsis; white-space: nowrap; }
+.drop-sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+.toast { z-index: 30; bottom: calc(24px + var(--drop-dock-offset, 0px)); }
+
+/* LevikDrop: files dragged into the window ---------------------------------------------- */
+.drop-overlay { position: fixed; inset: 0; z-index: 25; display: grid; place-items: center; padding: 32px; background: var(--dialog-backdrop, rgba(2,7,14,.72)); backdrop-filter: blur(10px); opacity: 0; transition: opacity 160ms ease; }
+.drop-overlay[hidden] { display: none; }
+.drop-overlay.is-visible { opacity: 1; }
+.drop-zone { width: min(640px, 100%); padding: 32px; border: 2px dashed color-mix(in srgb, var(--blue) 55%, transparent); border-radius: 26px; text-align: center; background: color-mix(in srgb, var(--surface) 75%, transparent); transform: scale(.96); transition: transform 240ms cubic-bezier(.2,.9,.3,1.2); }
+.drop-overlay.is-visible .drop-zone { transform: none; }
+.drop-zone-mark { width: 64px; height: 64px; margin: 0 auto 14px; display: grid; place-items: center; border-radius: 20px; color: white; background: linear-gradient(145deg, var(--blue), var(--blue-bright)); box-shadow: 0 14px 34px color-mix(in srgb, var(--blue) 40%, transparent); animation: drop-float 1.6s ease-in-out infinite; }
+.drop-zone-mark svg { width: 30px; height: 30px; }
+@keyframes drop-float { 50% { transform: translateY(-6px); } }
+.drop-zone-title { margin: 0; font-size: 20px; font-weight: 750; }
+.drop-zone-caption { margin: 6px 0 0; color: var(--muted); font-size: 13px; line-height: 1.45; }
+.drop-zone-devices { margin-top: 22px; display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; }
+.drop-tile { min-width: 0; display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 18px 12px; border: 1px solid var(--border); border-radius: 18px; background: var(--surface); opacity: .5; transition: transform 160ms ease, border-color 160ms ease, box-shadow 160ms ease, background 160ms ease; animation: dock-item 300ms ease both; }
+.drop-tile * { pointer-events: none; }
+.drop-tile.is-ready { opacity: 1; }
+.drop-tile.is-hovered { border-color: var(--blue); background: color-mix(in srgb, var(--blue) 12%, var(--surface)); box-shadow: 0 16px 36px color-mix(in srgb, var(--blue) 30%, transparent); transform: translateY(-4px) scale(1.03); }
+.drop-tile-icon { width: 46px; height: 46px; display: grid; place-items: center; border-radius: 14px; color: var(--blue-bright); background: color-mix(in srgb, var(--blue) 13%, transparent); transition: 160ms ease; }
+.drop-tile-icon svg { width: 24px; height: 24px; }
+.drop-tile.is-hovered .drop-tile-icon { color: white; background: var(--blue); }
+.drop-tile-name { max-width: 100%; overflow: hidden; font-size: 14px; font-weight: 700; text-overflow: ellipsis; white-space: nowrap; }
+.drop-tile-status { color: var(--muted); font-size: 11.5px; line-height: 1.4; }
+
+@media (prefers-reduced-motion: reduce) {
+  .drop-dock *, .drop-dock *::before, .drop-dock *::after, .drop-overlay *, .drop-presence, .drop-transfer .progress-fill::after { animation: none !important; transition: none !important; }
+  .drop-overlay, .drop-zone, .dock-stack { transition: none; }
+  .dock-check path { stroke-dashoffset: 0; }
+}
