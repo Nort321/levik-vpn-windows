@@ -1,7 +1,8 @@
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { isIP } from "node:net";
 import type { TunnelServer } from "../../shared/contracts";
 import { extractServerEndpoint } from "./serverPinger";
+import type { LiveAutoCandidate } from "./smartAutoLiveRuntime";
 
 import type { ServiceRoutePolicy, ServiceRouteTarget, ServiceRouteFallback, ServiceRouteRule, ServiceRouteExit, ServiceRouteSelection, ServiceRouteStatus } from "../../shared/serviceRoutes";
 export type * from "../../shared/serviceRoutes";
@@ -97,7 +98,7 @@ function record(value: unknown): value is Record<string, unknown> { return typeo
 
 /** Probe-derived health controls only its own balancer; no tunnel lifecycle calls. */
 export type RouteRuntimePlan = { id: string; balancerTag: string; primary: string[]; fallback: string[]; finalTag: string;
-  exits: Readonly<Record<string, string>>; primaryRef?: string; fallbackRef?: string; requireDns?: boolean };
+  exits: Readonly<Record<string, string>>; primaryRef?: string; fallbackRef?: string; requireDns?: boolean; externallyManaged?: boolean };
 export class ServiceRouteRuntime {
   private readonly health = new Map<string, { healthy: boolean; failures: number; successes: number; down: boolean }>();
   private readonly dnsHealth = new Map<string, { healthy: boolean; failures: number; successes: number; down: boolean }>();
@@ -126,12 +127,22 @@ export class ServiceRouteRuntime {
   }
   stop(): void { this.stopped = true; this.generation += 1; }
   setSuspended(suspended: boolean): void { this.suspended = suspended; this.generation += 1; }
+  /** Called only after the shared owner's API override was acknowledged. */
+  setExternalMain(tag: string): void {
+    const main = this.plans.find((plan) => plan.id === "__main" && plan.externallyManaged);
+    if (!main || ![...main.primary, ...main.fallback].includes(tag)) throw new Error("Invalid automatic main target");
+    this.current.set(main.id, { tag, fallback: false, since: this.clock() });
+    this.health.set(tag, { healthy: true, failures: 0, successes: 1, down: false });
+  }
   async refresh(): Promise<void> {
     if (this.stopped || this.suspended || this.updating) return;
     const generation = this.generation;
     this.updating = true;
     try {
-      const candidates = [...new Set(this.plans.flatMap((plan) => [...plan.primary, ...plan.fallback]))];
+      const candidates = [...new Set(this.plans.filter((plan) => !plan.externallyManaged).flatMap((plan) => [
+        ...(plan.primaryRef ? [this.current.get(plan.primaryRef)?.tag].filter((tag): tag is string => Boolean(tag)) : plan.primary),
+        ...(plan.fallbackRef ? [this.current.get(plan.fallbackRef)?.tag].filter((tag): tag is string => Boolean(tag)) : plan.fallback),
+      ]))];
       await Promise.all(candidates.map(async (tag) => {
         const healthy = await this.probe(tag).catch(() => false);
         if (generation !== this.generation) return;
@@ -142,6 +153,7 @@ export class ServiceRouteRuntime {
       }));
       if (this.stopped || this.suspended || generation !== this.generation) return;
       for (const plan of this.plans) {
+        if (plan.externallyManaged) continue;
         const prior = this.current.get(plan.id);
         const available = (tag: string): boolean => this.health.get(tag)?.healthy === true && (!plan.requireDns || this.dnsHealth.get(tag)?.healthy === true);
         // A healthy selected server stays selected; a recovered primary does not bounce a live session.
@@ -177,36 +189,55 @@ export const SERVICE_PROBE_BASE_PORT = 47200;
 export const SERVICE_MAIN_BALANCER = "levik-service-main";
 export type ServiceRouteAuth = { port: number; user: string; password: string };
 export type CompiledServiceRoutes = { auth?: ServiceRouteAuth; resolvers?: string[]; policy: ServiceRoutePolicy; status: ServiceRouteStatus; plans: RouteRuntimePlan[];
-  probes: Array<{ tag: string; port: number }> };
+  probes: Array<{ tag: string; port: number }>; policyActive?: boolean;
+  automatic?: { selectedId: string; enabled: boolean; candidates: LiveAutoCandidate[] } };
 const compiledPolicies = new WeakMap<Record<string, unknown>, CompiledServiceRoutes>();
 export function compiledServiceRoutes(config: Record<string, unknown>): CompiledServiceRoutes | undefined { return compiledPolicies.get(config); }
+/** Keep recovery's saved configuration aligned with an acknowledged live target without reloading the running core. */
+export function rememberAutomaticMain(config: Record<string, unknown> | null, serverId: string, enabled: boolean): void {
+  if (!config) return;
+  const compiled = compiledPolicies.get(config); const automatic = compiled?.automatic;
+  const target = automatic?.candidates.find((candidate) => candidate.id === serverId);
+  if (!automatic || !target || !record(config.routing) || !Array.isArray(config.routing.balancers)) return;
+  const main = config.routing.balancers.find((balancer: unknown) => record(balancer) && balancer.tag === SERVICE_MAIN_BALANCER);
+  if (!record(main)) return;
+  main.selector = [target.tag]; automatic.selectedId = serverId; automatic.enabled = enabled;
+}
 
-/** Leaves legacy/protected configs identical. Only proven ordinary endpoints enter the new core path. */
+/** Private same-core control is available for ordinary Auto independently of saved service rules. */
 export function withServiceRoutes(base: Record<string, unknown>, input: {
   policy: ServiceRoutePolicy | undefined; selected: TunnelServer; servers: TunnelServer[]; gameOnly?: boolean | undefined;
   automaticServer: boolean; applicationFilterUnsupported?: boolean; bootstrapEndpoints?: boolean; onlyProcesses?: readonly string[]; insertionIndex?: number; directTag: string; prepareOutbound: (server: TunnelServer) => Record<string, unknown>;
 }): Record<string, unknown> {
-  const { policy } = input;
+  const autoPolicy = !input.gameOnly ? automaticOrdinaryPolicy(input.servers) : undefined;
+  if (!input.policy && autoPolicy && !serviceExitForServer(autoPolicy, input.selected)) return base;
+  const policy = input.policy ?? autoPolicy;
   if (!policy) return base;
+  const automatic = !input.gameOnly && !hasTuic(input.selected)
+    && serviceExitForServer(policy, input.selected) !== null;
   const status: ServiceRouteStatus = { revision: policy.revision, fingerprint: policy.fingerprint, state: "pending", routes: [] };
   const inactive = (state: ServiceRouteStatus["state"], detail?: string): Record<string, unknown> => {
     compiledPolicies.set(base, { policy, status: { ...status, state, ...(detail ? { detail } : {}) }, plans: [], probes: [] });
     return base;
   };
   if (!serviceExitForServer(policy, input.selected) || input.gameOnly) return inactive("suspended", "excluded_mode");
-  if (!policy.rules.length) return inactive("applied");
-  if (input.applicationFilterUnsupported) return inactive("unsupported", "app_filter_unsupported");
-  if (input.onlyProcesses && input.onlyProcesses.length === 0) return inactive("unsupported", "no_included_apps");
+  if (!policy.rules.length && !automatic) return inactive("applied");
+  const serviceUnsupported = input.applicationFilterUnsupported ? "app_filter_unsupported"
+    : input.onlyProcesses && input.onlyProcesses.length === 0 ? "no_included_apps" : undefined;
+  if (serviceUnsupported && !automatic) return inactive("unsupported", serviceUnsupported);
+  const policyActive = policy.rules.length > 0 && !serviceUnsupported;
+  if (serviceUnsupported) { status.state = "unsupported"; status.detail = serviceUnsupported; }
   if (hasTuic(input.selected)) return inactive("unsupported", "unsupported_transport");
   const candidates = input.servers.filter((server) => !hasTuic(server) && serviceExitForServer(policy, server)?.state === "enabled");
   const selectedExit = serviceExitForServer(policy, input.selected)!;
-  const ordered = [...(selectedExit.state === "enabled" ? [input.selected] : []), ...candidates.filter((server) => server.id !== input.selected.id)]
+  const ordered = [input.selected, ...candidates.filter((server) => server.id !== input.selected.id)]
     .filter((server, index, list) => list.findIndex((other) => other.id === server.id) === index);
   if (ordered.length > 32) return inactive("unsupported", "route_limit");
   const candidateTags = new Map<string, string>();
   const candidateExits: Record<string, string> = {};
   const probes = ordered.map((server, index) => {
-    const tag = `levik-service-endpoint-${index}`;
+    // Xray selectors are prefixes: fixed-width tags prevent 01 selecting 010/011.
+    const tag = `levik-service-endpoint-${String(index).padStart(2, "0")}`;
     candidateTags.set(server.id, tag);
     candidateExits[tag] = serviceExitForServer(policy, server)!.exitId;
     return { tag, port: SERVICE_PROBE_BASE_PORT + index };
@@ -216,10 +247,10 @@ export function withServiceRoutes(base: Record<string, unknown>, input: {
   const byCountry = (country: string): string[] => ordered.filter((server) => serviceExitForServer(policy, server)?.countryCode === country)
     .map((server) => candidateTags.get(server.id)!);
   const primaryMain = byExit(selectedExit.exitId);
-  const otherMain = input.automaticServer ? ordered.filter((server) => serviceExitForServer(policy, server)?.exitId !== selectedExit.exitId)
+  const otherMain = automatic ? ordered.filter((server) => serviceExitForServer(policy, server)?.exitId !== selectedExit.exitId)
     .map((server) => candidateTags.get(server.id)!) : [];
   const plans: RouteRuntimePlan[] = [{ id: "__main", balancerTag: SERVICE_MAIN_BALANCER, primary: primaryMain,
-    fallback: otherMain, finalTag: "levik-block", exits: candidateExits }];
+    fallback: otherMain, finalTag: "levik-block", exits: candidateExits, ...(automatic ? { externallyManaged: true } : {}) }];
   const auth: ServiceRouteAuth = { port: 47187, user: "levik-service", password: randomBytes(24).toString("hex") };
   const config = structuredClone(base);
   const outbounds: Record<string, unknown>[] = Array.isArray(config.outbounds) ? config.outbounds.filter(record) : [];
@@ -248,7 +279,7 @@ export function withServiceRoutes(base: Record<string, unknown>, input: {
   const healthResolvers = resolverAddresses.map(routeResolver);
   if (!healthResolvers.length || healthResolvers.some((address) => !/^(?:https|tcp):\/\//.test(address))) return inactive("unsupported", "unsupported_dns");
   let needsDefaultLoopback = false;
-  policy.rules.forEach((rule, index) => {
+  (policyActive ? policy.rules : []).forEach((rule, index) => {
     const balancerTag = `levik-service-rule-${index}`;
     const dnsTag = `${balancerTag}-dns`;
     const data: Record<string, unknown> = { type: "field", inboundTag: ["levik-tun-in"], domain: rule.domains,
@@ -302,8 +333,31 @@ export function withServiceRoutes(base: Record<string, unknown>, input: {
   if (input.bootstrapEndpoints !== false && endpointNames.length) bootstrap.unshift({ address: "https+local://1.1.1.1/dns-query", domains: endpointNames, skipFallback: true, finalQuery: true });
   config.dns = { ...config.dns, servers: [...bootstrap, ...dnsServers, ...rest], disableFallbackIfMatch: true };
   if (record(config.api)) { delete config.api.listen; config.api.services = [...new Set([...(Array.isArray(config.api.services) ? config.api.services : []), "RoutingService"])]; }
-  compiledPolicies.set(config, { auth, resolvers: healthResolvers, policy, status, plans, probes });
+  compiledPolicies.set(config, { auth, resolvers: healthResolvers, policy, status, plans, probes, policyActive,
+    ...(automatic ? { automatic: { selectedId: ordered.find((server) => candidateTags.get(server.id) === primaryMain[0])?.id ?? input.selected.id,
+      enabled: input.automaticServer,
+      candidates: ordered.map((server, index) => ({ id: server.id, tag: probes[index]!.tag, port: probes[index]!.port,
+        routeKey: serviceServerKey(server) ?? server.id, exitId: serviceExitForServer(policy, server)!.exitId })) } } : {}),
+  });
   return config;
+}
+
+/** Local metadata only; never sent to an account or substituted for saved user rules. */
+function automaticOrdinaryPolicy(servers: readonly TunnelServer[]): ServiceRoutePolicy | undefined {
+  const ordinary = servers.filter((server) => !hasTuic(server) && COUNTRY.test(server.countryCode.toUpperCase()) && server.countryCode.toUpperCase() !== "RU"
+    && !server.name.includes("🏠") && extractServerEndpoint(server.outbound) !== null);
+  if (!ordinary.length) return undefined;
+  const exits = new Map<string, ServiceRouteExit>();
+  for (const server of ordinary) {
+    const endpoint = extractServerEndpoint(server.outbound)!;
+    if (["localhost", "127.0.0.1", "::1", "0.0.0.0"].includes(endpoint.host.toLowerCase())) continue;
+    const key = serviceServerKey(server); if (!key) continue;
+    const exitId = `auto-${createHash("sha256").update(key).digest("hex").slice(0, 20)}`;
+    exits.set(exitId, { exitId, name: server.name, countryCode: server.countryCode.toUpperCase(), role: "ordinary", state: "enabled",
+      endpoints: [{ address: endpoint.host, port: endpoint.port, protocol: String(server.outbound.protocol) }] });
+  }
+  if (!exits.size) return undefined;
+  return { version: 1, revision: 0, fingerprint: createHash("sha256").update(JSON.stringify([...exits.keys()])).digest("hex"), rules: [], exits: [...exits.values()] };
 }
 
 function hasTuic(server: TunnelServer): boolean { return "tuic" in server && server.tuic !== undefined; }

@@ -15,8 +15,17 @@ export async function overrideServiceRoute(balancer: string, target: string, end
     Buffer.concat([field(1, balancer), field(2, target)]), endpoint, auth);
 }
 export async function queryServiceRouteStats(auth: ServiceRouteAuth): Promise<{ uplink: number; downlink: number }> {
+  const { uplink, downlink } = await queryServiceRouteStatistics(auth);
+  return { uplink, downlink };
+}
+/** Missing counters are different from observed zero traffic when deciding whether a live switch is safe. */
+export async function queryServiceRouteStatistics(auth: ServiceRouteAuth): Promise<{ uplink: number; downlink: number; initialized: boolean }> {
   const response = await serviceRpc("/xray.app.stats.command.StatsService/QueryStats", field(1, "inbound>>>levik-tun-in>>>traffic>>>"), XRAY_STATS_ENDPOINT, auth);
+  return decodeServiceRouteStatistics(response);
+}
+export function decodeServiceRouteStatistics(response: Buffer): { uplink: number; downlink: number; initialized: boolean } {
   let uplink = 0; let downlink = 0; let offset = 0;
+  let seenUplink = false; let seenDownlink = false; let duplicate = false;
   while (offset < response.length) {
     if (offset + 5 > response.length || response[offset] !== 0) throw new Error("Некорректная статистика ядра");
     const length = response.readUInt32BE(offset + 1); offset += 5;
@@ -32,11 +41,11 @@ export async function queryServiceRouteStats(auth: ServiceRouteAuth): Promise<{ 
           value = Number(item.value);
         }
       }
-      if (name.endsWith(">>>uplink")) uplink += value;
-      if (name.endsWith(">>>downlink")) downlink += value;
+      if (name === "inbound>>>levik-tun-in>>>traffic>>>uplink") { duplicate ||= seenUplink; uplink = value; seenUplink = true; }
+      if (name === "inbound>>>levik-tun-in>>>traffic>>>downlink") { duplicate ||= seenDownlink; downlink = value; seenDownlink = true; }
     }
   }
-  return { uplink, downlink };
+  return { uplink, downlink, initialized: seenUplink && seenDownlink && !duplicate };
 }
 function protobufFields(message: Buffer): Array<{ id: number; value: Buffer | bigint }> {
   const fields: Array<{ id: number; value: Buffer | bigint }> = []; let offset = 0;

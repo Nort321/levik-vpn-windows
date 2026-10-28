@@ -960,3 +960,48 @@ describe("Smart Auto probe cancellation boundaries", () => {
     expect(Reflect.get(controller, "routeMeasurements")).toEqual({});
   });
 });
+
+
+describe("Smart Auto hot mode controller", () => {
+  it("enables the existing ordinary owner without selecting/restarting the connected server", async () => {
+    const controller = new AppController(); controller.cancelLogin();
+    const state = Reflect.get(controller, "state") as Record<string, unknown>;
+    const settings = state.settings as Record<string, unknown>; settings.automaticServer = false;
+    Object.assign(state, { status: "connected", selectedServerId: "manual" });
+    const enabled = vi.fn(async () => true), refresh = vi.fn(async () => {}), start = vi.fn(), stop = vi.fn();
+    Reflect.set(controller, "xray", { isRunning: () => true, start, stop,
+      serviceRoutes: { automaticAvailable: true, smartAutoActive: true, setAutomaticEnabled: enabled, refreshAutomatic: refresh, mainServerId: "manual" } });
+    Reflect.set(controller, "secureStore", { put: vi.fn(async () => {}) });
+    Reflect.set(controller, "applyLoginItemSettings", vi.fn());
+    Reflect.set(controller, "refreshLiveLoad", vi.fn(async () => {}));
+    Reflect.set(controller, "recordSyncedChanges", vi.fn(async () => {}));
+    Reflect.set(controller, "emitChanged", vi.fn());
+    Reflect.set(controller, "telemetry", { record: vi.fn() });
+    const select = vi.spyOn(controller, "selectServer").mockResolvedValue();
+    await controller.selectAutomatic();
+    expect(enabled).toHaveBeenCalledWith(true); expect(refresh).toHaveBeenCalledOnce();
+    expect(select).not.toHaveBeenCalled(); expect(start).not.toHaveBeenCalled(); expect(stop).not.toHaveBeenCalled();
+    expect(controller.snapshot().selectedServerId).toBe("manual");
+  });
+});
+
+
+describe("Smart Auto control failure isolation", () => {
+  it("retains a live core after repeated API failures but leaves dead-core recovery intact", async () => {
+    const controller = new AppController(); controller.cancelLogin();
+    const state = Reflect.get(controller, "state") as Record<string, unknown>;
+    Object.assign(state, { status: "connected", selectedServerId: "a" });
+    let running = true;
+    const recheck = vi.fn(async () => {}), recover = vi.fn();
+    Reflect.set(controller, "xray", { isRunning: () => running, isHealthy: async () => false,
+      serviceRoutes: { smartAutoActive: true, authentication: {}, refreshAutomatic: recheck } });
+    Reflect.set(controller, "telemetry", { record: vi.fn() });
+    Reflect.set(controller, "beginTunnelRecovery", recover);
+    const check = Reflect.get(controller, "verifyTunnelHealth") as (immediate?: boolean) => Promise<void>;
+    for (let i = 0; i < 4; i++) await check.call(controller, true);
+    expect(recover).not.toHaveBeenCalled(); expect(recheck).toHaveBeenCalledTimes(4);
+    expect(controller.snapshot().status).toBe("connected");
+    running = false; await check.call(controller, true);
+    expect(recover).toHaveBeenCalledOnce();
+  });
+});

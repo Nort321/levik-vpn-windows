@@ -318,7 +318,11 @@ export class XrayManager extends EventEmitter<XrayEvents> {
     const child = this.process;
     if (!child) return false;
     try {
-      if (this.serviceRoutes.active) { await this.serviceRoutes.queryStats(); return this.process === child; }
+      if (this.serviceRoutes.authentication) {
+        if (this.serviceRoutes.active) await this.serviceRoutes.queryStats();
+        const healthy = this.serviceRoutes.active || await this.serviceRoutes.probeCurrent();
+        return this.process === child && healthy;
+      }
       await execFileAsync(this.executablePath(), [
         "api", "statsquery", `--server=${XRAY_STATS_ENDPOINT}`, "-pattern", "inbound>>>levik-tun-in>>>",
       ], { windowsHide: true, timeout: 3_500, maxBuffer: 256 * 1024 });
@@ -396,7 +400,7 @@ export class XrayManager extends EventEmitter<XrayEvents> {
     if (!child || this.statsQueryRunning === child) return;
     this.statsQueryRunning = child;
     try {
-      if (this.serviceRoutes.active) {
+      if (this.serviceRoutes.authentication) {
         const stats = await this.serviceRoutes.queryStats();
         if (this.process === child) this.emit("stats", stats.downlink, stats.uplink);
         return;

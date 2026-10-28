@@ -19,6 +19,8 @@ export interface RouteMeasurement {
   setupMs: number | null;
   downMbps: number | null;
   upMbps: number | null;
+  /** A bounded body crossed the same live proxy path; absent for older/light observations. */
+  dataVerified?: boolean;
 }
 
 export interface RouteProbeCandidate {
@@ -137,7 +139,7 @@ export function buildRouteProbeConfig(source: Record<string, unknown>, tag: stri
 }
 
 export interface RouteProbeSession {
-  latency(target: string): Promise<{ values: number[]; failed: number; setupMs: number }>;
+  latency(target: string): Promise<{ values: number[]; failed: number; setupMs: number; dataVerified?: boolean }>;
   transfer(target: string, direction: "down" | "up"): Promise<number | null>;
   close(): Promise<void>;
 }
@@ -187,50 +189,85 @@ export async function openRouteProbe(executable: string, candidate: RouteProbeCa
       if (closed || coreFailed || Date.now() >= until) throw new Error("Probe core unavailable");
       await new Promise<void>((resolve) => setTimeout(resolve, 40));
     }
-    const connect = async (target: string): Promise<{ agent: Agent; setupMs: number }> => {
-      signal.throwIfAborted();
-      if (closed || coreFailed) throw new Error("Probe closed");
-      const url = checkedTarget(target);
-      const started = performance.now();
-      const socket = await openTlsProxy(port, password, url.hostname, signal);
-      if (closed || signal.aborted) { socket.destroy(); throw new Error("Probe cancelled"); }
-      // HTTP's Agent only owns pooling: every socket is already authenticated TLS
-      // through this candidate. It can never open a direct socket to the target.
-      const agent = new Agent({ keepAlive: true, maxSockets: 1 });
-      agent.createConnection = () => socket;
-      agents.add(agent);
-      return { agent, setupMs: performance.now() - started };
-    };
-    return {
-      async latency(target) {
-        const { agent, setupMs } = await connect(target);
-        try {
-          // Warm TLS and HTTP separately; only subsequent requests count as path latency.
-          if (!await exchange(agent, target, "GET", 0, 4096, signal)) throw new Error("Probe target unavailable");
-          const values: number[] = []; let failed = 0;
-          for (let index = 0; index < ROUTE_PROBE_LIMITS.samples; index++) {
-            if (signal.aborted) break;
-            const answer = await exchange(agent, target, "GET", 0, 4096, signal);
-            if (answer) values.push(answer.firstByteMs); else if (!signal.aborted) failed++;
-          }
-          return { values, failed, setupMs };
-        } finally { agents.delete(agent); agent.destroy(); }
-      },
-      async transfer(target, direction) {
-        const { agent } = await connect(target);
-        try {
-          const bytes = direction === "down" ? ROUTE_PROBE_LIMITS.downloadBytes : ROUTE_PROBE_LIMITS.uploadBytes;
-          const answer = await exchange(agent, target, direction === "down" ? "GET" : "POST", direction === "up" ? bytes : 0, direction === "down" ? bytes : 4096, signal);
-          if (!answer || direction === "down" && answer.bytes !== bytes) return null;
-          return bytes * 8 / Math.max(answer.elapsedMs, 1) / 1000;
-        } finally { agents.delete(agent); agent.destroy(); }
-      }, close,
-    };
+    return proxyProbeSession(port, { user: "probe", password }, signal, () => !closed && !coreFailed, agents, close);
+
   } catch {
     config.fill(0);
     await close();
     throw new Error("Route probe unavailable");
   }
+}
+
+/** The running core already owns the physical sockets; probes never create another core or TUN. */
+export async function openExistingRouteProbe(port: number, auth: { user: string; password: string }, signal: AbortSignal,
+  options: { verifyData?: boolean } = {}): Promise<RouteProbeSession> {
+  signal.throwIfAborted();
+  if (!Number.isInteger(port) || port < 47200 || port > 47231 || !/^[a-z0-9-]{1,32}$/.test(auth.user)
+    || !/^[a-f0-9]{48}$/.test(auth.password)) throw new Error("Invalid live probe listener");
+  const agents = new Set<Agent>(); let closed = false;
+  const close = async (): Promise<void> => {
+    closed = true; signal.removeEventListener("abort", onAbort);
+    for (const agent of agents) agent.destroy(); agents.clear();
+  };
+  const onAbort = (): void => { void close(); };
+  signal.addEventListener("abort", onAbort, { once: true });
+  return proxyProbeSession(port, auth, signal, () => !closed, agents, close, options.verifyData !== false);
+}
+
+function proxyProbeSession(port: number, auth: { user: string; password: string }, signal: AbortSignal,
+  available: () => boolean, agents: Set<Agent>, close: () => Promise<void>, verifyData = false): RouteProbeSession {
+  const connect = async (target: string): Promise<{ agent: Agent; setupMs: number }> => {
+    signal.throwIfAborted();
+    if (!available()) throw new Error("Probe closed");
+    const url = checkedTarget(target);
+    const started = performance.now();
+    const socket = await openTlsProxy(port, auth, url.hostname, signal);
+    if (!available() || signal.aborted) { socket.destroy(); throw new Error("Probe cancelled"); }
+    // This agent can only reuse verified TLS through the specified private
+    // candidate proxy. It never opens a direct connection to the target.
+    const agent = new Agent({ keepAlive: true, maxSockets: 1 });
+    agent.createConnection = () => socket;
+    agents.add(agent);
+    return { agent, setupMs: performance.now() - started };
+  };
+  return {
+    async latency(target) {
+      const url = checkedTarget(target);
+      const verifyWarmup = verifyData && url.hostname === "speed.cloudflare.com" && url.pathname === "/__down";
+      let connection: { agent: Agent; setupMs: number } | undefined;
+      try {
+        connection = await connect(target);
+        const { agent, setupMs } = connection;
+        const warm = new URL(target);
+        if (verifyWarmup) warm.searchParams.set("bytes", "65536");
+        // A small real body also catches protocols that pass handshakes and
+        // freeze after 16KB. Steady latency excludes this warm-up and TLS.
+        const verified = await exchange(agent, warm.href, "GET", 0, verifyWarmup ? 65536 : 4096, signal);
+        if (!verified || verifyWarmup && verified.bytes !== 65536) throw new Error("Probe target unavailable");
+        const values: number[] = []; let failed = 0;
+        for (let index = 0; index < ROUTE_PROBE_LIMITS.samples; index++) {
+          if (signal.aborted) break;
+          const answer = await exchange(agent, target, "GET", 0, 4096, signal);
+          if (answer) values.push(answer.firstByteMs); else if (!signal.aborted) failed++;
+        }
+        return { values, failed, setupMs, ...(verifyWarmup ? { dataVerified: true } : {}) };
+      } catch {
+        if (verifyWarmup && !signal.aborted) return { values: [], failed: 0, setupMs: connection?.setupMs ?? 0, dataVerified: false };
+        throw new Error("Probe target unavailable");
+      } finally {
+        if (connection) { agents.delete(connection.agent); connection.agent.destroy(); }
+      }
+    },
+    async transfer(target, direction) {
+      const { agent } = await connect(target);
+      try {
+        const bytes = direction === "down" ? ROUTE_PROBE_LIMITS.downloadBytes : ROUTE_PROBE_LIMITS.uploadBytes;
+        const answer = await exchange(agent, target, direction === "down" ? "GET" : "POST", direction === "up" ? bytes : 0, direction === "down" ? bytes : 4096, signal);
+        if (!answer || direction === "down" && answer.bytes !== bytes) return null;
+        return bytes * 8 / Math.max(answer.elapsedMs, 1) / 1000;
+      } finally { agents.delete(agent); agent.destroy(); }
+    }, close,
+  };
 }
 
 function checkedTarget(target: string): URL {
@@ -239,12 +276,12 @@ function checkedTarget(target: string): URL {
   return url;
 }
 
-function openTlsProxy(port: number, password: string, host: string, signal: AbortSignal): Promise<TLSSocket> {
+function openTlsProxy(port: number, auth: { user: string; password: string }, host: string, signal: AbortSignal): Promise<TLSSocket> {
   return new Promise((resolve, reject) => {
     let tls: TLSSocket | null = null;
     let settled = false;
     const proxy = request({ host: "127.0.0.1", port, method: "CONNECT", path: `${host}:443`, agent: false,
-      headers: { "Proxy-Authorization": `Basic ${Buffer.from(`probe:${password}`).toString("base64")}` } });
+      headers: { "Proxy-Authorization": `Basic ${Buffer.from(`${auth.user}:${auth.password}`).toString("base64")}` } });
     const finish = (error?: Error): void => {
       if (settled) return; settled = true;
       clearTimeout(timer); signal.removeEventListener("abort", abort);
@@ -342,7 +379,8 @@ export function diverseProbeCandidates<T extends { routeKey: string; path?: read
 }
 
 export async function measureRouteCandidates(options: {
-  executable: string; candidates: readonly RouteProbeCandidate[]; signal?: AbortSignal; targets?: ProbeTargets;
+  executable: string; candidates: readonly RouteProbeCandidate[]; signal?: AbortSignal; targets?: ProbeTargets; transfers?: boolean;
+  canTransfer?: () => boolean;
 }, dependencies: RouteProbeDependencies = { open: openRouteProbe, now: Date.now }): Promise<Record<string, RouteMeasurement>> {
   const controller = new AbortController();
   const abort = (): void => controller.abort();
@@ -374,6 +412,7 @@ export async function measureRouteCandidates(options: {
         const candidateSignal = candidateController.signal;
         let session: RouteProbeSession | undefined;
         const values: number[] = []; const setups: number[] = []; let failed = 0; let answeredTargets = 0; let confirmedTargets = 0;
+        let dataVerified: boolean | undefined;
         try {
           session = await dependencies.open(options.executable, candidate, candidateSignal);
           for (const target of targets.latency.slice(0, 2)) {
@@ -381,6 +420,7 @@ export async function measureRouteCandidates(options: {
             try {
               const answer = await session.latency(target);
               values.push(...answer.values); setups.push(answer.setupMs); failed += answer.failed;
+              if (answer.dataVerified !== undefined) dataVerified = answer.dataVerified;
               if (answer.values.length) answeredTargets++;
               if (answer.values.length >= 2) confirmedTargets++;
             } catch { /* A provider outage reduces confidence, not a fabricated packet-loss sample. */ }
@@ -396,21 +436,22 @@ export async function measureRouteCandidates(options: {
           medianMs: median, jitterMs: deviations.length ? deviations[Math.floor(deviations.length / 2)]! : null,
           failureRate: failed / Math.max(1, values.length + failed), targets: answeredTargets, samples: values.length,
           setupMs: setups.length ? Math.max(...setups) : null, downMbps: null, upMbps: null,
+          ...(dataVerified !== undefined ? { dataVerified } : {}),
         };
       }
     }));
     // Transfers are deliberately sequential, so candidates cannot congest each other.
     clearTimeout(latencyTimer);
     signal.removeEventListener("abort", stopLatency);
-    const finalists = diverseProbeCandidates(rankMeasuredRoutes(unique, results, dependencies.now()), ROUTE_PROBE_LIMITS.finalists);
+    const finalists = options.transfers === false ? [] : diverseProbeCandidates(rankMeasuredRoutes(unique, results, dependencies.now()), ROUTE_PROBE_LIMITS.finalists);
     for (const candidate of finalists) {
-      if (signal.aborted) break;
+      if (signal.aborted || options.canTransfer && !options.canTransfer()) break;
       let session: RouteProbeSession | undefined;
       try {
         session = await dependencies.open(options.executable, candidate, signal);
         const measurement = results[candidate.id]!;
         measurement.downMbps = await session.transfer(targets.download, "down").catch(() => null);
-        if (!signal.aborted) measurement.upMbps = await session.transfer(targets.upload, "up").catch(() => null);
+        if (!signal.aborted && (!options.canTransfer || options.canTransfer())) measurement.upMbps = await session.transfer(targets.upload, "up").catch(() => null);
       } catch { /* Missing transfer evidence stays unknown; latency evidence remains valid. */ }
       finally { await session?.close(); }
     }

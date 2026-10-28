@@ -87,7 +87,7 @@ describe("ordinary service route policy", () => {
     expect(dns.servers).toContainEqual(expect.objectContaining({ address: "tcp://9.9.9.9", domains: ["full:work.example"], tag: "levik-service-rule-0-dns", finalQuery: true }));
     expect(dns.servers).toContainEqual(expect.objectContaining({ address: "9.9.9.9", domains: ["full:default.example"], tag: "levik-dns", finalQuery: true }));
     const main = (config.routing as { balancers: Array<Record<string, unknown>> }).balancers.find((item) => item.tag === "levik-service-main");
-    expect(main?.selector).toEqual(["levik-service-endpoint-0"]);
+    expect(main?.selector).toEqual(["levik-service-endpoint-00"]);
     expect(config.api).not.toHaveProperty("listen");
     const api = (config.inbounds as Array<Record<string, unknown>>).find((item) => item.tag === "levik-service-api-in");
     expect(api).toMatchObject({ listen: "127.0.0.1", protocol: "http", settings: { accounts: [{ user: "levik-service", pass: expect.stringMatching(/^[0-9a-f]{48}$/) }] } });

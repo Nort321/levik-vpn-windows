@@ -1,7 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 vi.mock("../src/main/vpn/serviceRouteTransport", () => ({ overrideServiceRoute: vi.fn(async () => {}),
   probeServiceRoute: vi.fn(async () => true), probeServiceRouteDns: vi.fn(async () => true),
-  queryServiceRouteStats: vi.fn(async () => ({ uplink: 0, downlink: 0 })) }));
+  queryServiceRouteStats: vi.fn(async () => ({ uplink: 0, downlink: 0 })),
+  queryServiceRouteStatistics: vi.fn(async () => ({ uplink: 0, downlink: 0, initialized: true })) }));
 import { overrideServiceRoute, probeServiceRoute } from "../src/main/vpn/serviceRouteTransport";
 import { ServiceRouteSession } from "../src/main/vpn/serviceRouteSession";
 import { withServiceRoutes, type ServiceRoutePolicy } from "../src/main/vpn/serviceRoutes";
