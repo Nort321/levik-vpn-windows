@@ -11,6 +11,9 @@ import {
   recordSuccess,
   SmartLadder,
   TunnelFreezeDetector,
+  rankingLatency,
+  relayHosts,
+  RELAY_EXTRA_MS,
   verdictOf,
   winnerOf,
   worthSwitching,
@@ -115,6 +118,22 @@ describe("protocol history", () => {
     expect(store.networkKey({ "Wi-Fi": [{ ...wifi, address: "192.168.1.99", cidr: "192.168.1.99/24" }], LevikVPN: [tun] })).toBe(key);
     expect(store.networkKey({ "Wi-Fi": [{ ...wifi, address: "10.0.0.5", netmask: "255.0.0.0", cidr: "10.0.0.5/8" }] })).not.toBe(key);
     expect(store.networkKey({ utun4: [tun] })).toBeNull();
+  });
+});
+
+describe("relay entries", () => {
+  it("names hosts shared by servers of different countries and adds the path behind them", () => {
+    const relays = relayHosts([
+      { host: "13.143.244.227", countryCode: "SE" },
+      { host: "13.143.244.227", countryCode: "pl" },
+      { host: "de-new.example.net", countryCode: "DE" },
+      { host: "DE-NEW.example.net", countryCode: "de" },
+      { host: null, countryCode: "FI" },
+    ]);
+    expect([...relays]).toEqual(["13.143.244.227"]);
+    expect(rankingLatency(14, true)).toBe(14 + RELAY_EXTRA_MS);
+    expect(rankingLatency(14, false)).toBe(14);
+    expect(rankingLatency(null, true)).toBeNull();
   });
 });
 

@@ -135,6 +135,32 @@ export function spreadTop(ranked: readonly RankedServer[], spread: number): Rank
   return [chosen, ...ranked.filter((item) => item !== chosen)];
 }
 
+/** What the path behind a relay entry adds to its ping: entry → hop abroad → the node. */
+export const RELAY_EXTRA_MS = 120;
+
+/**
+ * Hosts that servers of different countries share: a relay entry that
+ * forwards each port to another node. A ping only reaches the entry, a few
+ * milliseconds away inside Russia, so these servers looked faster than any
+ * direct one while their traffic still crosses two more hops.
+ */
+export function relayHosts(servers: ReadonlyArray<{ host: string | null; countryCode: string }>): Set<string> {
+  const countries = new Map<string, Set<string>>();
+  for (const { host, countryCode } of servers) {
+    if (!host) continue;
+    const key = host.toLowerCase();
+    const seen = countries.get(key) ?? new Set<string>();
+    seen.add(countryCode.toUpperCase());
+    countries.set(key, seen);
+  }
+  return new Set([...countries].filter(([, seen]) => seen.size > 1).map(([host]) => host));
+}
+
+/** The latency Smart Auto ranks by: a relayed server pays for the path behind its entry. */
+export function rankingLatency(measuredMs: number | null, relayed: boolean): number | null {
+  return measuredMs === null || !relayed ? measuredMs : measuredMs + RELAY_EXTRA_MS;
+}
+
 /** Stage 4, docs/app-platform.md "Smart Auto": when a running automatic connection leaves a full node. */
 export const OVERLOAD_CONFIRM_MS = 5 * 60_000;
 export const OVERLOAD_MOVE_COOLDOWN_MS = 30 * 60_000;

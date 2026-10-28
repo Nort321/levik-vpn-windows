@@ -334,6 +334,62 @@ describe("AppController tunnel recovery", () => {
     expect(controller.snapshot()).toMatchObject({ status: "error", busy: false });
   });
 
+  it("an automatic connection tries the next server when one does not carry traffic", async () => {
+    const { controller, xray, second } = tunnelController();
+    const update = vi.fn(async () => undefined);
+    Reflect.set(controller, "protocolHistory", {
+      networkKey: () => "0123456789abcdef", current: () => ({ networks: [], winners: {} }), localSalt: () => "salt", update,
+    });
+    Reflect.set(controller, "latenciesMeasuredAt", Date.now());
+    vi.mocked(isTunnelHealthy).mockResolvedValueOnce(false);
+
+    await controller.connect();
+
+    expect(xray.start).toHaveBeenCalledTimes(2);
+    expect(update).toHaveBeenCalledOnce();
+    expect(controller.snapshot()).toMatchObject({ status: "connected", selectedServerId: second.id });
+  });
+
+  it("keeps a server chosen by hand and stays put without a network of its own", async () => {
+    const { controller, xray } = tunnelController();
+    Reflect.set(controller, "protocolHistory", {
+      networkKey: () => null, current: () => ({ networks: [], winners: {} }), localSalt: () => "salt", update: vi.fn(),
+    });
+    Reflect.set(controller, "latenciesMeasuredAt", Date.now());
+    vi.mocked(isTunnelHealthy).mockResolvedValue(false);
+    await expect(controller.connect()).rejects.toThrow("Не удалось подтвердить доступ");
+    expect(xray.start).toHaveBeenCalledOnce();
+
+    Reflect.set(controller, "protocolHistory", {
+      networkKey: () => "0123456789abcdef", current: () => ({ networks: [], winners: {} }), localSalt: () => "salt", update: vi.fn(),
+    });
+    await controller.updateSettings({ automaticServer: false });
+    await expect(controller.connect()).rejects.toThrow("Не удалось подтвердить доступ");
+    expect(xray.start).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not try another server when the core fails on this computer", async () => {
+    const { controller, xray } = tunnelController();
+    const update = vi.fn(async () => undefined);
+    Reflect.set(controller, "protocolHistory", {
+      networkKey: () => "0123456789abcdef", current: () => ({ networks: [], winners: {} }), localSalt: () => "salt", update,
+    });
+    Reflect.set(controller, "latenciesMeasuredAt", Date.now());
+    vi.mocked(isTunnelHealthy).mockImplementationOnce(async () => { await xray.stop(); return false; });
+    await expect(controller.connect()).rejects.toThrow("Ядро VPN завершилось");
+    expect(xray.start).toHaveBeenCalledOnce();
+    expect(update).not.toHaveBeenCalled();
+  });
+
+  it("keeps the last direct pings while the tunnel would answer them itself", async () => {
+    const { controller, first, second } = tunnelController();
+    await controller.connect();
+    vi.mocked(measureServerLatencies).mockClear();
+    await controller.pingServers();
+    expect(measureServerLatencies).not.toHaveBeenCalled();
+    expect(controller.snapshot().serverLatencies).toEqual({ [first.id]: 10, [second.id]: 20 });
+  });
+
   it.each([
     ["server", "startup"], ["server", "authorization"], ["server", "health"],
     ["settings", "startup"], ["settings", "authorization"], ["settings", "health"],

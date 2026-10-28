@@ -55,6 +55,8 @@ import {
   silenceMeansDown,
   SmartLadder,
   TunnelFreezeDetector,
+  rankingLatency,
+  relayHosts,
   verdictOf,
   type ProtocolHistory,
   type RankedServer,
@@ -173,6 +175,8 @@ const FULL_NODE_RECHECK_MS = 2 * 60_000;
 const TRAFFIC_CHECK_DELAY_MS = 1_500;
 /** An automatic connection measures the servers again when the last measurement is older. */
 const LATENCY_FRESH_MS = 2 * 60_000;
+/** An automatic connection that does not carry traffic tries at most this many servers in all. */
+const MAX_AUTOMATIC_CONNECT_SERVERS = 3;
 /** After the remote list was shown, events keep it current this long. */
 const REMOTE_WATCH_MS = 10 * 60_000;
 const MAX_HANDLED_COMMANDS = 200;
@@ -785,7 +789,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     return this.runTunnelOperation(() => this.connectTunnel(generation));
   }
 
-  private async connectTunnel(generation: number): Promise<void> {
+  private async connectTunnel(generation: number, failed: Set<string> = new Set()): Promise<void> {
     if (generation !== this.connectionGeneration || this.xray.isRunning()) return;
     const server = this.selectedServer();
     if (!server || !this.profile) throw new Error("Выберите VPN-сервер");
@@ -796,6 +800,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     this.patch({ status: "connecting", statusDetail: `Подключение через ${server.name}…`, busy: true, downloadBytes: 0, uploadBytes: 0 });
     const progress = this.recordAttempt(server, this.nextAttemptCause);
     this.nextAttemptCause = "reconnect";
+    let verifyFailed = false;
     try {
       if (this.state.settings.killSwitch) await this.killSwitch.enable();
       if (this.state.settings.preventDnsLeaks) await this.dnsLeakProtection.enable();
@@ -809,7 +814,13 @@ export class AppController extends EventEmitter<AppControllerEvents> {
       await this.startXray(config, generation);
       this.recordNetwork();
       progress.reach("verify", "timeout");
-      await this.verifyTunnelReadiness(generation, (codes) => progress.reach("verify", codes[0] ?? "other"));
+      try {
+        await this.verifyTunnelReadiness(generation, (codes) => progress.reach("verify", codes[0] ?? "other"));
+      } catch (error) {
+        // A core that failed on this computer fails on any server.
+        verifyFailed = !(error instanceof CoreStartError);
+        throw error;
+      }
       this.assertCurrentConnection(generation);
       this.tunnelHealthFailures = 0;
       this.failedServerIds.clear();
@@ -833,8 +844,15 @@ export class AppController extends EventEmitter<AppControllerEvents> {
         failure = cleanupError;
       }
       if (generation === this.connectionGeneration) {
-        this.patch({ status: "error", statusDetail: messageOf(failure), sessionStartedAt: null });
         progress.fail();
+        failed.add(server.id);
+        const next = verifyFailed && failure === error ? await this.automaticConnectFallback(server, failed) : null;
+        if (next) {
+          this.addLog(`Smart Auto: ${server.name} не передаёт трафик; пробуем ${next.name}`);
+          this.nextAttemptCause = "failover";
+          return this.connectTunnel(generation, failed);
+        }
+        this.patch({ status: "error", statusDetail: messageOf(failure), sessionStartedAt: null });
         void this.telemetry.finish("error", progress.code);
         // Only a core that could not start on this computer can be blamed on other apps;
         // outside the tunnel lock, since the scan takes a second or two of PowerShell.
@@ -846,6 +864,27 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     } finally {
       this.patch({ busy: false });
     }
+  }
+
+  /**
+   * An automatic connection whose server does not carry traffic tries the next
+   * best one, a few at most, instead of stopping at an error the user can only
+   * answer by picking a server. The failure counts against the server's
+   * protocol on this network, so the next connection does not start there.
+   * Without a network of its own the computer is offline, not the server.
+   */
+  private async automaticConnectFallback(server: TunnelServer, failed: ReadonlySet<string>): Promise<TunnelServer | null> {
+    if (!this.state.settings.automaticServer || failed.size >= MAX_AUTOMATIC_CONNECT_SERVERS) return null;
+    const network = this.protocolHistory.networkKey();
+    if (!network) return null;
+    const node = nodeIdForServer(server) ?? server.id;
+    await this.protocolHistory.update((history) => recordFailure(history, network, protocolOf(server), node, Date.now(), server.id));
+    const next = this.bestServer(this.state.servers.filter((item) => !failed.has(item.id)));
+    if (!next) return null;
+    this.state.selectedServerId = next.id;
+    await this.secureStore.put("selected_server", Buffer.from(next.id));
+    this.emitChanged();
+    return next;
   }
 
   disconnect(): Promise<void> {
@@ -966,15 +1005,22 @@ export class AppController extends EventEmitter<AppControllerEvents> {
 
   async pingServers(): Promise<void> {
     if (this.pingPromise) return this.pingPromise;
+    // The tunnel answers the app's own connections itself in under a millisecond, so
+    // pings taken through it say nothing about the servers: keep the last real ones.
+    if (this.tunnelCapturesPings()) return this.refreshLiveLoad();
     const servers = [...this.state.servers];
     this.pingPromise = (async () => {
       const [latencies] = await Promise.all([measureServerLatencies(servers), this.refreshLiveLoad()]);
-      if (!sameServers(servers, this.state.servers)) return;
+      if (!sameServers(servers, this.state.servers) || this.tunnelCapturesPings()) return;
       this.patch({ serverLatencies: latencies });
       this.latenciesMeasuredAt = Date.now();
       await this.followBestServer(servers);
     })().finally(() => { this.pingPromise = null; });
     return this.pingPromise;
+  }
+
+  private tunnelCapturesPings(): boolean {
+    return this.xray.isRunning() || this.state.status === "connecting";
   }
 
   async measureGameRoutes(forGameStart = false): Promise<void> {
@@ -2919,7 +2965,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
   private currentScore(server: TunnelServer, now: number): number {
     const history = this.protocolHistory.current();
     const network = this.protocolHistory.networkKey();
-    return smartScore(this.smartCandidate(server, this.loadView(now), now, history, network), currentAdvice(this.remoteStored, now));
+    return smartScore(this.smartCandidate(server, this.loadView(now), now, history, network, this.serverRelayHosts()), currentAdvice(this.remoteStored, now));
   }
 
   /** Servers the list marks as under maintenance, with the end of the work. */
@@ -3046,8 +3092,17 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     const view = this.loadView(now);
     const history = this.protocolHistory.current();
     const network = this.protocolHistory.networkKey();
-    const candidates = servers.map((server) => this.smartCandidate(server, view, now, history, network));
+    const relays = this.serverRelayHosts();
+    const candidates = servers.map((server) => this.smartCandidate(server, view, now, history, network, relays));
     return rankSmart(candidates, currentAdvice(this.remoteStored, now), spreadSeed(this.protocolHistory.localSalt(), now));
+  }
+
+  /** Relay entries among the account's servers, see [relayHosts]. */
+  private serverRelayHosts(): Set<string> {
+    return relayHosts(this.state.servers.map((server) => ({
+      host: extractServerEndpoint(server.outbound)?.host ?? null,
+      countryCode: server.countryCode,
+    })));
   }
 
   private smartCandidate(
@@ -3056,13 +3111,15 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     now: number,
     history: ProtocolHistory,
     network: string | null,
+    relays: ReadonlySet<string>,
   ): SmartCandidate {
     const protocol = protocolOf(server);
     const nodeId = nodeIdForServer(server);
     return {
       id: server.id,
       protocol,
-      latencyMs: this.state.serverLatencies[server.id] ?? null,
+      latencyMs: rankingLatency(this.state.serverLatencies[server.id] ?? null,
+        relays.has(extractServerEndpoint(server.outbound)?.host.toLowerCase() ?? "")),
       silenceMeansDown: silenceMeansDown(server.outbound),
       load: agedLoad(nodeLoadForServer(view.load, server), view.ageMs),
       verdict: verdictOf(history, network, protocol, now),
