@@ -3,6 +3,7 @@ import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { networkInterfaces, type NetworkInterfaceInfo } from "node:os";
 import { dirname } from "node:path";
 import type { ProtocolAdvice } from "../platform/remoteConfig";
+import { measuredRouteUsable, rankMeasuredRoutes, type RouteMeasurement } from "./routeProbe";
 
 /**
  * Smart Auto, docs/app-platform.md "Smart Auto": the automatic server is the
@@ -32,6 +33,10 @@ export interface SmartCandidate {
   quality?: number | null;
   /** The node stayed full: no new automatic connections while others remain. */
   full?: boolean;
+  /** Steady application RTT through the entire candidate VPN route. */
+  route?: RouteMeasurement;
+  resourceHeadroom?: number | null;
+  routeDegraded?: boolean;
 }
 
 export interface RankedServer {
@@ -63,19 +68,30 @@ const UNANSWERED_PROTOCOLS = new Set(["hysteria", "hysteria2", "tuic", "wireguar
  * among the servers within 15 % of the best, so the computers that see the
  * same free node do not all land on it at once.
  */
-export function rankSmart(candidates: readonly SmartCandidate[], advice: ProtocolAdvice | null, spread: number | null = null): RankedServer[] {
-  const reachable = candidates.filter((item) => item.latencyMs !== null || !item.silenceMeansDown);
-  const allowed = reachable.filter((item) => item.verdict !== "blocked");
+export function rankSmart(candidates: readonly SmartCandidate[], advice: ProtocolAdvice | null, spread: number | null = null, now = Date.now()): RankedServer[] {
+  const reachable = candidates.filter((item) => measuredRouteUsable(item.route, now) || item.latencyMs !== null || !item.silenceMeansDown);
+  const allowed = reachable.filter((item) => item.verdict !== "blocked" || measuredRouteUsable(item.route, now));
   // Everything blocked or silent: better to try something than nothing.
   const pool = allowed.length ? allowed : reachable.length ? reachable : [...candidates];
   const roomy = pool.filter((item) => !item.full);
-  const ranked = (roomy.length ? roomy : pool)
-    .map((item) => ({ id: item.id, protocol: item.protocol, score: smartScore(item, advice) }))
+  const selected = roomy.length ? roomy : pool;
+  const observations = Object.fromEntries(selected.flatMap((candidate) => candidate.route ? [[candidate.id, candidate.route]] : []));
+  const measured = rankMeasuredRoutes(selected, observations, now);
+  const ranked = selected
+    .map((item) => ({ id: item.id, protocol: item.protocol, score: smartScore(item, advice, now) }))
     .sort((left, right) => left.score - right.score || (left.id < right.id ? -1 : left.id > right.id ? 1 : 0));
+  if (measured.length) {
+    const measuredIds = new Set(measured.map((candidate) => candidate.id));
+    // Real full-route observations are authoritative; endpoint pings cannot
+    // overwrite their choice or mix units with it. Unknown routes remain fallback.
+    return [...measured.map((candidate) => ({ id: candidate.id, protocol: candidate.protocol, score: smartScore(candidate, advice, now) })),
+      ...ranked.filter((candidate) => !measuredIds.has(candidate.id))];
+  }
   return spread === null ? ranked : spreadTop(ranked, spread);
 }
 
-export function smartScore(candidate: SmartCandidate, advice: ProtocolAdvice | null): number {
+export function smartScore(candidate: SmartCandidate, advice: ProtocolAdvice | null, now = Date.now()): number {
+  if (measuredRouteUsable(candidate.route, now)) return candidate.route.medianMs! + candidate.route.jitterMs! + candidate.route.failureRate * 1000;
   const latency = Math.max(1, candidate.latencyMs ?? UNKNOWN_LATENCY_MS);
   return latency * loadFactor(candidate.load) * HISTORY_FACTOR[candidate.verdict] * operatorFactor(candidate, advice) * qualityFactor(candidate.quality);
 }

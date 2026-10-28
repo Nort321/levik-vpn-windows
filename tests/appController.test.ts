@@ -867,3 +867,96 @@ describe("AppController connection telemetry", () => {
     expect(attempts.map((event) => event.cause)).toEqual(["initial", "server_switch"]);
   });
 });
+
+
+describe("Smart Auto full-route controller integration", () => {
+  it("ranks and displays actual cascade latency, keeps endpoint refresh from overriding it and invalidates on a new network", () => {
+    const controller = new AppController();
+    controller.cancelLogin();
+    const server = (id: string, address: string) => ({ id, tag: id, name: id, countryCode: "DE", outbound: { protocol: "vless", settings: { vnext: [{ address, port: 443 }] } } });
+    const cascade = server("cascade", "moscow.example"), direct = server("direct", "de.example");
+    let network = "network-one";
+    Reflect.set(controller, "protocolHistory", { current: () => ({ networks: [], winners: {} }), networkKey: () => network, localSalt: () => "local-salt" });
+    const state = Reflect.get(controller, "state") as Record<string, unknown>;
+    Object.assign(state, { servers: [cascade, direct], serverLatencies: { cascade: 5, direct: 60 } });
+    Reflect.set(controller, "endpointLatencies", { cascade: 5, direct: 60 });
+    const now = Date.now();
+    const observation = (medianMs: number) => ({ measuredAt: now, confidence: "measured", medianMs, jitterMs: 2, failureRate: 0, targets: 2, samples: 6, setupMs: 100, downMbps: 100, upMbps: 30 });
+    Reflect.set(controller, "routeMeasurements", { cascade: observation(190), direct: observation(55) });
+    Reflect.set(controller, "routeMeasurementNetwork", network);
+    const key = Reflect.get(controller, "routeMeasurementKey") as (server: typeof cascade) => string;
+    Reflect.set(controller, "routeMeasurementKeys", { cascade: key.call(controller, cascade), direct: key.call(controller, direct) });
+    const rank = Reflect.get(controller, "rankServers") as (servers: Array<typeof cascade>) => Array<{ id: string }>;
+    const display = Reflect.get(controller, "displayedRouteLatencies") as (raw: Record<string, number | null>) => Record<string, number | null>;
+    expect(rank.call(controller, [cascade, direct])[0]?.id).toBe("direct");
+    expect(display.call(controller, { cascade: 1, direct: 2 })).toEqual({ cascade: 190, direct: 55 });
+    network = "network-two";
+    expect(display.call(controller, { cascade: 1, direct: 2 })).toEqual({ cascade: 1, direct: 2 });
+  });
+
+  it("does not begin a stale session when OFF happens during the post-probe selection write", async () => {
+    const controller = new AppController();
+    controller.cancelLogin();
+    const server = { id: "a", tag: "a", name: "a", countryCode: "DE", outbound: { protocol: "vless", settings: { vnext: [{ address: "de.example", port: 443 }] } } };
+    const state = Reflect.get(controller, "state") as Record<string, unknown>;
+    const settings = state.settings as Record<string, unknown>;
+    Object.assign(settings, { automaticServer: true, gameEnabled: false });
+    Object.assign(state, { status: "disconnected", servers: [server], serverLatencies: { a: 30 }, selectedServerId: "a", elevated: true });
+    Reflect.set(controller, "profile", { profileId: "test", subscriptionId: "test", subscriptionExpiresAt: null, servers: [server], directDomains: [], proxyDomains: [], directCidrs: [] });
+    Reflect.set(controller, "xray", { isRunning: () => false });
+    Reflect.set(controller, "latenciesMeasuredAt", Date.now());
+    Reflect.set(controller, "refreshLiveLoad", vi.fn(async () => {}));
+    Reflect.set(controller, "refreshRouteMeasurements", vi.fn(async () => true));
+    Reflect.set(controller, "stopConnection", vi.fn(async () => {}));
+    const begin = vi.fn();
+    Reflect.set(controller, "telemetry", { active: false, begin });
+    let release: (() => void) | undefined;
+    const pending = new Promise<void>((resolve) => { release = resolve; });
+    const follow = vi.fn(async () => await pending);
+    Reflect.set(controller, "followBestServer", follow);
+    const operation = controller.connect();
+    await vi.waitFor(() => expect(follow).toHaveBeenCalledOnce());
+    await controller.disconnect();
+    release?.();
+    await operation;
+    expect(begin).not.toHaveBeenCalled();
+  });
+});
+
+
+describe("Smart Auto probe cancellation boundaries", () => {
+  it("aborts preflight immediately when a manual server is selected", async () => {
+    const controller = new AppController();
+    controller.cancelLogin();
+    const abort = new AbortController();
+    Reflect.set(controller, "routeProbeAbort", abort);
+    Reflect.set(controller, "xray", { isRunning: () => false });
+    Reflect.set(controller, "secureStore", { put: vi.fn(async () => {}) });
+    const state = Reflect.get(controller, "state") as Record<string, unknown>;
+    Object.assign(state, { servers: [{ id: "manual", tag: "manual", name: "manual", countryCode: "DE", outbound: {} }] });
+    const intent = Reflect.get(controller, "connectionIntent");
+    await controller.selectServer("manual");
+    expect(abort.signal.aborted).toBe(true);
+    expect(Reflect.get(controller, "connectionIntent")).toBeGreaterThan(intent);
+    expect(controller.snapshot().selectedServerId).toBe("manual");
+  });
+
+  it("invalidates effective transport measurements when settings or profile scope changes", () => {
+    const controller = new AppController();
+    controller.cancelLogin();
+    const server = { id: "a", tag: "a", name: "a", countryCode: "DE", outbound: { protocol: "vless" } };
+    const key = Reflect.get(controller, "routeMeasurementKey") as (input: typeof server) => string;
+    const first = key.call(controller, server);
+    const state = Reflect.get(controller, "state") as Record<string, unknown>;
+    const settings = state.settings as Record<string, unknown>;
+    settings.antiDpiEnabled = !settings.antiDpiEnabled;
+    expect(key.call(controller, server)).not.toBe(first);
+    const abort = new AbortController();
+    Reflect.set(controller, "routeProbeAbort", abort);
+    Reflect.set(controller, "routeMeasurements", { a: { medianMs: 50 } });
+    const invalidate = Reflect.get(controller, "invalidateRouteMeasurements") as () => void;
+    invalidate.call(controller);
+    expect(abort.signal.aborted).toBe(true);
+    expect(Reflect.get(controller, "routeMeasurements")).toEqual({});
+  });
+});

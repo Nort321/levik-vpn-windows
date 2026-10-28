@@ -2,7 +2,7 @@ import { ServiceRouteState } from "./vpn/serviceRouteState";
 import { validateServiceRouteConfig } from "./vpn/serviceRouteTransport";
 import { parseServiceRoutePolicy, serviceExitForServer, serviceServerKey, compiledServiceRoutes, type ServiceRouteStatus } from "./vpn/serviceRoutes";
 import { app, net } from "electron";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { platform, release } from "node:os";
 import { isIPv4 } from "node:net";
@@ -63,6 +63,7 @@ import {
   type SmartCandidate,
 } from "./vpn/smartAuto";
 import { measureServerLatencies, extractServerEndpoint } from "./vpn/serverPinger";
+import { measureRouteCandidates, measuredRouteUsable, type RouteMeasurement, type RouteProbeCandidate } from "./vpn/routeProbe";
 import { DnsLeakProtection } from "./windows/dnsLeakProtection";
 import { KillSwitchError, WindowsKillSwitch } from "./windows/killSwitch";
 import { AppUpdater } from "./update/appUpdater";
@@ -100,6 +101,7 @@ import {
 import type { StoredRemoteConfig } from "./platform/remoteConfig";
 import {
   currentQuality,
+  currentRouteResource,
   LIVE_LOAD_CONNECTED_EVERY_MS,
   LIVE_LOAD_MAX_AGE_MS,
   LiveLoadClient,
@@ -122,6 +124,9 @@ import {
   canonicalNodeList,
   isCanonicalNodeList,
   nodeIdForServer,
+  nodeIdForEndpoint,
+  nodeIdForHost,
+  serverSyncEndpoint,
   nodeLoadForServer,
   parseNodeList,
   reconcileFavorites,
@@ -305,6 +310,12 @@ export class AppController extends EventEmitter<AppControllerEvents> {
   private announcedUpdateVersion: string | null = null;
   private readonly failedServerIds = new Set<string>();
   private latenciesMeasuredAt = 0;
+  private endpointLatencies: Record<string, number | null> = {};
+  private routeMeasurements: Record<string, RouteMeasurement> = {};
+  private routeMeasurementKeys: Record<string, string> = {};
+  private routeMeasurementNetwork: string | null = null;
+  private routeProbeAbort: AbortController | null = null;
+  private connectionIntent = 0;
   /** Smart Auto, docs/app-platform.md: which protocols carried traffic on which network. */
   private readonly protocolHistory = new ProtocolHistoryStore(join(app.getPath("userData"), "smart-auto.json"));
   private readonly smartLadder = new SmartLadder();
@@ -336,6 +347,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
   private readonly liveLoadClient = new LiveLoadClient("windows", app.getVersion());
   private liveLoad: LiveLoad | null = null;
   private liveLoadRefresh: Promise<void> | null = null;
+  private nextConnectedLoadAt = 0;
   /** Since when each server's node has been reported full, by server id. */
   private readonly fullSince = new Map<string, number>();
   private lastOverloadMoveAt: number | null = null;
@@ -669,6 +681,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
   }
 
   async selectSubscription(subscriptionId: string): Promise<void> {
+    if (this.routeProbeAbort) this.cancelRouteProbes();
     if (!this.state.account?.subscriptions.some((item) => item.uuid === subscriptionId)) {
       throw new Error("Подписка не найдена");
     }
@@ -688,6 +701,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
   }
 
   async selectServer(serverId: string): Promise<void> {
+    if (this.routeProbeAbort) this.cancelRouteProbes();
     const server = this.state.servers.find((item) => item.id === serverId);
     if (!server) throw new Error("Сервер не найден");
     if (!this.climbingLadder) this.smartLadder.reset();
@@ -745,6 +759,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
 
   async connect(trigger: SessionTrigger = "user"): Promise<void> {
     if (this.xray.isRunning() || this.state.status === "connecting") return;
+    const intent = ++this.connectionIntent;
     if (this.state.elevated === false) {
       this.patch({ statusDetail: NOT_ELEVATED_MESSAGE });
       throw new Error(NOT_ELEVATED_MESSAGE);
@@ -775,14 +790,20 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     const newAutomaticSession = this.state.settings.automaticServer && !this.telemetry.active;
     if (this.state.settings.automaticServer && (newAutomaticSession || (stale || !hasMeasuredLatency(this.state.serverLatencies)))) {
       await Promise.all([
-        newAutomaticSession ? this.refreshLiveLoad() : Promise.resolve(),
+        newAutomaticSession ? this.refreshLiveLoad(15_000) : Promise.resolve(),
         (stale || !hasMeasuredLatency(this.state.serverLatencies)) ? this.pingServers() : Promise.resolve(),
       ]);
     }
-    if (newAutomaticSession) await this.followBestServer(this.state.servers);
+    if (intent !== this.connectionIntent) return;
+    if (newAutomaticSession) {
+      if (!await this.refreshRouteMeasurements()) return;
+      await this.followBestServer(this.state.servers);
+    }
+    if (intent !== this.connectionIntent) return;
     if (!this.telemetry.active) {
       // Before Kill Switch: the operator is only visible outside the tunnel.
       await this.telemetry.prepareNetwork();
+      if (intent !== this.connectionIntent) return;
       this.telemetry.begin(trigger, sessionSettings(this.state.settings));
       this.nextAttemptCause = "initial";
     }
@@ -888,11 +909,13 @@ export class AppController extends EventEmitter<AppControllerEvents> {
   }
 
   disconnect(): Promise<void> {
+    this.cancelRouteProbes();
     this.smartLadder.reset();
     return this.stopConnection("user", "user");
   }
 
   private stopConnection(by: EndBy, code: string | null): Promise<void> {
+    this.cancelRouteProbes();
     void this.telemetry.finish(by, code);
     this.cancelTunnelRecovery();
     this.lastConfig = null;
@@ -923,6 +946,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
 
   /** Settings changed here ("user") or by another device of the account ("sync"). */
   async updateSettings(patch: Partial<AppSettings>, origin: "user" | "sync" = "user"): Promise<void> {
+    this.invalidateRouteMeasurements();
     const previous = this.state.settings;
     const next = validateSettings({ ...previous, ...patch });
     if (next.gameEnabled && (patch.gameEnabled === true || patch.gameProtection === true || patch.gameIds || patch.gameProcesses || patch.gameRouteId)) {
@@ -975,6 +999,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
   }
 
   async shutdown(reason: "quit" | "app_update" = "quit"): Promise<void> {
+    this.cancelRouteProbes();
     if (this.serviceRoutesRetry) clearTimeout(this.serviceRoutesRetry);
     this.serviceRoutesRetry = null;
     this.loginGeneration += 1;
@@ -1012,7 +1037,8 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     this.pingPromise = (async () => {
       const [latencies] = await Promise.all([measureServerLatencies(servers), this.refreshLiveLoad()]);
       if (!sameServers(servers, this.state.servers) || this.tunnelCapturesPings()) return;
-      this.patch({ serverLatencies: latencies });
+      this.endpointLatencies = latencies;
+      this.patch({ serverLatencies: this.displayedRouteLatencies(latencies) });
       this.latenciesMeasuredAt = Date.now();
       await this.followBestServer(servers);
     })().finally(() => { this.pingPromise = null; });
@@ -1218,6 +1244,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
 
   /** Sleep explains drops that are not the server's fault. */
   recordPowerEvent(state: Extract<PowerState, "suspend" | "resume">): void {
+    this.invalidateRouteMeasurements();
     this.telemetry.record((session) => session.power(state));
     if (state === "suspend") void this.telemetry.persist();
   }
@@ -1280,6 +1307,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
   }
 
   private async loadTunnelProfile(subscriptionId: string): Promise<void> {
+    this.invalidateRouteMeasurements();
     const response = await this.withSession((token) => this.api.tunnelProfile(token, subscriptionId));
     const plaintext = decryptTunnelProfile(this.identity, response.profile);
     try {
@@ -2300,6 +2328,8 @@ export class AppController extends EventEmitter<AppControllerEvents> {
   }
 
   private async clearLocalSession(statusDetail: string | null): Promise<void> {
+    this.cancelRouteProbes();
+    this.invalidateRouteMeasurements();
     if (this.serviceRoutesRetry) clearTimeout(this.serviceRoutesRetry);
     this.serviceRoutesRetry = null;
     await this.serviceRouteState.clear();
@@ -2824,6 +2854,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
   }
 
   private async stopTunnelForReplacement(): Promise<void> {
+    this.cancelRouteProbes();
     this.cancelTunnelRecovery();
     this.nextAttemptCause = "server_switch";
     this.patch({ status: "reconnecting", statusDetail: "Применение изменений соединения…" });
@@ -2994,8 +3025,12 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     const move = maintenanceMove(maintenanceFor(this.maintenanceWindows(), nodeIdForServer(current), now), now);
     if (move === "stay") {
       if (this.state.settings.automaticServer) {
-        // A running automatic connection learns about a full node within ten minutes.
-        void this.refreshLiveLoad(LIVE_LOAD_CONNECTED_EVERY_MS, 0);
+        // Spread polling across installs; the 15s maintenance tick bounds the
+        // interval to 30s, within the agents' 45s sample freshness window.
+        if (now >= this.nextConnectedLoadAt) {
+          this.nextConnectedLoadAt = now + LIVE_LOAD_CONNECTED_EVERY_MS / 2 + Math.floor(Math.random() * 5_000);
+          void this.refreshLiveLoad(0, 0);
+        }
         // A live match is never moved: its UDP crosses the game nodes.
         if (!this.gamePlaying && !this.liveMatch()) await this.checkOverload(current, now);
       }
@@ -3097,6 +3132,95 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     return rankSmart(candidates, currentAdvice(this.remoteStored, now), spreadSeed(this.protocolHistory.localSalt(), now));
   }
 
+  private cancelRouteProbes(): void {
+    this.connectionIntent++;
+    this.routeProbeAbort?.abort();
+  }
+
+  private invalidateRouteMeasurements(): void {
+    if (this.routeProbeAbort || this.state.status === "connecting") this.cancelRouteProbes();
+    this.routeMeasurements = {}; this.routeMeasurementKeys = {}; this.routeMeasurementNetwork = null;
+  }
+
+  private routeResource(server: TunnelServer, now: number) {
+    const endpoint = serverSyncEndpoint(server);
+    return currentRouteResource(this.liveLoad, endpoint ? [
+      endpoint.port === null ? null : nodeIdForEndpoint(endpoint.host, endpoint.port), nodeIdForHost(endpoint.host),
+    ] : [], now);
+  }
+
+  private routeMeasurementKey(server: TunnelServer): string {
+    const resource = this.routeResource(server, Date.now());
+    const settings = this.state.settings;
+    return createHash("sha256").update(JSON.stringify([resource?.id ?? null, this.profile?.profileId, this.profile?.subscriptionId,
+      protocolOf(server), server.outbound, settings.antiDpiEnabled, settings.antiDpiPackets, settings.antiDpiLength,
+      settings.antiDpiInterval, settings.useDoh, settings.dnsServer,
+    ])).digest("hex");
+  }
+
+  private measuredRoute(server: TunnelServer, now: number): RouteMeasurement | undefined {
+    if (this.routeMeasurementNetwork !== this.protocolHistory.networkKey()
+      || this.routeMeasurementKeys[server.id] !== this.routeMeasurementKey(server)) return undefined;
+    const measurement = this.routeMeasurements[server.id];
+    return measuredRouteUsable(measurement, now) ? measurement : undefined;
+  }
+
+  private displayedRouteLatencies(endpointLatencies: Record<string, number | null>): Record<string, number | null> {
+    const displayed = { ...endpointLatencies };
+    for (const server of this.state.servers) {
+      const route = this.measuredRoute(server, Date.now());
+      if (route?.medianMs !== null && route?.medianMs !== undefined) displayed[server.id] = Math.round(route.medianMs);
+    }
+    return displayed;
+  }
+
+  /** Unprivileged sidecars run only before our TUN/firewall exists. They never
+   * interrupt a running flow or report the current TUN's local accept as RTT. */
+  private async refreshRouteMeasurements(): Promise<boolean> {
+    if (!this.profile || this.profile.gameOnly || this.xray.isRunning()) return true;
+    const network = this.protocolHistory.networkKey();
+    const servers = this.automaticCandidates(this.state.servers).filter((server) => !server.tuic && serverSyncEndpoint(server)?.port != null);
+    if (!servers.length) return true;
+    if (network !== null && servers.every((server) => this.measuredRoute(server, Date.now()))) return true;
+    this.routeProbeAbort?.abort();
+    const abort = new AbortController(); this.routeProbeAbort = abort;
+    const snapshot = [...this.state.servers];
+    const profile = this.profile, token = this.accessToken, intent = this.connectionIntent;
+    const keys: Record<string, string> = {};
+    const candidates: RouteProbeCandidate[] = [];
+    for (const server of servers) {
+      const resource = this.routeResource(server, Date.now());
+      const endpoint = serverSyncEndpoint(server)!;
+      keys[server.id] = this.routeMeasurementKey(server);
+      try {
+        candidates.push({ id: server.id, routeKey: keys[server.id]!, tag: server.tag,
+          config: buildXrayConfig(this.serviceProfileFor(server), server, this.state.settings, this.gamePassword),
+          path: resource?.path ?? [nodeIdForHost(endpoint.host)!],
+          ...(resource?.path.at(-1) ? { exitId: resource.path.at(-1)! } : {}),
+        });
+      } catch { /* Unsupported candidates keep the established protocol fallback. */ }
+    }
+    this.patch({ status: "connecting", statusDetail: "Smart Auto: проверяем маршруты…", busy: true });
+    try {
+      const measurements = await measureRouteCandidates({ executable: this.xray.executablePath(), candidates, signal: abort.signal });
+      if (abort.signal.aborted || this.xray.isRunning() || !sameServers(snapshot, this.state.servers)
+        || network !== this.protocolHistory.networkKey() || profile !== this.profile || token !== this.accessToken || intent !== this.connectionIntent) return false;
+      this.routeMeasurements = measurements; this.routeMeasurementKeys = keys; this.routeMeasurementNetwork = network;
+      this.patch({ serverLatencies: this.displayedRouteLatencies(this.endpointLatencies) });
+      return true;
+    } catch {
+      return !abort.signal.aborted;
+    } finally {
+      if (this.routeProbeAbort === abort) {
+        this.routeProbeAbort = null;
+        if ((abort.signal.aborted || network !== this.protocolHistory.networkKey() || !sameServers(snapshot, this.state.servers))
+          && !this.xray.isRunning() && this.state.status === "connecting") {
+          this.patch({ status: "disconnected", statusDetail: null, busy: false });
+        }
+      }
+    }
+  }
+
   /** Relay entries among the account's servers, see [relayHosts]. */
   private serverRelayHosts(): Set<string> {
     return relayHosts(this.state.servers.map((server) => ({
@@ -3115,16 +3239,22 @@ export class AppController extends EventEmitter<AppControllerEvents> {
   ): SmartCandidate {
     const protocol = protocolOf(server);
     const nodeId = nodeIdForServer(server);
+    const resource = this.routeResource(server, now);
+    const route = this.measuredRoute(server, now);
     return {
       id: server.id,
       protocol,
-      latencyMs: rankingLatency(this.state.serverLatencies[server.id] ?? null,
+      latencyMs: rankingLatency(Object.hasOwn(this.endpointLatencies, server.id)
+        ? this.endpointLatencies[server.id] ?? null : this.state.serverLatencies[server.id] ?? null,
         relays.has(extractServerEndpoint(server.outbound)?.host.toLowerCase() ?? "")),
       silenceMeansDown: silenceMeansDown(server.outbound),
-      load: agedLoad(nodeLoadForServer(view.load, server), view.ageMs),
+      load: resource ? resource.resourceLoad : agedLoad(nodeLoadForServer(view.load, server), view.ageMs),
       verdict: verdictOf(history, network, protocol, now),
       quality: nodeId ? view.quality[nodeId] ?? null : null,
-      full: nodeLoadForServer(view.full, server) !== null,
+      full: resource ? resource.state === "overloaded" : nodeLoadForServer(view.full, server) !== null,
+      ...(route ? { route } : {}),
+      resourceHeadroom: resource?.resourceHeadroom ?? null,
+      routeDegraded: resource?.state === "degraded",
     };
   }
 
