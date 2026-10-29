@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import type { Hash } from "node:crypto";
-import { link, open, rename, stat, statfs, unlink } from "node:fs/promises";
+import { constants } from "node:fs";
+import { copyFile, link, open, stat, statfs, unlink } from "node:fs/promises";
 import type { FileHandle } from "node:fs/promises";
 import { basename, join } from "node:path";
 import { numberedName, partialName, safeFileName } from "./fileNames";
@@ -115,32 +116,30 @@ export interface TargetFile {
 
 export type MarkDownloaded = (path: string) => Promise<void>;
 
-async function exists(path: string): Promise<boolean> {
-  try {
-    await stat(path);
-    return true;
-  } catch (error) {
-    return code(error) !== "ENOENT";
-  }
-}
-
-/** Safe names and fresh partial paths for a manifest in `folder`. */
+/** Atomically reserve partial files, including across simultaneous local transfers. */
 export async function planTargets(folder: string, manifest: readonly ManifestFile[]): Promise<TargetFile[]> {
   const targets: TargetFile[] = [];
-  for (const file of manifest) {
-    const name = safeFileName(file.name);
-    let partial = "";
-    for (let attempt = 0; attempt < 1000; attempt++) {
-      const candidate = join(folder, partialName(numberedName(name, attempt)));
-      if (!targets.some((target) => target.partial === candidate) && !(await exists(candidate))) {
-        partial = candidate;
-        break;
+  try {
+    for (const file of manifest) {
+      const name = safeFileName(file.name);
+      for (let attempt = 0; ; attempt++) {
+        const partial = join(folder, partialName(numberedName(name, attempt)));
+        try {
+          const handle = await open(partial, "wx", 0o644);
+          targets.push({ name, size: file.size, partial, final: null });
+          await handle.close();
+          break;
+        } catch (error) {
+          if (code(error) === "EEXIST") continue;
+          throw storageFailure(error);
+        }
       }
     }
-    if (!partial) throw new TransferFailure("storage_error");
-    targets.push({ name, size: file.size, partial, final: null });
+    return targets;
+  } catch (error) {
+    await removePartials(targets);
+    throw error;
   }
-  return targets;
 }
 
 export async function freeBytes(folder: string): Promise<number | null> {
@@ -295,9 +294,9 @@ export class TargetFiles {
     return final;
   }
 
-  /** Never overwrites: a hard link fails on an existing name; rename is the fallback where links are not supported. */
+  /** Never overwrites: use an exclusive copy on filesystems without hard links. */
   private async place(target: TargetFile): Promise<string> {
-    for (let attempt = 0; attempt < 1000; attempt++) {
+    for (let attempt = 0; ; attempt++) {
       const candidate = join(this.folder, numberedName(target.name, attempt));
       try {
         await link(target.partial, candidate);
@@ -305,16 +304,16 @@ export class TargetFiles {
         return candidate;
       } catch (error) {
         if (code(error) === "EEXIST") continue;
-        if (await exists(candidate)) continue;
         try {
-          await rename(target.partial, candidate);
+          await copyFile(target.partial, candidate, constants.COPYFILE_EXCL);
+          await unlink(target.partial).catch(() => {});
           return candidate;
-        } catch (renameError) {
-          throw storageFailure(renameError);
+        } catch (copyError) {
+          if (code(copyError) === "EEXIST") continue;
+          throw storageFailure(copyError);
         }
       }
     }
-    throw new TransferFailure("storage_error");
   }
 
   async closeWriting(): Promise<void> {

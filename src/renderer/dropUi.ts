@@ -348,7 +348,7 @@ export function mountDropUi(host: DropUiHost): DropUi {
         return `${progress(transfer, phase === "active")}
           <div class="dock-progress-meta"><span class="dock-percent" data-dock-percent></span><span class="dock-amount" data-dock-amount></span>${phase === "active" ? `<span class="dock-chip">${transfer.path === "lan" ? "Локальная сеть" : "Через сервер"}</span>` : ""}</div>
           ${phase === "paused" ? status : ""}
-          <div class="dock-actions">${phase === "active" ? button("pause", "Пауза") : button("resume", "Продолжить", "primary")}${button("cancel", "Отменить", "danger")}</div>`;
+          <div class="dock-actions">${phase === "active" ? button("pause", "Пауза") : button("resume", transfer.route === "lan" ? "Повторить по локальной сети" : transfer.reason === "lan" ? "Повторить проверку" : "Продолжить", "primary")}${phase === "paused" && transfer.route && transfer.route !== "relay" && transfer.totalBytes <= 2 * 1024 ** 3 && transfer.fileCount <= 20 ? button("relay", "Продолжить через сервер") : ""}${button("cancel", "Отменить", "danger")}</div>`;
       case "done":
         return `${progress(transfer, false)}<p class="dock-status is-done" aria-live="polite">${transfer.role === "sender" ? "Доставлено" : "Получено"}: ${dropFileCount(transfer.fileCount)}, ${formatDropBytes(transfer.totalBytes)}</p>
           ${transfer.saved ? `<div class="dock-actions">${button("show", "Показать в папке", "primary", host.icon("browse"))}</div>` : ""}`;
@@ -377,7 +377,7 @@ export function mountDropUi(host: DropUiHost): DropUi {
       hideOverlay();
       return;
     }
-    const busy = drop.transfers.some((transfer) => isOpenDropState(transfer.state));
+    const busy = false; // LAN transfers do not reserve the relay slot.
     const tiles = drop.devices.map((device) => {
       const ready = device.ready && device.supported && !busy;
       return `<div class="drop-tile ${ready ? "is-ready" : ""}" data-overlay-device="${escapeAttribute(device.deviceId)}" data-ready="${ready}"><span class="drop-tile-icon" aria-hidden="true">${host.icon("devices")}</span><span class="drop-tile-name">${escapeHtml(device.name)}</span><span class="drop-tile-status">${DROP_PLATFORM_LABELS[device.platform]} · ${escapeHtml(dropDeviceStatus(device, busy))}</span></div>`;
@@ -492,6 +492,7 @@ export function mountDropUi(host: DropUiHost): DropUi {
         if (transfer) host.answer(transfer, action);
         return;
       case "pause":
+      case "relay":
       case "resume":
       case "cancel":
         host.control(id, action);

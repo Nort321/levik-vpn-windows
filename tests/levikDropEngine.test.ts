@@ -5,6 +5,7 @@ import type { Server, Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { privateAddresses, LanListener } from "../src/main/platform/levikDrop/lan";
 import { DropEngine } from "../src/main/platform/levikDrop/engine";
 import type { DropApi } from "../src/main/platform/levikDrop/engine";
 import { FrameSocket } from "../src/main/platform/levikDrop/framing";
@@ -21,6 +22,8 @@ class SiteError extends Error {
 }
 
 interface SiteTransfer {
+  protocol: number;
+  route: "auto" | "lan" | "relay";
   id: string;
   sender: string;
   receiver: string;
@@ -38,7 +41,7 @@ class FakeSite {
   readonly engines = new Map<string, DropEngine>();
   readonly steps: string[] = [];
 
-  constructor(private readonly relayPort: () => number) {}
+  constructor(private readonly relayPort: () => number, private readonly v2 = false) {}
 
   private notify(): void {
     setImmediate(() => {
@@ -50,6 +53,7 @@ class FakeSite {
     const role = transfer.sender === device ? "sender" : "receiver";
     const peer = role === "sender" ? transfer.receiver : transfer.sender;
     return {
+      protocol: transfer.protocol, route: transfer.route,
       id: transfer.id, role, peerDeviceId: peer, peerName: peer === "pc" ? "Рабочий ПК" : "MacBook", peerPlatform: peer === "pc" ? "windows" : "macos",
       state: transfer.state, reason: transfer.reason, fileCount: transfer.fileCount, totalBytes: transfer.totalBytes, relayedBytes: 0,
       createdAt: transfer.createdAt, updatedAt: transfer.createdAt, expiresAt: transfer.createdAt, finishedAt: OPEN.includes(transfer.state) ? null : transfer.createdAt,
@@ -68,8 +72,9 @@ class FakeSite {
         quota: { limitBytes: 20 * 1024 ** 3, usedBytes: 0, resetsAt: new Date().toISOString() },
       }),
       create: async (offer) => {
-        if ([...this.transfers.values()].some((item) => OPEN.includes(item.state))) throw new SiteError("device_busy");
+        if (!this.v2 && [...this.transfers.values()].some((item) => OPEN.includes(item.state))) throw new SiteError("device_busy");
         const transfer: SiteTransfer = {
+          protocol: this.v2 ? 2 : 1, route: this.v2 ? "auto" : "relay",
           id: randomUUID(), sender: device, receiver: offer.receiverDeviceId, state: "offered", reason: null,
           fileCount: offer.fileCount, totalBytes: offer.totalBytes, createdAt: new Date().toISOString(),
         };
@@ -82,6 +87,11 @@ class FakeSite {
         if (!transfer) throw new SiteError("transfer_not_found");
         const role = transfer.sender === device ? "sender" : "receiver";
         this.steps.push(`${role}:${action}${reason ? `:${reason}` : ""}`);
+        if (action === "route_lan" || action === "route_relay") {
+          if (action === "route_relay" && (transfer.totalBytes > 2 * 1024 ** 3 || transfer.fileCount > 20)) throw new SiteError("relay_limits");
+          transfer.route = action === "route_lan" ? "lan" : "relay";
+          this.notify();
+        }
         const next = this.next(transfer, role, action, reason ?? null);
         if (next !== transfer.state || action === "cancel" || action === "fail") {
           transfer.state = next;
@@ -101,6 +111,9 @@ class FakeSite {
     const state = transfer.state;
     const open = OPEN.includes(state);
     switch (action) {
+      case "route_lan":
+      case "route_relay":
+        return state;
       case "connect":
         if (!open) throw new SiteError("transfer_ended");
         return state === "offered" ? "offered" : "active";
@@ -115,7 +128,7 @@ class FakeSite {
         return "declined";
       case "pause":
         if (state === "paused") return state;
-        if (state !== "active") throw new SiteError("invalid_action");
+        if (state !== "active" && state !== "offered") throw new SiteError("invalid_action");
         return "paused";
       case "complete":
         if (state === "done") return state;
@@ -222,10 +235,10 @@ afterEach(async () => {
   for (const step of cleanup.splice(0).reverse()) await step();
 });
 
-async function world() {
+async function world(v2 = false) {
   const root = await mkdtemp(join(tmpdir(), "levikdrop-engine-"));
   const relay = await fakeRelay();
-  const site = new FakeSite(() => relay.port);
+  const site = new FakeSite(() => relay.port, v2);
   const make = async (device: "pc" | "mac") => {
     const folder = join(root, device, "Downloads");
     await mkdir(folder, { recursive: true });
@@ -342,3 +355,65 @@ describe("LevikDrop engine", () => {
   });
 
 });
+
+
+describe("LevikDrop v2 engine", () => {
+  it("selects a route before asking the receiver and persists it on the website", async () => {
+    const { root, site, pc, mac } = await world(true);
+    const source = join(root, "v2.txt"); await writeFile(source, "v2 payload");
+    await pc.engine.send("mac", [source]);
+    const prompt = await until(() => transferOf(pc.engine)?.prompt, "sender confirmation");
+    const id = transferOf(pc.engine)!.id;
+    await pc.engine.answer(id, "confirm", prompt.code);
+    const offer = await until(() => transferOf(mac.engine)?.prompt, "receiver offer");
+    const route = transferOf(mac.engine)!.path;
+    expect(["lan", "relay"]).toContain(route);
+    expect(site.transfers.get(id)?.route).toBe(route);
+    expect(site.steps.some((step) => step === `sender:route_${route}`)).toBe(true);
+    await mac.engine.answer(id, "accept", offer.code);
+    await until(() => transferOf(pc.engine)?.state === "done", "completion");
+    expect(await readFile(join(mac.folder, "v2.txt"), "utf8")).toBe("v2 payload");
+  }, 20_000);
+
+  it.runIf(privateAddresses().length > 0)("keeps LAN pinned on pause and changes to relay only after a manual action", async () => {
+    const { root, site, pc, mac } = await world(true);
+    const source = join(root, "manual.txt"); await writeFile(source, "manual payload");
+    await pc.engine.send("mac", [source]);
+    const prompt = await until(() => transferOf(pc.engine)?.prompt, "sender confirmation");
+    const id = transferOf(pc.engine)!.id;
+    await pc.engine.answer(id, "confirm", prompt.code);
+    await until(() => transferOf(mac.engine)?.prompt, "local offer");
+    expect(transferOf(mac.engine)?.path).toBe("lan");
+    await pc.engine.control(id, "pause");
+    await until(() => transferOf(pc.engine)?.state === "paused" && transferOf(mac.engine)?.state === "paused", "pause on both sides");
+    await pc.engine.refreshNow(); await mac.engine.refreshNow();
+    expect(site.transfers.get(id)?.route).toBe("lan");
+    expect(site.steps).not.toContain("sender:route_relay");
+    await pc.engine.control(id, "relay");
+    const offer = await until(() => transferOf(mac.engine)?.prompt, "server offer");
+    expect(transferOf(mac.engine)?.path).toBe("relay");
+    await mac.engine.answer(id, "accept", offer.code);
+    await until(() => transferOf(pc.engine)?.state === "done", "manual relay completion");
+    expect(await readFile(join(mac.folder, "manual.txt"), "utf8")).toBe("manual payload");
+  }, 20_000);
+});
+
+
+it("uses an explicitly authorized relay token after a failed LAN probe", async () => {
+  const listener = vi.spyOn(LanListener, "open").mockResolvedValue(null);
+  try {
+    const { root, site, pc, mac } = await world(true);
+    const source = join(root, "relay-only.txt"); await writeFile(source, "checked relay");
+    await pc.engine.send("mac", [source]);
+    const prompt = await until(() => transferOf(pc.engine)?.prompt, "relay confirmation", 12_000);
+    const id = transferOf(pc.engine)!.id;
+    expect(site.steps).toContain("sender:route_relay");
+    await pc.engine.answer(id, "confirm", prompt.code);
+    const offer = await until(() => transferOf(mac.engine)?.prompt, "relay offer");
+    expect(transferOf(mac.engine)?.path).toBe("relay");
+    expect(transferOf(mac.engine)?.doneBytes).toBe(0);
+    await mac.engine.answer(id, "accept", offer.code);
+    await until(() => transferOf(pc.engine)?.state === "done", "relay completion");
+    expect(await readFile(join(mac.folder, "relay-only.txt"), "utf8")).toBe("checked relay");
+  } finally { listener.mockRestore(); }
+}, 20_000);

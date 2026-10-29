@@ -1,5 +1,5 @@
 import { createECDH, createHash, createPrivateKey, createPublicKey, generateKeyPairSync, randomBytes } from "node:crypto";
-import { mkdir, mkdtemp, readFile, readdir, rm, utimes, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, open, readFile, readdir, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { createServer, connect } from "node:net";
 import type { Socket } from "node:net";
 import { tmpdir } from "node:os";
@@ -92,7 +92,8 @@ describe("LevikDrop wire format", () => {
       t: "manifest", files: [{ name: "a", size: 2 }, { name: "b", size: 3 }], total: 5,
     });
     expect(() => protocol.parseControl({ t: "manifest", files: [{ name: "a", size: 2 }], total: 3 })).toThrow();
-    expect(() => protocol.parseControl({ t: "manifest", files: Array.from({ length: 21 }, () => ({ name: "a", size: 1 })), total: 21 })).toThrow();
+    expect(protocol.parseControl({ t: "manifest", files: Array.from({ length: 21 }, () => ({ name: "a", size: 1 })), total: 21 })?.t).toBe("manifest");
+    expect(() => protocol.parseControl({ t: "manifest", files: [{ name: "a", size: Number.MAX_SAFE_INTEGER + 1 }], total: Number.MAX_SAFE_INTEGER + 1 })).toThrow();
     expect(() => protocol.parseControl({ t: "accept", offsets: [1], prefix: ["zz"] })).toThrow();
     expect(() => protocol.parseControl({ t: "lan", addrs: ["8.8.8.8"], port: 1 })).toThrow();
     expect(protocol.parseControl({ t: "lan", addrs: ["192.168.1.5", "10.0.0.2"], port: 50_000 })).toEqual({ t: "lan", addrs: ["192.168.1.5", "10.0.0.2"], port: 50_000 });
@@ -162,6 +163,7 @@ interface Run {
   receiver: SessionOutcome;
   paths: SessionPath[];
   codes: string[];
+  relayPayloadBytes: number;
 }
 
 async function setup(files: Array<[string, Buffer]>) {
@@ -189,15 +191,22 @@ type Setup = Awaited<ReturnType<typeof setup>>;
 async function run(
   context: Setup,
   receiverState: { manifest: protocol.ManifestFile[] | null; targets: TargetFiles | null },
-  options: { allowLan?: boolean; stopAfter?: number; senderPlatform?: "windows" | "macos" } = {},
+  options: { allowLan?: boolean; stopAfter?: number; senderPlatform?: "windows" | "macos"; route?: "auto" | "lan" | "relay"; decline?: boolean } = {},
 ): Promise<Run> {
   const [senderSocket, receiverSocket] = await socketPair();
+  let relayPayloadBytes = 0;
+  const sendRelay = senderSocket.send.bind(senderSocket);
+  senderSocket.send = (frame) => {
+    if (frame[0] === 0x11) relayPayloadBytes += frame.length;
+    return sendRelay(frame);
+  };
   const paths: SessionPath[] = [];
   const codes: string[] = [];
   const common = {
     transferId: TRANSFER,
     allowLan: options.allowLan ?? false,
     trust: () => "new" as const,
+    ...(options.route ? { route: options.route, expectedFiles: context.sources.length, expectedBytes: context.sources.reduce((n, f) => n + f.size, 0) } : {}),
   };
   let receiverSession: Session | null = null;
   const senderWork: SenderWork = {
@@ -224,7 +233,9 @@ async function run(
     manifest: receiverState.manifest,
     targets: receiverState.targets,
     decide: async (manifest, code) => {
+      if (options.route) expect(paths).toHaveLength(2); // Both sides know the route before accepting.
       codes.push(code);
+      if (options.decline) return null;
       return new TargetFiles(context.target, await planTargets(context.target, manifest), async () => {});
     },
     confirm: async () => true,
@@ -243,12 +254,12 @@ async function run(
   receiverSession = new Session(receiverSocket, receiverWork);
   feed(senderSocket, sender);
   feed(receiverSocket, receiverSession);
-  const [senderOutcome, receiverOutcome] = await Promise.all([sender.run(), receiverSession.run()]);
+  const [senderOutcome, receiverOutcome] = await Promise.all([sender.run().then((outcome) => { if (outcome.kind === "lost") senderSocket.close(); return outcome; }), receiverSession.run()]);
   senderSocket.close();
   receiverSocket.close();
   receiverState.manifest = receiverWork.manifest;
   receiverState.targets = receiverWork.targets;
-  return { sender: senderOutcome, receiver: receiverOutcome, paths, codes };
+  return { sender: senderOutcome, receiver: receiverOutcome, paths, codes, relayPayloadBytes };
 }
 
 describe("LevikDrop session", () => {
@@ -305,3 +316,100 @@ describe("LevikDrop session", () => {
     }
   });
 });
+
+
+describe("LevikDrop route selection", () => {
+  it("carries file indices and offsets beyond the old limits without truncation", () => {
+    const plain = protocol.encodeData(70_000, 50 * 1024 ** 3, Buffer.from("abc"), true);
+    expect(plain.toString("hex")).toBe("03000111700000000c80000000616263");
+    expect(protocol.decodePlaintext(plain)).toMatchObject({ kind: "data", data: { file: 70_000, offset: 50 * 1024 ** 3 } });
+    const key = randomBytes(32);
+    const sealed = new protocol.RecordSealer(key).seal(plain, true);
+    expect(sealed[0]).toBe(0x11);
+    expect(new protocol.RecordOpener(key).open(sealed)).toEqual(plain);
+    const changed = Buffer.from(sealed); changed[0] = 0x10;
+    expect(() => new protocol.RecordOpener(key).open(changed)).toThrow();
+  });
+
+  it("shows the relay route before acceptance and transfers using marked data records", async () => {
+    const context = await setup([["relay.txt", Buffer.from("relay payload")]]);
+    const result = await run(context, { manifest: null, targets: null }, { route: "relay" });
+    expect(result.sender.kind).toBe("done");
+    expect(result.receiver.kind).toBe("done");
+    expect(result.paths).toEqual(["relay", "relay"]);
+    expect(await readFile(join(context.target, "relay.txt"), "utf8")).toBe("relay payload");
+  });
+
+  it.runIf(privateAddresses().length > 0)("negotiates LAN before offering a large file without sending its contents", async () => {
+    const context = await setup([["large.bin", Buffer.alloc(0)]]);
+    context.sources[0]!.size = 50 * 1024 ** 3;
+    const result = await run(context, { manifest: null, targets: null }, { route: "auto", allowLan: true, decline: true });
+    expect(result.paths).toEqual(["lan", "lan"]);
+    expect(result.sender.kind).toBe("declined");
+    expect(await readdir(context.target)).toEqual([]);
+  });
+
+  it.runIf(privateAddresses().length > 0)("streams more than twenty files and resume offsets on LAN", async () => {
+    const context = await setup(Array.from({ length: 40 }, (_, i): [string, Buffer] => [`file-${i}.txt`, Buffer.from(`payload-${i}`)]));
+    const result = await run(context, { manifest: null, targets: null }, { route: "lan", allowLan: true });
+    expect(result.sender.kind).toBe("done");
+    expect(result.receiver.kind).toBe("done");
+    expect(result.paths).toEqual(["lan", "lan"]);
+    expect(await readdir(context.target)).toHaveLength(40);
+    expect(await readFile(join(context.target, "file-39.txt"), "utf8")).toBe("payload-39");
+  });
+
+  it("never falls back to relay when a pinned local route is unavailable", async () => {
+    const context = await setup([["local.txt", Buffer.from("local only")]]);
+    const result = await run(context, { manifest: null, targets: null }, { route: "lan", allowLan: false });
+    expect(result.sender).toMatchObject({ kind: "lost", lanBroke: true });
+    expect(result.paths).toEqual([]);
+    expect(result.codes).toEqual([]);
+    expect(await readdir(context.target)).toEqual([]);
+  }, 10_000);
+
+  it.runIf(privateAddresses().length > 0)("marks a broken local transfer for pause and resumes on LAN", async () => {
+    const content = randomBytes(12 * 1024 * 1024);
+    const context = await setup([["resume.bin", content]]);
+    const state: { manifest: protocol.ManifestFile[] | null; targets: TargetFiles | null } = { manifest: null, targets: null };
+    const first = await run(context, state, { route: "lan", allowLan: true, stopAfter: 1024 * 1024 });
+    expect(first.sender).toMatchObject({ kind: "lost", lanBroke: true });
+    expect(first.receiver).toMatchObject({ kind: "lost", lanBroke: true });
+    const next = await run(context, state, { route: "lan", allowLan: true });
+    expect(next.sender.kind).toBe("done");
+    expect((await readFile(join(context.target, "resume.bin"))).equals(content)).toBe(true);
+  });
+});
+
+
+it("keeps simultaneous transfers with the same filename separate", async () => {
+  const context = await setup([]);
+  const manifest = [{ name: "same.txt", size: 3 }];
+  const plans = await Promise.all([planTargets(context.target, manifest), planTargets(context.target, manifest)]);
+  expect(plans[0]![0]!.partial).not.toBe(plans[1]![0]!.partial);
+  await Promise.all(plans.map(async (plan, index) => {
+    const files = new TargetFiles(context.target, plan, async () => {});
+    await files.offsets();
+    const bytes = Buffer.from(index ? "two" : "one");
+    await files.write(0, 0, bytes);
+    await files.finish(0, createHash("sha256").update(bytes).digest("hex"));
+  }));
+  const contents = await Promise.all((await readdir(context.target)).map((name) => readFile(join(context.target, name), "utf8")));
+  expect(contents.sort()).toEqual(["one", "two"]);
+});
+
+
+it.runIf(process.env.LEVIK_DROP_LARGE_TEST === "1" && privateAddresses().length > 0)("delivers a real file larger than 2 GiB on LAN without relay payload", async () => {
+  const context = await setup([["large.bin", Buffer.alloc(0)]]);
+  const size = 2 * 1024 ** 3 + 1;
+  const source = context.sources[0]!.path;
+  const handle = await open(source, "r+");
+  try { await handle.truncate(size); } finally { await handle.close(); }
+  context.sources = await describeSources([source]);
+  const result = await run(context, { manifest: null, targets: null }, { route: "lan", allowLan: true });
+  expect(result.sender.kind).toBe("done");
+  expect(result.receiver.kind).toBe("done");
+  expect(result.paths).toEqual(["lan", "lan"]);
+  expect(result.relayPayloadBytes).toBe(0);
+  expect((await stat(join(context.target, "large.bin"))).size).toBe(size);
+}, 180_000);

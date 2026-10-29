@@ -43,6 +43,7 @@ export interface DropTransfer {
   bytesPerSecond: number | null;
   /** How the bytes go right now; null without a session. */
   path: "relay" | "lan" | null;
+  route?: "auto" | "lan" | "relay";
   /** waiting: the other app is not connected yet. */
   link: "connecting" | "waiting" | "session" | "retrying" | null;
   prompt: DropPrompt | null;
@@ -70,10 +71,10 @@ export interface DropSnapshot {
 }
 
 export type DropAnswer = "accept" | "decline" | "confirm" | "reject";
-export type DropControl = "pause" | "resume" | "cancel";
+export type DropControl = "pause" | "resume" | "relay" | "cancel";
 
 export const DROP_ANSWERS: readonly DropAnswer[] = ["accept", "decline", "confirm", "reject"];
-export const DROP_CONTROLS: readonly DropControl[] = ["pause", "resume", "cancel"];
+export const DROP_CONTROLS: readonly DropControl[] = ["pause", "resume", "relay", "cancel"];
 
 export function isDropAnswer(value: unknown): value is DropAnswer {
   return typeof value === "string" && (DROP_ANSWERS as readonly string[]).includes(value);
@@ -125,10 +126,11 @@ export function dropStatusText(transfer: DropTransfer): string {
   switch (transfer.state) {
     case "offered":
       if (transfer.role === "sender") {
+        if (transfer.route && !transfer.path) return "Проверяем прямое соединение…";
         if (transfer.prompt?.kind === "confirm") return "Сверьте код на обоих устройствах";
         return transfer.link === "session" ? `Ждём, пока примут на «${peer}»…` : `Ждём «${peer}»… Levik VPN должен быть открыт на нём.`;
       }
-      return transfer.prompt ? "Примите или отклоните файлы" : "Получаем список файлов…";
+      return transfer.prompt ? (transfer.path === "lan" ? "Напрямую по локальной сети · без лимитов LevikDrop" : "Через сервер · до 20 файлов и 2 ГБ") : "Проверяем маршрут и получаем список файлов…";
     case "active":
       if (transfer.prompt?.kind === "confirm") return "Сверьте код на обоих устройствах";
       if (transfer.link !== "session") return transfer.peerPlatform === "android"
@@ -136,6 +138,7 @@ export function dropStatusText(transfer: DropTransfer): string {
         : `Ждём «${peer}»… Передача продолжится сама.`;
       return transfer.path === "lan" ? "Передаём напрямую по локальной сети" : "Передаём через сервер Levik";
     case "paused":
+      if (transfer.reason === "lan") return "Пауза: нужна локальная сеть. Переход на сервер — только вручную.";
       if (transfer.reason === "quota") return "Пауза: дневной лимит передачи через сервер исчерпан";
       return "На паузе";
     case "done":

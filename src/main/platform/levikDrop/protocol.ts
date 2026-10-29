@@ -21,8 +21,8 @@ import type { ECDH, KeyObject } from "node:crypto";
 export const PROTOCOL = 1;
 export const MAX_FRAME = 270_336;
 export const MAX_CHUNK = 262_144;
-export const MAX_FILES = 20;
-export const MAX_TOTAL = 2 * 1024 ** 3;
+export const MAX_FILES = 2_147_483_647; // Wire/file-index capacity, not a product quota.
+export const MAX_TOTAL = Number.MAX_SAFE_INTEGER;
 /** Bytes the sender keeps in flight beyond the last acknowledgement. */
 export const WINDOW = 8 * 1024 * 1024;
 export const ACK_EVERY = 1024 * 1024;
@@ -285,9 +285,10 @@ export class RecordSealer {
   private seq = 0n;
   constructor(private readonly key: Buffer) {}
 
-  seal(plaintext: Buffer): Buffer {
+  seal(plaintext: Buffer, dataRecord = false): Buffer {
     const seq = this.seq++;
     const header = headerFor(seq);
+    if (dataRecord) header[0] = 0x11;
     const cipher = createCipheriv("aes-256-gcm", this.key, nonceFor(seq));
     cipher.setAAD(header);
     return Buffer.concat([header, cipher.update(plaintext), cipher.final(), cipher.getAuthTag()]);
@@ -299,7 +300,7 @@ export class RecordOpener {
   constructor(private readonly key: Buffer) {}
 
   open(record: Buffer): Buffer {
-    if (record.length < 9 + 16 + 1 || record[0] !== 0x10) fail("not a record");
+    if (record.length < 9 + 16 + 1 || (record[0] !== 0x10 && record[0] !== 0x11)) fail("not a record");
     const seq = record.readBigUInt64BE(1);
     if (seq !== this.seq) fail("record out of order");
     const decipher = createDecipheriv("aes-256-gcm", this.key, nonceFor(seq));
@@ -327,6 +328,9 @@ export const FAILURES = ["source_changed", "integrity", "storage_full", "storage
 export type FailReason = (typeof FAILURES)[number];
 
 export type Control =
+  | { t: "route"; path: "lan" | "relay" }
+  | { t: "manifest_part"; files: ManifestFile[]; total: number; final: boolean }
+  | { t: "accept_part"; offsets: number[]; prefix: Array<string | null>; final: boolean }
   | { t: "manifest"; files: ManifestFile[]; total: number }
   | { t: "accept"; offsets: number[]; prefix: Array<string | null> }
   | { t: "decline" }
@@ -353,21 +357,23 @@ export function encodeControl(control: Control): Buffer {
   return Buffer.concat([Buffer.from([0x01]), Buffer.from(JSON.stringify(control), "utf8")]);
 }
 
-export function encodeData(file: number, offset: number, bytes: Buffer): Buffer {
+export function encodeData(file: number, offset: number, bytes: Buffer, wide = false): Buffer {
   if (bytes.length < 1 || bytes.length > MAX_CHUNK) fail("bad chunk");
-  const head = Buffer.alloc(11);
-  head[0] = 0x02;
-  head.writeUInt16BE(file, 1);
-  head.writeBigUInt64BE(BigInt(offset), 3);
+  const head = Buffer.alloc(wide ? 13 : 11);
+  head[0] = wide ? 0x03 : 0x02;
+  if (wide) head.writeUInt32BE(file, 1);
+  else head.writeUInt16BE(file, 1);
+  head.writeBigUInt64BE(BigInt(offset), wide ? 5 : 3);
   return Buffer.concat([head, bytes]);
 }
 
 export function decodePlaintext(plaintext: Buffer): Plaintext {
-  if (plaintext[0] === 0x02) {
-    if (plaintext.length < 12 || plaintext.length > 11 + MAX_CHUNK) fail("bad data record");
-    const offset = plaintext.readBigUInt64BE(3);
+  if (plaintext[0] === 0x02 || plaintext[0] === 0x03) {
+    const head = plaintext[0] === 0x03 ? 13 : 11;
+    if (plaintext.length < head + 1 || plaintext.length > head + MAX_CHUNK) fail("bad data record");
+    const offset = plaintext.readBigUInt64BE(head - 8);
     if (offset > BigInt(MAX_TOTAL)) fail("bad offset");
-    return { kind: "data", data: { file: plaintext.readUInt16BE(1), offset: Number(offset), bytes: plaintext.subarray(11) } };
+    return { kind: "data", data: { file: head === 13 ? plaintext.readUInt32BE(1) : plaintext.readUInt16BE(1), offset: Number(offset), bytes: plaintext.subarray(head) } };
   }
   if (plaintext[0] !== 0x01) return { kind: "unknown" };
   if (plaintext.length > 64 * 1024) fail("control too long");
@@ -404,6 +410,21 @@ export function isPrivateIpv4(address: string): boolean {
 export function parseControl(value: unknown): Control | null {
   if (!record(value) || typeof value.t !== "string") fail("bad control");
   switch (value.t) {
+    case "route":
+      if (value.path !== "lan" && value.path !== "relay") fail("bad route");
+      return { t: "route", path: value.path };
+    case "manifest_part": {
+      if (typeof value.final !== "boolean" || !Array.isArray(value.files) || value.files.length > 16) fail("bad manifest part");
+      const part = parseControl({ ...value, t: "manifest" });
+      if (part?.t !== "manifest") fail("bad manifest part");
+      return { ...part, t: "manifest_part", final: value.final };
+    }
+    case "accept_part": {
+      if (typeof value.final !== "boolean" || !Array.isArray(value.offsets) || value.offsets.length > 16) fail("bad accept part");
+      const part = parseControl({ ...value, t: "accept" });
+      if (part?.t !== "accept") fail("bad accept part");
+      return { ...part, t: "accept_part", final: value.final };
+    }
     case "manifest": {
       const files = value.files;
       if (!Array.isArray(files) || files.length < 1 || files.length > MAX_FILES) fail("bad manifest");
@@ -412,7 +433,7 @@ export function parseControl(value: unknown): Control | null {
         return { name: file.name, size: file.size };
       });
       const total = parsed.reduce((sum, file) => sum + file.size, 0);
-      if (value.total !== total || total > MAX_TOTAL) fail("bad manifest");
+      if (value.total !== total || !Number.isSafeInteger(total) || total > MAX_TOTAL) fail("bad manifest");
       return { t: "manifest", files: parsed, total };
     }
     case "accept": {

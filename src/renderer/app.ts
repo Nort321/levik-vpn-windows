@@ -786,7 +786,7 @@ function renderDrop(): string {
     ? `Сегодня через сервер: ${formatDropBytes(drop.quota.usedBytes)} из ${formatDropBytes(drop.quota.limitBytes)}. По локальной сети — без лимита.`
     : "";
   const transfers = drop.transfers.slice(0, 12);
-  return `<section class="section card" aria-labelledby="drop-title"><div class="section-head"><div><h2 class="card-title" id="drop-title">Передача файлов</h2><div class="card-caption">Между вашими устройствами: шифруется на устройстве и нигде не хранится. До ${drop.limits.maxFiles} файлов и ${formatDropBytes(drop.limits.maxBytes)} за раз — выберите устройство или перетащите файлы в окно Levik VPN.</div></div><button class="button icon-button" id="drop-refresh-button" aria-label="Обновить передачу файлов">${icon("refresh")}</button></div>
+  return `<section class="section card" aria-labelledby="drop-title"><div class="section-head"><div><h2 class="card-title" id="drop-title">Передача файлов</h2><div class="card-caption">Между вашими устройствами: шифруется на устройстве и нигде не хранится. По локальной сети — без лимитов LevikDrop. Через сервер — до ${drop.limits.maxFiles} файлов и ${formatDropBytes(drop.limits.maxBytes)} за раз — выберите устройство или перетащите файлы в окно Levik VPN.</div></div><button class="button icon-button" id="drop-refresh-button" aria-label="Обновить передачу файлов">${icon("refresh")}</button></div>
     ${devices}
     <div class="settings-list"><div class="setting-row"><div><div class="setting-name">Папка для полученных файлов</div><div class="setting-help drop-folder">${escapeHtml(drop.folder)}</div></div><button class="button compact" id="drop-folder-button">${icon("browse")} Изменить</button></div></div>
     ${quota ? `<p class="card-caption">${escapeHtml(quota)}</p>` : ""}
@@ -796,7 +796,7 @@ function renderDrop(): string {
 }
 
 function dropDeviceRow(device: DropDevice): string {
-  const busy = state?.drop.transfers.some((transfer) => isOpenDropState(transfer.state)) ?? false;
+  const busy = false; // Relay concurrency is checked after route discovery.
   const disabled = !device.ready || busy || dropSendingTo !== null;
   const online = device.ready && device.supported;
   return `<div class="device-row drop-device"><span class="process-icon">${icon("devices")}<span class="drop-presence ${online ? "online" : ""}" aria-hidden="true"></span></span><span class="process-copy"><span class="process-name">${escapeHtml(device.name)}</span><span class="process-path">${REMOTE_PLATFORM_LABELS[device.platform]} · <span class="presence ${device.ready ? "online" : ""}">${escapeHtml(dropDeviceStatus(device, busy))}</span></span></span><button class="button compact" data-drop-send="${escapeAttribute(device.deviceId)}" aria-label="Отправить файлы на ${escapeAttribute(device.name)}" ${disabled ? "disabled" : ""}>${dropSendingTo === device.deviceId ? `<span class="spinner"></span>` : icon("upload")} Отправить файлы</button></div>`;
@@ -811,7 +811,10 @@ function dropTransferRow(transfer: DropTransfer): string {
   const buttons: string[] = [];
   if (transfer.prompt) buttons.push(`<button class="button compact primary" data-drop-prompt="${escapeAttribute(transfer.id)}">${transfer.prompt.kind === "offer" ? "Принять или отклонить" : "Сверить код"}</button>`);
   if (transfer.state === "active") buttons.push(dropControlButton(transfer, "pause", "Пауза", busy));
-  if (transfer.state === "paused") buttons.push(dropControlButton(transfer, "resume", "Продолжить", busy));
+  if (transfer.state === "paused") {
+    buttons.push(dropControlButton(transfer, "resume", transfer.route === "lan" ? "Повторить по локальной сети" : transfer.reason === "lan" ? "Повторить проверку" : "Продолжить", busy));
+    if (transfer.route && transfer.route !== "relay" && transfer.totalBytes <= 2 * 1024 ** 3 && transfer.fileCount <= 20) buttons.push(dropControlButton(transfer, "relay", "Продолжить через сервер", busy));
+  }
   if (open) buttons.push(dropControlButton(transfer, "cancel", "Отменить", busy));
   if (transfer.saved) buttons.push(`<button class="button compact" data-drop-show="${escapeAttribute(transfer.id)}">${icon("browse")} Показать в папке</button>`);
   const progress = open || transfer.state === "done"

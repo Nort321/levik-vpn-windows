@@ -146,7 +146,8 @@ export class RelayLink {
   }
 
   private startSession(socket: FrameSocket): void {
-    const session = new Session(socket, this.host.work(this.allowLan));
+    const work = this.host.work(this.allowLan);
+    const session = new Session(socket, work);
     this.session = session;
     this.host.status("session");
     void session.run().then((outcome) => {
@@ -156,7 +157,12 @@ export class RelayLink {
         this.closeAfterSaying();
         return;
       }
-      if (outcome.lanBroke) this.allowLan = false;
+      if (outcome.lanBroke && work.route) {
+        this.host.outcome(outcome);
+        this.closeAfterSaying();
+        return;
+      }
+      if (outcome.lanBroke) this.allowLan = false; // Existing v1 transfers retain their reconnect policy.
       // A session that broke on its own needs a fresh `peer`: rejoining gives both apps one.
       const left = outcome.detail === "the other app left" || outcome.detail === "new session" || outcome.detail.startsWith("relay");
       this.host.outcome(outcome);

@@ -24,7 +24,7 @@ export interface DropApi {
   clearPresence(): Promise<void>;
   devices(): Promise<unknown>;
   transfers(): Promise<unknown>;
-  create(offer: { receiverDeviceId: string; fileCount: number; totalBytes: number }): Promise<unknown>;
+  create(offer: { receiverDeviceId: string; fileCount: number; totalBytes: number; protocol?: number }): Promise<unknown>;
   update(step: { id: string; action: string; reason?: string }): Promise<unknown>;
 }
 
@@ -57,6 +57,8 @@ const PLATFORMS: readonly DropPlatform[] = ["android", "windows", "macos", "linu
 const STATES: readonly DropState[] = ["offered", "active", "paused", "done", "declined", "cancelled", "failed", "expired"];
 
 interface WebTransfer {
+  protocol: number;
+  route: "auto" | "lan" | "relay";
   id: string;
   role: "sender" | "receiver";
   peerDeviceId: string;
@@ -104,8 +106,11 @@ export function parseWebTransfer(value: unknown): WebTransfer | null {
   const state = STATES.find((item) => item === value.state);
   const createdAt = time(value.createdAt);
   if (!state || createdAt === null) return null;
-  if (typeof value.fileCount !== "number" || typeof value.totalBytes !== "number") return null;
+  if (typeof value.fileCount !== "number" || !Number.isSafeInteger(value.fileCount) || value.fileCount < 1 || value.fileCount > MAX_FILES || typeof value.totalBytes !== "number" || !Number.isSafeInteger(value.totalBytes) || value.totalBytes < 0 || value.totalBytes > MAX_TOTAL) return null;
+  if (value.protocol === 2 && value.route !== "auto" && value.route !== "lan" && value.route !== "relay") return null;
   return {
+    protocol: value.protocol === 2 ? 2 : 1,
+    route: value.route === "lan" || value.route === "auto" ? value.route : "relay",
     id: value.id,
     role: value.role,
     peerDeviceId: value.peerDeviceId,
@@ -158,7 +163,7 @@ export class DropEngine extends EventEmitter<DropEngineEvents> {
   private available = false;
   private loadedAt: number | null = null;
   private quota: DropSnapshot["quota"] = null;
-  private limits = { maxFiles: MAX_FILES, maxBytes: MAX_TOTAL };
+  private limits = { maxFiles: 20, maxBytes: 2 * 1024 ** 3 };
   private error: string | null = null;
   private readonly links = new Map<string, RelayLink>();
   private readonly live = new Map<string, Live>();
@@ -330,19 +335,16 @@ export class DropEngine extends EventEmitter<DropEngineEvents> {
     const generation = this.generation;
     await this.load();
     this.assertCurrent(generation);
-    if ([...this.web.values()].some((transfer) => isOpenDropState(transfer.state))) {
-      throw new Error("Дождитесь окончания текущей передачи: за раз передаётся один набор файлов.");
-    }
     const unique = [...new Set(paths)];
     if (unique.length < 1) return;
-    if (unique.length > this.limits.maxFiles) throw new Error(`За раз можно передать до ${this.limits.maxFiles} файлов.`);
+    if (unique.length > MAX_FILES) throw new Error("Слишком много файлов для файловой системы.");
     const files = await describeSources(unique);
     this.assertCurrent(generation);
     const total = files.reduce((sum, file) => sum + file.size, 0);
-    if (total > this.limits.maxBytes) throw new Error("За раз можно передать до 2 ГБ.");
+    if (!Number.isSafeInteger(total) || total > MAX_TOTAL) throw new Error("Размер файлов не поддерживается файловой системой.");
     this.creating++;
     try {
-      const response = await this.options.api.create({ receiverDeviceId: deviceId, fileCount: files.length, totalBytes: total });
+      const response = await this.options.api.create({ receiverDeviceId: deviceId, fileCount: files.length, totalBytes: total, protocol: 2 });
       this.assertCurrent(generation);
       const transfer = record(response) ? parseWebTransfer(response.transfer) : null;
       if (!transfer) throw new Error("Сайт ответил непонятно. Попробуйте ещё раз.");
@@ -390,6 +392,14 @@ export class DropEngine extends EventEmitter<DropEngineEvents> {
         }
         this.stopLink(id);
         await this.step(id, "pause", "user");
+        return;
+      case "relay":
+        if (transfer.state !== "paused" || transfer.protocol !== 2) throw new Error("Сначала приостановите передачу.");
+        await this.step(id, "route_relay");
+        if (this.web.get(id)?.route !== "relay") throw new Error("Не удалось выбрать серверный маршрут.");
+        this.resuming.add(id);
+        this.ensureLink(id);
+        this.changed();
         return;
       case "resume":
         this.resuming.add(id);
@@ -492,7 +502,7 @@ export class DropEngine extends EventEmitter<DropEngineEvents> {
         } else if (!stored) {
           this.store.put({
             id: transfer.id, role: "receiver", peerDeviceId: transfer.peerDeviceId, manifest: null, folder: null, targets: null,
-            decision: transfer.state === "offered" ? null : "accepted", finished: false,
+            decision: transfer.protocol === 2 || transfer.state === "offered" ? null : "accepted", finished: false,
           });
         } else if (stored.role === "receiver" && stored.decision === "declined") {
           this.quietStep(transfer.id, "decline");
@@ -635,7 +645,25 @@ export class DropEngine extends EventEmitter<DropEngineEvents> {
       peerDeviceId: stored.peerDeviceId,
       ownPlatform: this.options.platform,
       peerPlatform: transfer.peerPlatform,
-      allowLan,
+      allowLan: allowLan && !(transfer.protocol === 2 && transfer.route === "relay"),
+      ...(transfer.protocol === 2 ? {
+        route: transfer.route,
+        expectedFiles: transfer.fileCount,
+        expectedBytes: transfer.totalBytes,
+        selectRoute: async (path: "lan" | "relay"): Promise<boolean> => {
+          if (transfer.route === path) return true;
+          try {
+            await this.step(id, path === "lan" ? "route_lan" : "route_relay", undefined, generation);
+            if (this.web.get(id)?.route !== path) throw new Error("Маршрут не подтверждён сервером.");
+            return path === "lan"; // A relay payload requires a fresh, quota-limited token.
+          } catch (error) {
+            this.stopLink(id);
+            this.error = path === "relay" ? "Для этой передачи нужна локальная сеть: серверные лимиты или доступность не позволяют продолжить." : this.errorText(error);
+            await this.step(id, "pause", "lan", generation);
+            return false;
+          }
+        },
+      } : {}),
       trust: (key: Buffer): Trust => this.pins.trust(stored.peerDeviceId, key),
       confirm: async (code: string, trust: Trust): Promise<boolean> => {
         if (!peerKey) return false;
@@ -784,6 +812,11 @@ export class DropEngine extends EventEmitter<DropEngineEvents> {
     try {
       switch (outcome.kind) {
         case "lost": {
+          if (outcome.lanBroke && this.web.get(id)?.protocol === 2) {
+            this.stopLink(id);
+            await this.step(id, "pause", "lan", generation);
+            return;
+          }
           if (!outcome.detail.startsWith("protocol")) return;
           const failures = (this.protocolFailures.get(id) ?? 0) + 1;
           this.protocolFailures.set(id, failures);
@@ -879,6 +912,7 @@ export class DropEngine extends EventEmitter<DropEngineEvents> {
       doneBytes: Math.min(done, transfer.totalBytes),
       bytesPerSecond: isOpenDropState(transfer.state) ? rate : null,
       path: live?.path ?? null,
+      ...(transfer.protocol === 2 ? { route: transfer.route } : {}),
       link: this.links.has(transfer.id) ? live?.link ?? "connecting" : null,
       prompt: prompt ? { kind: prompt.kind, code: prompt.code, trust: prompt.trust } : null,
       verificationCode: live?.verificationCode ?? null,

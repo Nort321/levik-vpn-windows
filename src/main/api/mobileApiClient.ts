@@ -162,7 +162,7 @@ export class MobileApiClient {
 
   /** LevikDrop, docs/levik-drop.md: this computer can receive files now, with its identity key. */
   dropPresence(accessToken: string, key: string): Promise<{ ok: true; readyUntil?: unknown }> {
-    return this.request("PUT", "/api/mobile/v1/drop/presence", { key, protocol: 1 }, accessToken);
+    return this.request("PUT", "/api/mobile/v1/drop/presence", { key, protocol: 2 }, accessToken);
   }
 
   async clearDropPresence(accessToken: string): Promise<void> {
@@ -178,7 +178,7 @@ export class MobileApiClient {
     return this.request("GET", "/api/mobile/v1/drop/transfers", null, accessToken);
   }
 
-  createDropTransfer(accessToken: string, offer: { receiverDeviceId: string; fileCount: number; totalBytes: number }): Promise<Record<string, unknown>> {
+  createDropTransfer(accessToken: string, offer: { receiverDeviceId: string; fileCount: number; totalBytes: number; protocol?: number }): Promise<Record<string, unknown>> {
     return this.request("POST", "/api/mobile/v1/drop/transfers", { ...offer }, accessToken);
   }
 
@@ -313,6 +313,8 @@ function apiErrorMessage(code: string): string {
     subscription_required: "Для передачи файлов нужна активная подписка.",
     device_not_found: "Устройство не найдено в аккаунте.",
     device_not_ready: "Устройство сейчас не может принять файлы: откройте на нём Levik VPN.",
+    upgrade_required: "Обновите Levik на устройстве получателя для передачи с выбором маршрута.",
+    relay_limits: "Через сервер можно передать до 20 файлов и 2 ГБ. Используйте локальную сеть.",
     device_busy: "Одно из устройств уже передаёт файлы. Дождитесь окончания.",
     quota_exceeded: "Дневной лимит передачи через сервер (20 ГБ) исчерпан. Он обновится завтра.",
     transfer_not_found: "Передача не найдена.",

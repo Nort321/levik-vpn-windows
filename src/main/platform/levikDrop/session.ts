@@ -70,9 +70,15 @@ interface Common {
   ownPlatform: DropPlatform;
   peerPlatform: DropPlatform | null;
   trust(peerKey: Buffer): Trust;
-  /** Unless the direct connection broke in an earlier session of this relay connection. */
+  /** Whether this attempt may discover a local route. */
   allowLan: boolean;
   events: SessionEvents;
+  /** V2 pins the selected route. Undefined retains compatibility with existing v1 transfers. */
+  route?: "auto" | SessionPath;
+  expectedFiles?: number;
+  expectedBytes?: number;
+  selectRoute?(path: SessionPath): Promise<boolean>;
+
 }
 
 export interface SenderWork extends Common {
@@ -152,6 +158,12 @@ export class Session {
   private lanReady: Promise<FrameSocket | null> | null = null;
   private lanListener: LanListener | null = null;
   private lanBroke = false;
+  private routeSettled = false;
+  private manifestParts: ManifestFile[] = [];
+  private manifestReceived = false;
+  private acceptOffsets: number[] = [];
+  private acceptPrefixes: Array<string | null> = [];
+
   private outcome: SessionOutcome | null = null;
   private settle: ((outcome: SessionOutcome) => void) | null = null;
   private readonly result: Promise<SessionOutcome>;
@@ -189,7 +201,7 @@ export class Session {
 
   /** The relay said `gone`, or the connection closed. */
   abort(detail: string): void {
-    this.finish({ kind: "lost", detail, lanBroke: this.lanBroke });
+    this.finish({ kind: "lost", detail, lanBroke: this.lanBroke || this.input === "lan" || this.output === "lan" || this.work.route === "lan" });
   }
 
   pause(): void {
@@ -229,9 +241,9 @@ export class Session {
       this.fail(error.reason);
     } else if (error instanceof ProtocolError) {
       // A broken record or message: this session is over, the transfer is not.
-      this.finish({ kind: "lost", detail: `protocol: ${error.message}`, lanBroke: this.lanBroke });
+      this.finish({ kind: "lost", detail: `protocol: ${error.message}`, lanBroke: this.lanBroke || this.input === "lan" || this.output === "lan" || this.work.route === "lan" });
     } else {
-      this.finish({ kind: "lost", detail: error instanceof Error ? error.message : "session", lanBroke: this.lanBroke });
+      this.finish({ kind: "lost", detail: error instanceof Error ? error.message : "session", lanBroke: this.lanBroke || this.input === "lan" || this.output === "lan" || this.work.route === "lan" });
     }
   }
 
@@ -273,10 +285,31 @@ export class Session {
     this.opener = new RecordOpener(role === "sender" ? keys.rs : keys.sr);
     const trust = this.work.trust(peerKey);
     this.work.events.keyed(keys.code, trust, peerKey);
-    this.work.events.path("relay");
+    if (!this.work.route) this.work.events.path("relay");
 
     const reading = this.readLoop(trust);
+    if (this.work.route && this.listensOnLan() && this.work.route !== "relay") void this.openLan();
     if (role === "sender") {
+      if (this.work.route) {
+        if (this.work.route !== "relay") {
+          const deadline = Date.now() + LAN_SWITCH_TIMEOUT_MS;
+          while (!this.outcome && Date.now() < deadline && !(this.input === "lan" && this.output === "lan")) {
+            await new Promise<void>((resolve) => setTimeout(resolve, 20));
+          }
+        }
+        if (this.outcome) return;
+        const path = this.input === "lan" && this.output === "lan" ? "lan" : "relay";
+        if (path === "relay" && (this.work.route === "lan" || this.input === "lan" || this.output === "lan")) {
+          this.lanBroke = true; this.abort("local route unavailable"); return;
+        }
+        this.routeSettled = true;
+        if (this.work.selectRoute && !(await this.work.selectRoute(path))) {
+          this.abort("route reconnect"); return;
+        }
+        if (this.outcome) return;
+        this.work.events.path(path);
+        await this.sendControl({ t: "route", path });
+      }
       if (trust !== "trusted" && !(await this.work.confirm(keys.code, trust))) {
         this.fail("key_rejected");
         return;
@@ -286,7 +319,7 @@ export class Session {
       await this.sendControl({ t: "manifest", files, total: files.reduce((sum, file) => sum + file.size, 0) });
       this.manifestSent = true;
     }
-    if (this.listensOnLan()) void this.openLan();
+    if (!this.work.route && this.listensOnLan()) void this.openLan();
     await reading;
   }
 
@@ -301,11 +334,24 @@ export class Session {
   private sendPlaintext(plaintext: Buffer): Promise<void> {
     if (!this.sealer) return Promise.reject(new ProtocolError("no keys"));
     // Sealing and writing in one step keeps the counters in the order the bytes leave.
-    return this.socketFor(this.output).send(this.sealer.seal(plaintext));
+    return this.socketFor(this.output).send(this.sealer.seal(plaintext, !!this.work.route && (plaintext[0] === 0x02 || plaintext[0] === 0x03)));
   }
 
-  private sendControl(control: Control): Promise<void> {
-    return this.sendPlaintext(encodeControl(control));
+  private async sendControl(control: Control): Promise<void> {
+    if (this.work.route && control.t === "manifest") {
+      for (let i = 0; i < control.files.length; i += 16) {
+        const files = control.files.slice(i, i + 16);
+        await this.sendPlaintext(encodeControl({ t: "manifest_part", files, total: files.reduce((n, file) => n + file.size, 0), final: i + 16 >= control.files.length }));
+      }
+      return;
+    }
+    if (this.work.route && control.t === "accept") {
+      for (let i = 0; i < control.offsets.length; i += 16) {
+        await this.sendPlaintext(encodeControl({ t: "accept_part", offsets: control.offsets.slice(i, i + 16), prefix: control.prefix.slice(i, i + 16), final: i + 16 >= control.offsets.length }));
+      }
+      return;
+    }
+    await this.sendPlaintext(encodeControl(control));
   }
 
   private async nextRecord(): Promise<Buffer> {
@@ -329,6 +375,7 @@ export class Session {
         const plaintext = decodePlaintext(opener.open(frame));
         if (plaintext.kind === "unknown") continue;
         if (plaintext.kind === "data") {
+          if (this.work.route && frame[0] !== 0x11) throw new ProtocolError("unmarked file data");
           await this.onData(plaintext.data.file, plaintext.data.offset, plaintext.data.bytes);
           continue;
         }
@@ -343,6 +390,33 @@ export class Session {
 
   private async onControl(control: Control, trust: Trust): Promise<void> {
     switch (control.t) {
+      case "route":
+        if (!this.work.route || this.work.role !== "receiver" || this.routeSettled || control.path !== this.input || control.path !== this.output || (this.work.route === "lan" && control.path !== "lan")) throw new ProtocolError("unexpected route");
+        this.routeSettled = true;
+        this.work.events.path(control.path);
+        return;
+      case "manifest_part": {
+        if (!this.work.route || !this.routeSettled || this.work.role !== "receiver" || this.manifestReceived) throw new ProtocolError("early manifest");
+        this.manifestParts.push(...control.files);
+        if (this.manifestParts.length > (this.work.expectedFiles ?? 2_147_483_647)) throw new ProtocolError("manifest count");
+        if (control.final) {
+          const files = this.manifestParts; this.manifestParts = [];
+          this.manifestReceived = true;
+          const total = files.reduce((n, file) => n + file.size, 0);
+          if (!Number.isSafeInteger(total) || (this.work.expectedFiles !== undefined && files.length !== this.work.expectedFiles) || (this.work.expectedBytes !== undefined && total !== this.work.expectedBytes)) throw new ProtocolError("manifest offer mismatch");
+          await this.receiverControl({ t: "manifest", files, total }, trust);
+        }
+        return;
+      }
+      case "accept_part":
+        if (!this.work.route || this.work.role !== "sender" || !this.routeSettled || this.accepted) throw new ProtocolError("early accept");
+        this.acceptOffsets.push(...control.offsets); this.acceptPrefixes.push(...control.prefix);
+        if (this.acceptOffsets.length > this.work.files.length) throw new ProtocolError("accept count");
+        if (control.final) {
+          await this.senderControl({ t: "accept", offsets: this.acceptOffsets, prefix: this.acceptPrefixes });
+          this.acceptOffsets = []; this.acceptPrefixes = [];
+        }
+        return;
       case "pause":
         this.finish({ kind: "paused", by: "peer" });
         return;
@@ -353,7 +427,7 @@ export class Session {
         this.finish({ kind: "failed", by: "peer", reason: control.reason });
         return;
       case "lan":
-        if (!this.listensOnLan() && this.work.allowLan && !this.lanReady) this.dialLan(control.addrs, control.port);
+        if (!this.listensOnLan() && this.work.allowLan && this.work.route !== "relay" && !this.routeSettled && !this.lanReady) this.dialLan(control.addrs, control.port);
         return;
       case "lan_on":
         // The sender's last record through the relay.
@@ -365,6 +439,7 @@ export class Session {
         this.input = "lan";
         return;
       default:
+        if (this.work.route && (control.t === "manifest" || control.t === "accept")) throw new ProtocolError("unframed metadata");
         if (this.work.role === "sender") await this.senderControl(control);
         else await this.receiverControl(control, trust);
     }
@@ -403,7 +478,7 @@ export class Session {
 
   private onLanReady(socket: FrameSocket | null): void {
     if (!socket) return;
-    if (this.outcome) {
+    if (this.outcome || this.routeSettled) {
       socket.close();
       return;
     }
@@ -418,7 +493,7 @@ export class Session {
     if (this.work.role === "sender") {
       void this.sendControl({ t: "lan_on" }).catch(() => {});
       this.output = "lan";
-      this.work.events.path("lan");
+      if (!this.work.route) this.work.events.path("lan");
     }
   }
 
@@ -432,7 +507,7 @@ export class Session {
     await this.sendControl({ t: "lan_ok" });
     this.output = "lan";
     this.input = "lan";
-    this.work.events.path("lan");
+    if (!this.work.route) this.work.events.path("lan");
   }
 
   // Sender ---------------------------------------------------------------------------
@@ -512,7 +587,7 @@ export class Session {
           });
         }
         if (this.outcome) return;
-        await this.sendPlaintext(encodeData(index, position, chunk));
+        await this.sendPlaintext(encodeData(index, position, chunk, !!this.work.route));
         position += chunk.length;
         this.sentBytes += chunk.length;
       }
