@@ -754,6 +754,22 @@ select option { color: var(--text); background-color: var(--select-bg); }
 .toast { z-index: 30; bottom: calc(24px + var(--drop-dock-offset, 0px)); }
 
 /* LevikDrop: files dragged into the window ---------------------------------------------- */
+.guest-page { min-height: 100vh; height: auto; padding: 28px; align-items: start; overflow-y: auto; }
+.guest-card { width: min(760px, 100%); padding: 28px; margin: auto; }
+.guest-card h1 { font-size: 24px; margin-top: 0; }
+.guest-card p, .guest-steps { line-height: 1.65; }
+.guest-steps { padding-left: 24px; }
+.guest-steps li + li { margin-top: 10px; }
+.guest-input-label { display: block; margin: 18px 0 8px; font-weight: 600; }
+.guest-invite { width: 100%; resize: vertical; box-sizing: border-box; padding: 12px; border: 1px solid var(--border); border-radius: 12px; color: var(--text); background: var(--surface); font: inherit; overflow-wrap: anywhere; }
+.guest-invite:focus-visible, .guest-proxy-help summary:focus-visible { outline: 2px solid var(--blue); outline-offset: 3px; }
+.guest-hint { font-size: 13px; color: var(--muted); }
+.guest-actions { display: flex; flex-wrap: wrap; gap: 10px; margin: 18px 0; }
+.guest-proxy-help { border-top: 1px solid var(--border); padding-top: 18px; margin-top: 24px; }
+.guest-proxy-help summary { cursor: pointer; font-weight: 600; }
+.guest-entry { display: flex; justify-content: space-between; align-items: center; gap: 16px; margin-bottom: 20px; }
+.guest-entry p { margin-bottom: 0; }
+
 .drop-overlay { position: fixed; inset: 0; z-index: 25; display: grid; place-items: center; padding: 32px; background: var(--dialog-backdrop, rgba(2,7,14,.72)); backdrop-filter: blur(10px); opacity: 0; transition: opacity 160ms ease; }
 .drop-overlay[hidden] { display: none; }
 .drop-overlay.is-visible { opacity: 1; }

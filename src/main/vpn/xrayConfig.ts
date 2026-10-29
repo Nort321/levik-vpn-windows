@@ -334,7 +334,7 @@ function ipv4Only(value: unknown): unknown {
 /** The TUN adapter's IPv4 address; the Kill Switch finds the adapter by it. */
 export const TUNNEL_GATEWAY_V4 = "10.89.0.1";
 
-function tunInbound(dnsServer: string): Record<string, unknown> {
+export function tunInbound(dnsServer: string): Record<string, unknown> {
   return {
     tag: "levik-tun-in",
     protocol: "tun",

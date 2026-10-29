@@ -3,6 +3,9 @@ import { IPC } from "../shared/contracts";
 import type { AppSettings, AppSnapshot, AppTab, DiagnosisSummary, LevikDesktopApi } from "../shared/contracts";
 
 const api: LevikDesktopApi = {
+  connectGuest: (invitation) => ipcRenderer.invoke(IPC.connectGuest, invitation),
+  disconnectGuest: () => ipcRenderer.invoke(IPC.disconnectGuest),
+  importGuestInvite: () => ipcRenderer.invoke(IPC.importGuestInvite),
   snapshot: () => ipcRenderer.invoke(IPC.snapshot) as Promise<AppSnapshot>,
   login: (openExternal = true) => ipcRenderer.invoke(IPC.login, openExternal),
   cancelLogin: () => ipcRenderer.invoke(IPC.cancelLogin),

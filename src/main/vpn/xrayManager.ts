@@ -12,7 +12,7 @@ import type { GameRouteCandidate, GameRuntimeOptions } from "./multipath/client"
 import type { GameConfigurableOptions, GameDataPlane } from "./multipath/dataPlane";
 import { RemoteGameDataPlane } from "./multipath/remote";
 import { networkInterfaces } from "node:os";
-import { findWindowsOutboundInterface } from "../windows/outboundInterface";
+import { findWindowsOutboundInterface, type WindowsOutboundInterface } from "../windows/outboundInterface";
 import { TuicSidecar, withTuicProxy } from "./tuicSidecar";
 import type { TuicEndpoint, GameMultipathStats, GameRuntimeSnapshot, GameRouteQuality } from "../../shared/contracts";
 import { GAME_BLOCK, gameTag } from "./gameRoutes";
@@ -161,14 +161,14 @@ export class XrayManager extends EventEmitter<XrayEvents> {
 
   /** shouldContinue: false once the caller no longer wants this tunnel, so a retry is never started for it. */
   async start(config: Record<string, unknown>, tuic?: TuicEndpoint, gameTuic: Array<{ tag: string; endpoint: TuicEndpoint }> = [],
-    shouldContinue: () => boolean = () => true): Promise<void> {
+    shouldContinue: () => boolean = () => true, localInterface?: WindowsOutboundInterface): Promise<void> {
     if (process.platform !== "win32") throw new Error("VPN-туннель запускается только в Windows-сборке");
     const { stdout: version } = await execFileAsync(this.executablePath(), ["version"], {
       windowsHide: true, timeout: 5_000, maxBuffer: 64 * 1024,
     });
     assertProcessRoutingSupport(config, version);
     await this.stop();
-    const outbound = await findWindowsOutboundInterface((message) => this.emit("log", message));
+    const outbound = localInterface ?? await findWindowsOutboundInterface((message) => this.emit("log", message));
     const interfaceName = outbound.name;
     this.outboundName = interfaceName;
     let launchConfig = config;

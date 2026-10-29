@@ -11,10 +11,12 @@ import { dropStatusText, formatDropBytes, isOpenDropState } from "../shared/drop
 import type { DropControl, DropDevice, DropTransfer } from "../shared/drop";
 import { dropAmountText, dropDeviceStatus, dropFilesText, dropPercent, mountDropUi } from "./dropUi";
 import { countrySwitchLabel, serverSwitchLabel } from "./serverSwitchUi";
+import { renderGuestScreen } from "./guest";
 
 const SUPPORT_CHAT_URL = "https://t.me/leviksupportbot";
 
 let state: AppSnapshot | null = null;
+let guestScreen = false;
 let activeTab: AppTab = "home";
 let loginWaiting = false;
 /** The main process reported this sign-in as pending; when it stops, the attempt is over. */
@@ -123,6 +125,10 @@ function render(preserveScroll = true): void {
   if (activeTab === "game" && !state.game?.available) activeTab = "home";
   renderedSnapshotKey = snapshotRenderKey(state);
   dropUi.update();
+  if (state.guest || guestScreen) {
+    renderGuestScreen(root, state, run, () => { guestScreen = false; render(); });
+    return;
+  }
   if (shouldShowLogin(state)) {
     renderLogin();
     return;
@@ -195,6 +201,7 @@ function renderLogin(): void {
         ${loginWaiting ? renderLoginMatch() : ""}
         ${loginWaiting && authorizationUri ? `<button class="button compact login-secondary" id="reopen-login-button">${icon("external")} ${approvalRequested ? "Подтвердить в браузере" : "Повторно открыть подтверждение"}</button>` : ""}
         ${!loginWaiting ? `<button class="button login-secondary" id="qr-login-button">${icon("qr")} Вход по QR-коду</button>` : ""}`}
+        <button class="button login-secondary" id="guest-open">Получить интернет от телефона</button>
         <div class="login-status">${escapeHtml(state?.statusDetail ?? (loginWaiting && !authorizationMatch ? "Завершите вход в открывшемся браузере" : ""))}</div>
       </section>
     </main>`;
@@ -202,6 +209,7 @@ function renderLogin(): void {
     if (authorizationTelegramUri) void run(() => window.levik.openExternal(authorizationTelegramUri as string));
   });
   document.getElementById("login-button")?.addEventListener("click", () => void beginLogin("browser"));
+  document.getElementById("guest-open")?.addEventListener("click", () => { guestScreen = true; render(); });
   document.getElementById("qr-login-button")?.addEventListener("click", () => void beginLogin("qr"));
   document.getElementById("cancel-login-button")?.addEventListener("click", () => {
     void run(() => window.levik.cancelLogin());
@@ -428,7 +436,7 @@ function applyGameFilter(): void {
 
 function renderHome(): string {
   if (!state) return "";
-  if (state.game?.only) return renderGameOnlyHome();
+  if (state.game?.only) return `<section class="compact-card card guest-entry"><div><h2 class="card-title">Интернет от телефона</h2><p class="card-caption">Гостевой режим доступен без отдельной VPN-подписки.</p></div><button class="button" id="guest-open">Открыть</button></section>${renderGameOnlyHome()}`;
   const connected = state.status === "connected";
   const transitional = ["connecting", "disconnecting", "reconnecting"].includes(state.status);
   const disconnectAction = ["connected", "connecting", "reconnecting"].includes(state.status) || (state.status === "error" && state.settings.killSwitch);
@@ -436,6 +444,7 @@ function renderHome(): string {
   return `
     <header class="page-header"><div><h1>Главная</h1><div class="subtitle">${state.game?.only ? "Тариф Levik Game" : "Защищённый доступ к интернету"}</div></div></header>
     ${renderGameOnlyNotice()}
+    <section class="compact-card card guest-entry"><div><h2 class="card-title">Интернет от телефона</h2><p class="card-caption">Подключение к раздаче Levik по приглашению и инструкция для ручного прокси.</p></div><button class="button" id="guest-open">Открыть</button></section>
     <div class="home-grid">
       <section class="connection-card card">
         <div class="connection-label">Состояние соединения</div>
@@ -1191,6 +1200,7 @@ function navButton(tab: AppTab, label: string, iconName: IconName): string {
 }
 
 function bindCommonEvents(): void {
+  document.getElementById("guest-open")?.addEventListener("click", () => { guestScreen = true; render(); });
   document.querySelectorAll<HTMLElement>("[data-vpn-trial]").forEach((button) => button.addEventListener("click", () => void run(() => window.levik.openCabinet("/dashboard"))));
   document.getElementById("game-only-off")?.addEventListener("click", () => void run(() => window.levik.updateSettings({ gameEnabled: false })));
   document.querySelectorAll<HTMLElement>("[data-tab]").forEach((button) => button.addEventListener("click", () => {

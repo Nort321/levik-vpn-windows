@@ -33,6 +33,63 @@ import { buildXrayConfig } from "../src/main/vpn/xrayConfig";
 import { compiledServiceRoutes } from "../src/main/vpn/serviceRoutes";
 import type { MainSwitchResult } from "../src/main/vpn/serviceRouteSession";
 
+describe("AppController guest isolation", () => {
+  it("never restores an account tunnel while a guest connection owns the core", async () => {
+    const controller = new AppController();
+    const retry = vi.fn(async () => {});
+    Reflect.set(controller, "guestConnection", { active: true, retry });
+    const load = vi.fn();
+    Reflect.set(controller, "loadTunnelProfile", load);
+    await controller.connect("resume");
+    expect(retry).not.toHaveBeenCalled();
+    await controller.connect("user");
+    expect(retry).toHaveBeenCalledOnce();
+    expect(load).not.toHaveBeenCalled();
+  });
+
+  it("account expiry and delayed Home actions cannot release guest protection", async () => {
+    const controller = new AppController();
+    Reflect.set(controller, "guestConnection", { active: true });
+    const disconnectGuest = vi.spyOn(controller, "disconnectGuest").mockResolvedValue();
+    const stop = Reflect.get(controller, "stopConnection") as (by: string, code: string | null) => Promise<void>;
+    await stop.call(controller, "error", "auth_deadline");
+    await stop.call(controller, "system", "home");
+    expect(disconnectGuest).not.toHaveBeenCalled();
+    await stop.call(controller, "user", "user");
+    expect(disconnectGuest).toHaveBeenCalledOnce();
+  });
+
+  it("a profile response already in flight cannot replace a newly started guest", async () => {
+    const controller = new AppController();
+    const guest = { active: false };
+    Reflect.set(controller, "guestConnection", guest);
+    Reflect.set(controller, "accessToken", "token");
+    const originalProfile = { profileId: "original" };
+    Reflect.set(controller, "profile", originalProfile);
+    let finish: ((value: unknown) => void) | undefined;
+    Reflect.set(controller, "api", { tunnelProfile: () => new Promise((resolve) => { finish = resolve; }) });
+    const prepare = vi.fn();
+    Reflect.set(controller, "applyTunnelProfile", prepare);
+    const load = Reflect.get(controller, "loadTunnelProfile") as (id: string) => Promise<void>;
+    const pending = load.call(controller, "subscription");
+    guest.active = true;
+    finish?.({ profile: "must-not-be-decrypted" });
+    await pending;
+    expect(prepare).not.toHaveBeenCalled();
+    expect(Reflect.get(controller, "profile")).toBe(originalProfile);
+  });
+
+  it("synced account settings cannot turn off a guest's boundary", async () => {
+    const controller = new AppController();
+    Reflect.set(controller, "guestConnection", { active: true });
+    const disable = vi.fn();
+    Reflect.set(controller, "killSwitch", { disable });
+    await controller.updateSettings({ killSwitch: false }, "sync");
+    expect(disable).not.toHaveBeenCalled();
+    await expect(controller.updateSettings({ killSwitch: false })).rejects.toThrow("гостевой");
+  });
+});
+
 describe("AppController login lifecycle", () => {
   it("does not resume login after cancellation while the challenge is pending", async () => {
     let resolveChallenge: ((challenge: AuthChallengeResponse) => void) | undefined;

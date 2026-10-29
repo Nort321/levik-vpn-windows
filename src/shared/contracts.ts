@@ -1,6 +1,7 @@
 import type { ServiceRouteStatus } from "./serviceRoutes";
 import type { DropAnswer, DropControl, DropSnapshot } from "./drop";
 import type { RemoteCommand, RemoteSnapshot } from "./remote";
+import type { GuestSnapshot } from "./sharing";
 
 export type AppTab = "home" | "servers" | "game" | "stats" | "profile";
 export type ConnectionStatus = "disconnected" | "connecting" | "connected" | "reconnecting" | "disconnecting" | "error";
@@ -181,6 +182,8 @@ export interface AppSettings {
 }
 
 export interface AppSnapshot {
+  /** Temporary local phone access, independent of the signed-in account. No credentials. */
+  guest?: GuestSnapshot | null;
   hotSwitch?: HotSwitchSnapshot | null;
   /** Installed, authorized targets that can be selected without restarting the core. */
   hotSwitchServerIds?: string[];
@@ -275,6 +278,9 @@ export interface PendingApproval {
 export type ApprovalAnswerResult = "approved" | "declined";
 
 export interface LevikDesktopApi {
+  connectGuest(invitation: string): Promise<void>;
+  disconnectGuest(): Promise<void>;
+  importGuestInvite(): Promise<void>;
   measureGameRoutes(): Promise<void>;
   snapshot(): Promise<AppSnapshot>;
   login(openExternal?: boolean): Promise<LoginChallenge>;
@@ -343,6 +349,9 @@ export interface LevikDesktopApi {
 }
 
 export const IPC = {
+  connectGuest: "levik:connect-guest",
+  disconnectGuest: "levik:disconnect-guest",
+  importGuestInvite: "levik:import-guest-invite",
   measureGameRoutes: "levik:measure-game-routes",
   snapshot: "levik:snapshot",
   login: "levik:login",

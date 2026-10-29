@@ -38,6 +38,8 @@ import { SecureStore } from "./security/secureStore";
 import { decryptTunnelProfile, prepareTunnelProfile, ruleRoutingKey } from "./vpn/tunnelProfile";
 import type { PreparedTunnelProfile } from "./vpn/tunnelProfile";
 import { buildXrayConfig } from "./vpn/xrayConfig";
+import { GuestConnection } from "./vpn/guestConnection";
+import { guestInterface, parseGuestInvitation } from "./vpn/guestSession";
 import { CoreStartError, XrayManager } from "./vpn/xrayManager";
 import { FAILED_TRAFFIC_CHECK_MS, isTunnelHealthy, measureTraffic } from "./vpn/tunnelHealth";
 import {
@@ -270,6 +272,26 @@ export class AppController extends EventEmitter<AppControllerEvents> {
   private readonly killSwitch = new WindowsKillSwitch(() => this.xray.executablePath(), {
     tuicExecutablePath: () => this.xray.tuicExecutablePath(),
   });
+  private readonly guestConnection = new GuestConnection({
+    interfaceFor: guestInterface,
+    enableProtection: async () => {
+      await this.killSwitch.enable();
+      await this.dnsLeakProtection.enable();
+    },
+    protectionActive: () => this.killSwitch.isActive(),
+    // Capture IPv6 in TUN and block it explicitly; the phone endpoint itself is IPv4.
+    start: (config, name, current) => this.xray.start(config, undefined, [], current, { name, ipv6: true }),
+    allowTunnel: () => this.killSwitch.allowTunnel(),
+    healthy: () => isTunnelHealthy(),
+    stop: () => this.xray.stop(),
+    releaseProtection: () => this.releaseProtection(),
+    changed: (guest, statusDetail) => this.patch({ guest, statusDetail,
+      status: !guest ? "disconnected" : guest.phase === "connected" ? "connected" : guest.phase === "connecting" ? "connecting" : "error",
+      busy: guest?.phase === "connecting",
+      sessionStartedAt: guest?.phase === "connected" ? Date.now() : null,
+      hotSwitch: null, hotSwitchServerIds: [], serviceRoutes: null, serviceRouteDetails: [],
+    }),
+  });
   // The Kill Switch lets xray.exe out, so «past the VPN» works with it on.
   private readonly homeRoad = new HomeRoadExit({
     xrayPath: () => this.xray.executablePath(),
@@ -446,7 +468,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
           state: resource?.state ?? "unknown", resourceHeadroom: resource?.resourceHeadroom ?? null,
           ...(resource?.id ? { routeId: resource.id } : {}) }];
       })),
-      canTransfer: () => this.state.settings.automaticServer && this.state.status === "connected" && !this.gamePlaying && !this.liveMatch(),
+      canTransfer: () => !this.guestConnection.active && this.state.settings.automaticServer && this.state.status === "connected" && !this.gamePlaying && !this.liveMatch(),
       networkKey: () => this.protocolHistory.networkKey(),
       report: (update) => this.smartAutoLiveChanged(update),
     });
@@ -537,7 +559,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     this.startKillSwitchHealthMonitor();
     this.tunnelHealthTimer = setInterval(() => void this.verifyTunnelHealth(), 15_000);
     this.gameMonitor = setInterval(() => {
-      if (this.state.status === "connected" && this.state.settings.gameEnabled) {
+      if (!this.guestConnection.active && this.state.status === "connected" && this.state.settings.gameEnabled) {
         void this.measureGameRoutes().catch(() => {});
       }
     }, 60_000);
@@ -626,6 +648,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
   }
 
   async beginLogin(): Promise<LoginChallenge> {
+    if (this.guestConnection.active) throw new Error("Завершите гостевой режим перед входом в аккаунт.");
     if (this.state.busy) throw new Error("Дождитесь завершения текущей операции");
     let generation = this.loginGeneration;
     this.patch({ busy: true, statusDetail: null });
@@ -684,9 +707,11 @@ export class AppController extends EventEmitter<AppControllerEvents> {
   }
 
   async refreshAccount(): Promise<void> {
+    if (this.guestConnection.active) return;
     this.patch({ busy: true });
     try {
       const response = await this.withSession((token) => this.api.account(token));
+      if (this.guestConnection.active) return;
       const account = mapAccount(response);
       const preferred = this.state.selectedSubscriptionId;
       const subscriptionId = account.subscriptions.some((item) => item.uuid === preferred)
@@ -700,11 +725,12 @@ export class AppController extends EventEmitter<AppControllerEvents> {
       void this.checkExpiry();
       if (subscriptionId) await this.loadTunnelProfile(subscriptionId);
     } finally {
-      this.patch({ busy: false });
+      if (!this.guestConnection.active) this.patch({ busy: false });
     }
   }
 
   async selectSubscription(subscriptionId: string): Promise<void> {
+    if (this.guestConnection.active) throw new Error("Сначала завершите гостевой режим.");
     if (this.routeProbeAbort) this.cancelRouteProbes();
     if (!this.state.account?.subscriptions.some((item) => item.uuid === subscriptionId)) {
       throw new Error("Подписка не найдена");
@@ -725,6 +751,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
   }
 
   async selectServer(serverId: string): Promise<void> {
+    if (this.guestConnection.active) throw new Error("Сначала завершите гостевой режим.");
     if (this.routeProbeAbort) this.cancelRouteProbes();
     const server = this.state.servers.find((item) => item.id === serverId);
     if (!server) throw new Error("Сервер не найден");
@@ -745,6 +772,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
 
   /** The user picked a server in the list: Smart Auto stops choosing for them. */
   async chooseServer(serverId: string): Promise<void> {
+    if (this.guestConnection.active) throw new Error("Сначала завершите гостевой режим.");
     if (!this.state.servers.some((item) => item.id === serverId)) throw new Error("Сервер не найден");
     const replacing = this.manualSwitchPending !== null;
     const intent = ++this.manualSwitchIntent;
@@ -760,6 +788,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
 
   /** The user picked a country: its best server, chosen by hand from then on. */
   async chooseCountry(countryCode: string): Promise<void> {
+    if (this.guestConnection.active) throw new Error("Сначала завершите гостевой режим.");
     if (!countryServers(this.state.servers, countryCode).length) throw new Error("Страна не найдена");
     const replacing = this.manualSwitchPending !== null;
     const intent = ++this.manualSwitchIntent;
@@ -834,6 +863,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
    * Smart Auto picks the server now and on every connection.
    */
   async selectAutomatic(): Promise<void> {
+    if (this.guestConnection.active) throw new Error("Сначала завершите гостевой режим.");
     this.manualSwitchIntent += 1;
     this.manualSwitchPending = null;
     this.patch({ hotSwitch: null });
@@ -853,6 +883,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
    * of the country that is already selected stays.
    */
   async selectCountry(countryCode: string): Promise<void> {
+    if (this.guestConnection.active) throw new Error("Сначала завершите гостевой режим.");
     const servers = countryServers(this.state.servers, countryCode);
     if (!servers.length) throw new Error("Страна не найдена");
     if (servers.some((server) => server.id === this.state.selectedServerId)) return;
@@ -861,7 +892,33 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     if (best) await this.selectServer(best.id);
   }
 
+  async connectGuest(raw: string): Promise<void> {
+    const invitation = parseGuestInvitation(raw);
+    await this.tunnelOperation;
+    if (this.guestConnection.active) throw new Error("Сначала завершите текущее гостевое подключение.");
+    if (this.state.busy || this.connectionRequested()) throw new Error("Сначала отключите текущее VPN-подключение, затем подключитесь через телефон.");
+    if (this.state.elevated === false) throw new Error(NOT_ELEVATED_MESSAGE);
+    if (this.state.homeRoad?.enabled) throw new Error("Сначала выключите «Дорогу домой», чтобы получать интернет от телефона.");
+    this.cancelLogin();
+    this.cancelRouteProbes();
+    this.cancelTunnelRecovery();
+    this.lastConfig = null;
+    this.lastTuic = undefined;
+    this.resetTrafficStats();
+    this.liveEvents?.stop();
+    void this.withdrawPresence().catch(() => {});
+    return this.guestConnection.connect(invitation);
+  }
+
+  async disconnectGuest(): Promise<void> {
+    if (!this.guestConnection.active) return;
+    await this.guestConnection.disconnect();
+    this.startLiveEvents();
+    this.reportPresenceSoon(true);
+  }
+
   async connect(trigger: SessionTrigger = "user"): Promise<void> {
+    if (this.guestConnection.active) return trigger === "user" ? this.guestConnection.retry() : undefined;
     if (this.xray.isRunning() || this.state.status === "connecting") return;
     const intent = ++this.connectionIntent;
     if (this.state.elevated === false) {
@@ -915,6 +972,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
   }
 
   private async connectTunnel(generation: number, failed: Set<string> = new Set()): Promise<void> {
+    if (this.guestConnection.active) return;
     if (generation !== this.connectionGeneration || this.xray.isRunning()) return;
     const server = this.selectedServer();
     if (!server || !this.profile) throw new Error("Выберите VPN-сервер");
@@ -1013,12 +1071,16 @@ export class AppController extends EventEmitter<AppControllerEvents> {
   }
 
   disconnect(): Promise<void> {
+    if (this.guestConnection.active) return this.disconnectGuest();
     this.cancelRouteProbes();
     this.smartLadder.reset();
     return this.stopConnection("user", "user");
   }
 
   private stopConnection(by: EndBy, code: string | null): Promise<void> {
+    // Account expiry and background Home decisions never release a guest's boundary.
+    if (this.guestConnection.active) return (by === "user" && code === "user") || (by === "system" && code === null)
+      ? this.disconnectGuest() : Promise.resolve();
     this.cancelRouteProbes();
     void this.telemetry.finish(by, code);
     this.cancelTunnelRecovery();
@@ -1050,6 +1112,10 @@ export class AppController extends EventEmitter<AppControllerEvents> {
 
   /** Settings changed here ("user") or by another device of the account ("sync"). */
   async updateSettings(patch: Partial<AppSettings>, origin: "user" | "sync" = "user"): Promise<void> {
+    if (this.guestConnection.active) {
+      if (origin === "sync") return;
+      throw new Error("Завершите гостевой режим перед изменением настроек VPN.");
+    }
     this.invalidateRouteMeasurements();
     const previous = this.state.settings;
     const next = validateSettings({ ...previous, ...patch });
@@ -1419,6 +1485,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
   private async loadTunnelProfile(subscriptionId: string): Promise<void> {
     this.invalidateRouteMeasurements();
     const response = await this.withSession((token) => this.api.tunnelProfile(token, subscriptionId));
+    if (this.guestConnection.active) return;
     const plaintext = decryptTunnelProfile(this.identity, response.profile);
     try {
       const profile = prepareTunnelProfile(plaintext, subscriptionId);
@@ -1492,6 +1559,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
   }
 
   private async backgroundTick(): Promise<void> {
+    if (this.guestConnection.active) return;
     const now = Date.now();
     void this.endpointsStore.refresh(ENDPOINTS_REFRESH_MS);
     const stored = this.remoteStored;
@@ -1523,6 +1591,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
    * until it leaves.
    */
   private async checkHome(): Promise<void> {
+    if (this.guestConnection.active) return;
     if (!this.accessToken) return;
     const now = Date.now();
     const asleep = this.homePolicy.asleep;
@@ -1569,6 +1638,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
   }
 
   private async applyHome(action: HomeAction): Promise<void> {
+    if (this.guestConnection.active) return;
     if (action.kind === "sleep") {
       if (this.xray.serviceRoutes?.active) return;
       this.homeAddresses = localAddresses().join(",");
@@ -1585,6 +1655,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
 
   /** «Пускать ко мне домой», docs/app-platform.md "Home road". */
   async setHomeRoad(enabled: boolean): Promise<void> {
+    if (this.guestConnection.active) throw new Error("Сначала завершите гостевой режим.");
     const task = this.homeRoadChain.then(async () => {
       const key = enabled ? (await this.homeRoadKey()).publicKey : null;
       const response = await this.withSession((token) => this.api.setRoadExit(token, key));
@@ -1607,6 +1678,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
   }
 
   private async applyHomeRoad(response: RoadExitResponse, rekeyed = false): Promise<void> {
+    if (this.guestConnection.active) return;
     if (!this.accessToken) return;
     this.lastHomeRoadAt = Date.now();
     this.homeRoadAvailable = response.available === true;
@@ -1681,6 +1753,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
   }
 
   private startLiveEvents(): void {
+    if (this.guestConnection.active) return;
     if (!this.accessToken) return;
     this.liveEvents?.start();
     // Signed in: this computer can receive files (docs/levik-drop.md "Platforms").
@@ -1689,6 +1762,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
 
   /** docs/app-platform.md "Live events": every event names what to fetch again. */
   private handleLiveEvent(event: LiveEvent): void {
+    if (this.guestConnection.active) return;
     switch (event) {
       case "ready":
       case "resync":
@@ -1825,6 +1899,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
   }
 
   private serviceRouteStatusChanged(status: ServiceRouteStatus): void {
+    if (this.guestConnection.active) return;
     const profile = this.profile; const token = this.accessToken;
     if (!profile || !token) return;
     const candidates = [this.serviceRouteState.pending(profile.subscriptionId), this.serviceRouteState.good(profile.subscriptionId), profile.serviceRoutes];
@@ -1856,6 +1931,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
   }
 
   private applyServiceRoutes(): Promise<void> {
+    if (this.guestConnection.active) return Promise.resolve();
     if (this.state.busy) {
       if (!this.serviceRoutesRetry) this.serviceRoutesRetry = setTimeout(() => {
         this.serviceRoutesRetry = null; void this.applyServiceRoutes().catch(() => {});
@@ -1867,10 +1943,12 @@ export class AppController extends EventEmitter<AppControllerEvents> {
   }
 
   private async applyServiceRoutesOnce(): Promise<void> {
+    if (this.guestConnection.active) return;
     if (!this.profile || !this.accessToken) return;
     const server = this.selectedServer();
     if (!server) return;
     const changed = await this.refreshServiceRoutePolicy(server);
+    if (this.guestConnection.active) return;
     const profile = this.profile;
     const candidateProfile = this.serviceProfileFor(server); const policy = candidateProfile.serviceRoutes;
     if (!changed || !policy || !serviceExitForServer(policy, server) || !this.xray.isRunning()) return;
@@ -1889,6 +1967,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
       this.patch({ serviceRouteNotice: "Новые правила не прошли проверку; сохранены предыдущие рабочие маршруты." });
       return;
     }
+    if (this.guestConnection.active) return;
     await this.stopTunnelForReplacement();
     try {
       await this.connect();
@@ -1906,11 +1985,13 @@ export class AppController extends EventEmitter<AppControllerEvents> {
   }
 
   private async applyAccountRules(): Promise<void> {
+    if (this.guestConnection.active) return;
     const subscriptionId = this.state.selectedSubscriptionId;
     if (!this.accessToken || !subscriptionId || this.state.busy) return;
     const before = ruleRoutingKey(this.profile);
     try {
       await this.loadTunnelProfile(subscriptionId);
+      if (this.guestConnection.active) return;
       if (ruleRoutingKey(this.profile) === before || !this.xray.isRunning()) return;
       this.addLog("Правила аккаунта изменились: переподключение");
       await this.stopTunnelForReplacement();
@@ -2161,6 +2242,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
 
   /** Coalesces state changes; "force" also repeats an unchanged report. */
   private reportPresenceSoon(force = false): void {
+    if (this.guestConnection.active) return;
     // Only between initialize() and shutdown().
     if (!this.presenceKeepalive) return;
     if (this.presenceTimer) clearTimeout(this.presenceTimer);
@@ -2173,6 +2255,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
   }
 
   private async sendPresence(force: boolean): Promise<void> {
+    if (this.guestConnection.active) return;
     if (!this.accessToken) return;
     if (!this.state.settings.sharePresence) {
       await this.withdrawPresence();
@@ -2502,12 +2585,14 @@ export class AppController extends EventEmitter<AppControllerEvents> {
       serverLatencies: {},
       selectedServerId: null,
       selectedSubscriptionId: null,
-      statusDetail,
+      statusDetail: this.guestConnection.active ? this.state.statusDetail : statusDetail,
       homeRoad: null,
     });
   }
 
   private handleCoreLog(line: string): void {
+    // Guest core diagnostics can contain local endpoints; never persist them or invitation credentials.
+    if (this.guestConnection.active) return;
     this.addLog(line);
     const code = classifyCoreLogLine(line);
     if (!code) return;
@@ -2516,6 +2601,10 @@ export class AppController extends EventEmitter<AppControllerEvents> {
   }
 
   private handleXrayExit(code: number | null, expected: boolean): void {
+    if (this.guestConnection.active) {
+      if (!expected) this.guestConnection.coreExited();
+      return;
+    }
     if (!expected) this.telemetry.record((session) => session.coreExit(code, false));
     // Startup/recovery failures are handled by the operation awaiting start().
     if (expected || this.state.status !== "connected" || !this.lastConfig) return;
@@ -2538,6 +2627,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
   }
 
   private beginTunnelRecovery(detail: string, cause: AttemptCause | null = null): void {
+    if (this.guestConnection.active) return;
     this.cancelManualSwitch();
     this.recoveryHeldForMatch = false;
     this.cancelGameProbes();
@@ -2629,6 +2719,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
   }
 
   private async verifyTunnelHealth(immediate = false, cause: AttemptCause | null = null): Promise<void> {
+    if (this.guestConnection.active) return this.guestConnection.probe();
     if (this.tunnelHealthCheckRunning || this.state.status !== "connected") return;
     const generation = this.connectionGeneration;
     const selection = this.manualSwitchIntent, routes = this.xray.serviceRoutes, mainServerId = routes?.mainServerId;
@@ -2750,6 +2841,10 @@ export class AppController extends EventEmitter<AppControllerEvents> {
   }
 
   private handleTrafficStats(downloadBytes: number, uploadBytes: number): void {
+    if (this.guestConnection.active) {
+      this.patch({ downloadBytes, uploadBytes });
+      return;
+    }
     if (this.state.settings.gameEnabled && this.profile?.subscriptionExpiresAt
       && !(Date.parse(this.profile.subscriptionExpiresAt) > Date.now()) && !this.enforcingGameExpiry) {
       this.enforcingGameExpiry = true;
@@ -2841,6 +2936,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
   }
 
   private async startXray(config: Record<string, unknown>, generation: number): Promise<void> {
+    if (this.guestConnection.active) throw new Error("Гостевой режим уже управляет подключением.");
     this.assertCurrentConnection(generation);
     // Recovery can restart a retained config after its source profile changed.
     // Keep the original fingerprint for retained configs, capture new builds once.
@@ -3016,11 +3112,12 @@ export class AppController extends EventEmitter<AppControllerEvents> {
 
   private killSwitchProtectionRequired(): boolean {
     return this.killSwitchHealthTimer !== null
-      && this.state.settings.killSwitch
+      && (this.guestConnection.active || this.state.settings.killSwitch)
       && ["connecting", "connected", "reconnecting", "error"].includes(this.state.status);
   }
 
   private async stopTunnelForReplacement(): Promise<void> {
+    if (this.guestConnection.active) throw new Error("Сначала завершите гостевой режим.");
     this.cancelRouteProbes();
     this.cancelTunnelRecovery();
     this.nextAttemptCause = "server_switch";
@@ -3031,6 +3128,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
   }
 
   private connectionRequested(): boolean {
+    if (this.guestConnection.active) return false;
     return this.xray.isRunning() || ["connecting", "connected", "reconnecting"].includes(this.state.status)
       || (this.state.status === "error" && this.killSwitch.isActive());
   }
@@ -3182,6 +3280,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
    * is idle, and two minutes before the start at the latest. docs/app-platform.md.
    */
   private async checkMaintenance(): Promise<void> {
+    if (this.guestConnection.active) return;
     const now = Date.now();
     const marked = this.serverMaintenance(now);
     if (JSON.stringify(marked) !== JSON.stringify(this.state.serverMaintenance)) this.patch({ serverMaintenance: marked });

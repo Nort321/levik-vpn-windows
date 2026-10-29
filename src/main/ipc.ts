@@ -1,11 +1,13 @@
 import { clipboard, dialog, ipcMain, shell } from "electron";
-import type { BrowserWindow } from "electron";
+import type { BrowserWindow, IpcMainInvokeEvent } from "electron";
 import { IPC, isDiagnosisAction } from "../shared/contracts";
 import { isDropAnswer, isDropControl } from "../shared/drop";
 import { isRemoteCommand } from "../shared/remote";
 import type { AppSettings, CabinetTarget } from "../shared/contracts";
 import { AppController } from "./appController";
 import { isAbsolute } from "node:path";
+import { open } from "node:fs/promises";
+import { GUEST_INVITE_MAX_LENGTH } from "../shared/sharing";
 import { listWindowsProcesses, windowsProcessFromPath } from "./windows/processes";
 import { isAllowedExternalUrl, isCabinetTarget } from "./platform/links";
 
@@ -15,6 +17,31 @@ export interface AppLifecycle {
 }
 
 export function registerIpc(controller: AppController, window: BrowserWindow, lifecycle: AppLifecycle): void {
+  const requireGuestCaller = (event: IpcMainInvokeEvent): void => {
+    if (event.sender !== window.webContents || event.senderFrame !== window.webContents.mainFrame
+      || !event.senderFrame?.url.startsWith("file:")) throw new Error("Недопустимый источник запроса");
+  };
+  ipcMain.handle(IPC.connectGuest, (event, invitation: unknown) => {
+    requireGuestCaller(event);
+    if (typeof invitation !== "string" || invitation.length > GUEST_INVITE_MAX_LENGTH) throw new Error("Некорректное приглашение");
+    return controller.connectGuest(invitation);
+  });
+  ipcMain.handle(IPC.disconnectGuest, (event) => { requireGuestCaller(event); return controller.disconnectGuest(); });
+  ipcMain.handle(IPC.importGuestInvite, async (event) => {
+    requireGuestCaller(event);
+    const result = await dialog.showOpenDialog(window, { title: "Приглашение с телефона", properties: ["openFile", "dontAddToRecent"], filters: [{ name: "Приглашение Levik", extensions: ["txt", "levik"] }] });
+    const path = result.filePaths[0];
+    if (result.canceled || !path) return;
+    const handle = await open(path, "r");
+    const data = Buffer.alloc(GUEST_INVITE_MAX_LENGTH + 1);
+    try {
+      const stat = await handle.stat();
+      if (!stat.isFile() || stat.size > GUEST_INVITE_MAX_LENGTH) throw new Error("Выберите небольшой текстовый файл с приглашением Levik.");
+      const { bytesRead } = await handle.read(data, 0, data.length, 0);
+      if (bytesRead > GUEST_INVITE_MAX_LENGTH) throw new Error("Приглашение слишком большое.");
+      await controller.connectGuest(data.subarray(0, bytesRead).toString("utf8"));
+    } finally { data.fill(0); await handle.close(); }
+  });
   ipcMain.handle(IPC.snapshot, () => controller.snapshot());
   ipcMain.handle(IPC.login, async (_event, shouldOpenExternal: unknown = true) => {
     if (typeof shouldOpenExternal !== "boolean") throw new Error("Некорректный способ входа");
