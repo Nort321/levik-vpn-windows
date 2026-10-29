@@ -9,6 +9,13 @@ export type ThemeMode = "system" | "dark" | "light" | "amoled";
 export type SplitTunnelMode = "off" | "bypass" | "only";
 export type UpdateStatus = "idle" | "checking" | "available" | "downloading" | "downloaded" | "installing" | "upToDate" | "error";
 
+/** Manual main-route selection; the system tunnel remains connected. */
+export interface HotSwitchSnapshot {
+  phase: "preparing" | "applied" | "failed" | "uncertain";
+  targetServerId: string;
+  message: string;
+}
+
 /** A message from Levik VPN shown in every app, docs/app-platform.md. */
 export interface AppAnnouncement {
   id: string;
@@ -174,6 +181,9 @@ export interface AppSettings {
 }
 
 export interface AppSnapshot {
+  hotSwitch?: HotSwitchSnapshot | null;
+  /** Installed, authorized targets that can be selected without restarting the core. */
+  hotSwitchServerIds?: string[];
   serviceRoutes?: ServiceRouteStatus | null;
   serviceRouteNotice?: string | null;
   serviceRouteDetails?: Array<{ label: string; state: "active" | "fallback" | "blocked" | "unavailable"; exitName: string }>;

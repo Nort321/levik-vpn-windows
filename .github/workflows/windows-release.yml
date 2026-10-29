@@ -63,6 +63,9 @@ jobs:
       - run: npm run build
       - run: npm test
 
+      - name: Verify manual HotSwitch on the pinned Windows Xray
+        run: node scripts/smoke-smart-auto-flows.mjs
+
       - name: Verify isolated Windows TUN Game datapath
         run: npm test -- tests/multipath/vlessOutbound.test.ts
         env:

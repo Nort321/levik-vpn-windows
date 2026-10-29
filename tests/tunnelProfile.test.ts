@@ -156,7 +156,9 @@ describe("Windows tunnel profile", () => {
     const outbounds = config.outbounds as Array<Record<string, unknown>>;
     const inbounds = config.inbounds as Array<Record<string, unknown>>;
     const routing = config.routing as { rules: Array<Record<string, unknown>> };
-    expect(config.api).toEqual(expect.objectContaining({ services: ["StatsService"] }));
+    // Ordinary same-core switching uses the private authenticated routing API.
+    expect(config.api).toEqual({ tag: "levik-api", services: ["StatsService", "RoutingService"] });
+    expect(config.api).not.toHaveProperty("listen");
     expect(outbounds.some((outbound) => outbound.tag === "levik-fragment")).toBe(true);
     expect(routing.rules).toContainEqual(expect.objectContaining({ process: ["chrome.exe"], outboundTag: "direct" }));
     expect(routing.rules).toContainEqual(expect.objectContaining({ ip: ["geoip:ru"], outboundTag: "direct" }));

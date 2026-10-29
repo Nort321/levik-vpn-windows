@@ -29,6 +29,9 @@ vi.mock("../src/main/windows/killSwitch", async (importOriginal) => ({
 import { AppController } from "../src/main/appController";
 import { CoreStartError } from "../src/main/vpn/xrayManager";
 import { nodeIdForHost } from "../src/main/platform/favoriteNodes";
+import { buildXrayConfig } from "../src/main/vpn/xrayConfig";
+import { compiledServiceRoutes } from "../src/main/vpn/serviceRoutes";
+import type { MainSwitchResult } from "../src/main/vpn/serviceRouteSession";
 
 describe("AppController login lifecycle", () => {
   it("does not resume login after cancellation while the challenge is pending", async () => {
@@ -993,15 +996,315 @@ describe("Smart Auto control failure isolation", () => {
     Object.assign(state, { status: "connected", selectedServerId: "a" });
     let running = true;
     const recheck = vi.fn(async () => {}), recover = vi.fn();
+    const data = vi.fn(async () => true);
     Reflect.set(controller, "xray", { isRunning: () => running, isHealthy: async () => false,
-      serviceRoutes: { smartAutoActive: true, authentication: {}, refreshAutomatic: recheck } });
+      serviceRoutes: { active: true, smartAutoActive: true, authentication: {}, probeCurrent: data, refreshAutomatic: recheck } });
     Reflect.set(controller, "telemetry", { record: vi.fn() });
     Reflect.set(controller, "beginTunnelRecovery", recover);
     const check = Reflect.get(controller, "verifyTunnelHealth") as (immediate?: boolean) => Promise<void>;
     for (let i = 0; i < 4; i++) await check.call(controller, true);
     expect(recover).not.toHaveBeenCalled(); expect(recheck).toHaveBeenCalledTimes(4);
+    expect(data).toHaveBeenCalledTimes(4);
     expect(controller.snapshot().status).toBe("connected");
     running = false; await check.call(controller, true);
     expect(recover).toHaveBeenCalledOnce();
+  });
+});
+
+async function hotSwitchController() {
+  const fixture = tunnelController();
+  const { controller, xray, first, second } = fixture;
+  await xray.start({});
+  xray.start.mockClear();
+  const profile = Reflect.get(controller, "profile") as ReturnType<typeof prepareTunnelProfile>;
+  const previous = controller.snapshot();
+  const settings = { ...previous.settings, automaticServer: false, gameEnabled: false };
+  Reflect.set(controller, "state", { ...previous, status: "connected", statusDetail: "Защищено через первый сервер",
+    settings, sessionStartedAt: 123_000, downloadBytes: 12_345, uploadBytes: 678 });
+  const config = buildXrayConfig(profile, first, settings, "test-game-password");
+  Reflect.apply(Reflect.get(controller, "rememberInstalledMainSources"), controller, [config]);
+  Reflect.set(controller, "lastConfig", config);
+  const put = vi.fn(async (_key: string, _value: Uint8Array) => {});
+  Reflect.set(controller, "secureStore", { put });
+  let installed = first.id;
+  const routes = {
+    automaticAvailable: true, active: false, policyActive: false, smartAutoActive: false,
+    mainSelectionCertain: true, selectableMainIds: [first.id, second.id],
+    get mainServerId() { return installed; },
+    canSelectMain: vi.fn((id: string) => id === first.id || id === second.id),
+    setAutomaticEnabled: vi.fn(async (_enabled: boolean) => true),
+    selectMain: vi.fn(async (id: string): Promise<MainSwitchResult> => { installed = id; return { status: "applied", serverId: id }; }),
+  };
+  Reflect.set(xray, "serviceRoutes", routes);
+  return { ...fixture, routes, put, config };
+}
+
+function pendingMainSelection() {
+  let resolve: (result: MainSwitchResult) => void = () => { throw new Error("Missing pending switch"); };
+  const promise = new Promise<MainSwitchResult>((complete) => { resolve = complete; });
+  return { promise, resolve };
+}
+
+describe("manual HotSwitch controller", () => {
+  it("publishes and persists the new server only after acknowledgement without replacing the tunnel", async () => {
+    const { controller, routes, xray, killSwitch, dns, first, second, put, config } = await hotSwitchController();
+    const pending = pendingMainSelection();
+    routes.selectMain.mockReturnValueOnce(pending.promise);
+    const operation = controller.chooseServer(second.id);
+    await vi.waitFor(() => expect(routes.selectMain).toHaveBeenCalledWith(second.id));
+    expect(controller.snapshot()).toMatchObject({ status: "connected", selectedServerId: first.id,
+      hotSwitch: { phase: "preparing", targetServerId: second.id }, sessionStartedAt: 123_000 });
+    expect(put).not.toHaveBeenCalled();
+    pending.resolve({ status: "applied", serverId: second.id });
+    await operation;
+    expect(controller.snapshot()).toMatchObject({ status: "connected", selectedServerId: second.id,
+      hotSwitch: { phase: "applied", targetServerId: second.id }, sessionStartedAt: 123_000, downloadBytes: 12_345, uploadBytes: 678 });
+    expect(put).toHaveBeenCalledWith("selected_server", Buffer.from(second.id));
+    expect(compiledServiceRoutes(config)?.automatic?.selectedId).toBe(second.id);
+    expect(xray.start).not.toHaveBeenCalled(); expect(xray.stop).not.toHaveBeenCalled();
+    expect(killSwitch.enable).not.toHaveBeenCalled(); expect(killSwitch.disable).not.toHaveBeenCalled();
+    expect(dns.enable).not.toHaveBeenCalled(); expect(dns.disable).not.toHaveBeenCalled();
+  });
+
+  it("retains the connected selection and never falls back to a restart after a failed hot attempt", async () => {
+    const { controller, routes, xray, first, second, put } = await hotSwitchController();
+    routes.selectMain.mockResolvedValueOnce({ status: "failed" });
+    const replacement = vi.spyOn(controller, "selectServer");
+    await expect(controller.chooseServer(second.id)).rejects.toThrow("Предыдущее подключение сохранено");
+    expect(controller.snapshot()).toMatchObject({ status: "connected", selectedServerId: first.id,
+      hotSwitch: { phase: "failed" }, sessionStartedAt: 123_000 });
+    expect(replacement).not.toHaveBeenCalled(); expect(xray.stop).not.toHaveBeenCalled(); expect(put).not.toHaveBeenCalled();
+  });
+
+  it("reports an uncertain route without claiming that the previous exit was retained", async () => {
+    const { controller, routes, first, second, xray, put } = await hotSwitchController();
+    routes.mainSelectionCertain = false;
+    routes.selectMain.mockResolvedValueOnce({ status: "uncertain" });
+    await expect(controller.chooseServer(second.id)).rejects.toThrow("Не удалось подтвердить маршрут");
+    const state = controller.snapshot();
+    expect(state).toMatchObject({ status: "connected", selectedServerId: first.id, hotSwitch: { phase: "uncertain" } });
+    expect(state.statusDetail).toContain("маршрут не подтверждён");
+    expect(state.hotSwitch?.message).not.toContain("сохранено");
+    expect(xray.stop).not.toHaveBeenCalled(); expect(put).not.toHaveBeenCalled();
+  });
+
+  it("uses the legacy selection only when the target was not offered as HotSwitch", async () => {
+    const { controller, routes, second } = await hotSwitchController();
+    routes.canSelectMain.mockImplementation((id) => id !== second.id);
+    const replacement = vi.spyOn(controller, "selectServer").mockResolvedValue();
+    expect(controller.snapshot().hotSwitchServerIds).not.toContain(second.id);
+    await controller.chooseServer(second.id);
+    expect(replacement).toHaveBeenCalledWith(second.id); expect(routes.selectMain).not.toHaveBeenCalled();
+  });
+
+  it("uses HotSwitch for a manual country choice and disables Auto without resetting the session", async () => {
+    const { controller, routes, second } = await hotSwitchController();
+    const state = controller.snapshot();
+    Reflect.set(controller, "state", { ...state, settings: { ...state.settings, automaticServer: true } });
+    await controller.chooseCountry(second.countryCode);
+    expect(routes.setAutomaticEnabled).toHaveBeenCalledWith(false);
+    expect(routes.selectMain).toHaveBeenCalledWith(second.id);
+    expect(controller.snapshot()).toMatchObject({ selectedServerId: second.id, settings: { automaticServer: false }, sessionStartedAt: 123_000 });
+  });
+
+  it("does nothing for the confirmed current server but allows retrying an uncertain current server", async () => {
+    const { controller, routes, first, xray } = await hotSwitchController();
+    await controller.chooseServer(first.id);
+    expect(routes.selectMain).not.toHaveBeenCalled(); expect(xray.stop).not.toHaveBeenCalled();
+    routes.mainSelectionCertain = false;
+    await controller.chooseServer(first.id);
+    expect(routes.selectMain).toHaveBeenCalledWith(first.id);
+  });
+
+  it("ignores an old switch result and Auto report after a newer manual click", async () => {
+    const { controller, routes, first, second, put } = await hotSwitchController();
+    const pending = pendingMainSelection(); routes.selectMain.mockReturnValueOnce(pending.promise);
+    const old = controller.chooseServer(second.id);
+    await vi.waitFor(() => expect(routes.selectMain).toHaveBeenCalledWith(second.id));
+    await controller.chooseServer(first.id);
+    expect(routes.selectMain).toHaveBeenLastCalledWith(first.id);
+    pending.resolve({ status: "applied", serverId: second.id }); await old;
+    Reflect.apply(Reflect.get(controller, "smartAutoLiveChanged"), controller,
+      [{ currentId: second.id, measurements: {}, switched: true }]);
+    expect(controller.snapshot()).toMatchObject({ selectedServerId: first.id, hotSwitch: { phase: "applied", targetServerId: first.id } });
+    expect(put).not.toHaveBeenCalledWith("selected_server", Buffer.from(second.id));
+  });
+
+  it("does not revive the selection or connection when OFF happens during verification", async () => {
+    const { controller, routes, first, second, put } = await hotSwitchController();
+    const pending = pendingMainSelection(); routes.selectMain.mockReturnValueOnce(pending.promise);
+    const operation = controller.chooseServer(second.id);
+    await vi.waitFor(() => expect(routes.selectMain).toHaveBeenCalled());
+    await controller.disconnect();
+    pending.resolve({ status: "applied", serverId: second.id }); await operation;
+    expect(controller.snapshot()).toMatchObject({ status: "disconnected", selectedServerId: first.id, hotSwitch: null, sessionStartedAt: null });
+    expect(put).not.toHaveBeenCalledWith("selected_server", Buffer.from(second.id));
+  });
+
+  it("keeps a successful switch active when saving the preference fails", async () => {
+    const { controller, routes, second, put, config, xray } = await hotSwitchController();
+    put.mockRejectedValueOnce(new Error("storage unavailable"));
+    await controller.chooseServer(second.id);
+    expect(routes.selectMain).toHaveBeenCalledOnce();
+    expect(controller.snapshot()).toMatchObject({ status: "connected", selectedServerId: second.id, hotSwitch: { phase: "applied" } });
+    expect(controller.snapshot().hotSwitch?.message).toContain("сохранить выбор не удалось");
+    expect(compiledServiceRoutes(config)?.automatic?.selectedId).toBe(second.id); expect(xray.stop).not.toHaveBeenCalled();
+  });
+
+  it.each(["endpoint", "credentials"] as const)("requires a reconnect when a refreshed target reuses its id with different %s", async (change) => {
+    const { controller, routes, second } = await hotSwitchController();
+    const state = controller.snapshot();
+    const profile = Reflect.get(controller, "profile") as ReturnType<typeof prepareTunnelProfile>;
+    const changed = { ...second, outbound: { ...second.outbound, settings: change === "endpoint"
+      ? { vnext: [{ address: "new.example", port: 8443 }] } : { vnext: [{ address: "second.example", port: 443,
+        users: [{ id: "22222222-2222-4222-8222-222222222222", encryption: "none" }] }] } } };
+    const servers = state.servers.map((server) => server.id === second.id ? changed : server);
+    Reflect.set(controller, "profile", { ...profile, servers });
+    Reflect.set(controller, "state", { ...state, servers });
+    const replacement = vi.spyOn(controller, "selectServer").mockResolvedValue();
+    expect(controller.snapshot().hotSwitchServerIds).not.toContain(second.id);
+    await controller.chooseServer(second.id);
+    expect(replacement).toHaveBeenCalledWith(second.id); expect(routes.selectMain).not.toHaveBeenCalled();
+  });
+
+  it("cancels a pending manual display when Auto is chosen and ignores the late result", async () => {
+    const { controller, routes, first, second } = await hotSwitchController();
+    const pending = pendingMainSelection(); routes.selectMain.mockReturnValueOnce(pending.promise);
+    Reflect.set(routes, "refreshAutomatic", vi.fn(async () => {}));
+    Reflect.set(controller, "refreshLiveLoad", vi.fn(async () => {}));
+    const operation = controller.chooseServer(second.id);
+    await vi.waitFor(() => expect(routes.selectMain).toHaveBeenCalled());
+    await controller.selectAutomatic();
+    pending.resolve({ status: "applied", serverId: second.id }); await operation;
+    expect(routes.setAutomaticEnabled).toHaveBeenCalledWith(true);
+    expect(controller.snapshot()).toMatchObject({ settings: { automaticServer: true }, selectedServerId: first.id, hotSwitch: null });
+  });
+
+  it("cancels the owner selection before replacing the profile during verification", async () => {
+    const { controller, routes, second, first } = await hotSwitchController();
+    const pending = pendingMainSelection(); routes.selectMain.mockReturnValueOnce(pending.promise);
+    const operation = controller.chooseServer(second.id);
+    await vi.waitFor(() => expect(routes.selectMain).toHaveBeenCalled());
+    const profile = Reflect.get(controller, "profile") as ReturnType<typeof prepareTunnelProfile>;
+    Reflect.set(controller, "reconcileFavorites", vi.fn(async () => {}));
+    await Reflect.apply(Reflect.get(controller, "applyTunnelProfile"), controller, [{ ...profile }]);
+    pending.resolve({ status: "applied", serverId: second.id }); await operation;
+    expect(routes.setAutomaticEnabled).toHaveBeenCalledWith(false);
+    expect(controller.snapshot()).toMatchObject({ selectedServerId: first.id, hotSwitch: null });
+  });
+
+  it("captures the immutable source pool when starting a newly built recovery config", async () => {
+    const { controller, first, second } = await hotSwitchController();
+    const profile = Reflect.get(controller, "profile") as ReturnType<typeof prepareTunnelProfile>;
+    const config = buildXrayConfig(profile, first, controller.snapshot().settings, "test-game-password");
+    Reflect.set(controller, "lastConfig", config);
+    expect(controller.snapshot().hotSwitchServerIds).toEqual([]);
+    await Reflect.apply(Reflect.get(controller, "startXray"), controller,
+      [config, Reflect.get(controller, "connectionGeneration")]);
+    expect(controller.snapshot().hotSwitchServerIds).toContain(second.id);
+  });
+
+  it("does not relabel an old retained recovery config with a refreshed profile's credentials", async () => {
+    const { controller, second, config } = await hotSwitchController();
+    const profile = Reflect.get(controller, "profile") as ReturnType<typeof prepareTunnelProfile>;
+    const changed = { ...second, outbound: { ...second.outbound, settings: { vnext: [{ address: "replacement.example", port: 443 }] } } };
+    const servers = profile.servers.map((server) => server.id === second.id ? changed : server);
+    Reflect.set(controller, "profile", { ...profile, servers });
+    Reflect.set(controller, "state", { ...controller.snapshot(), servers });
+    await Reflect.apply(Reflect.get(controller, "startXray"), controller,
+      [config, Reflect.get(controller, "connectionGeneration")]);
+    expect(controller.snapshot().hotSwitchServerIds).not.toContain(second.id);
+  });
+
+  it("keeps route uncertainty visible even if another action cleared the local notice", async () => {
+    const { controller, routes } = await hotSwitchController();
+    routes.mainSelectionCertain = false;
+    const snapshot = controller.snapshot();
+    expect(snapshot.hotSwitch).toMatchObject({ phase: "uncertain" });
+    expect(snapshot.hotSwitch?.message).toContain("Переподключитесь или повторите выбор");
+  });
+
+  it("clears preparation when eligibility is withdrawn during verification without changing the core generation", async () => {
+    const { controller, routes, second, first } = await hotSwitchController();
+    const pending = pendingMainSelection(); routes.selectMain.mockReturnValueOnce(pending.promise);
+    const operation = controller.chooseServer(second.id);
+    await vi.waitFor(() => expect(routes.selectMain).toHaveBeenCalled());
+    routes.canSelectMain.mockReturnValue(false);
+    pending.resolve({ status: "cancelled" }); await operation;
+    expect(controller.snapshot()).toMatchObject({ status: "connected", selectedServerId: first.id, hotSwitch: null });
+  });
+});
+
+async function controlledHealth(active: boolean) {
+  const fixture = await hotSwitchController();
+  const { controller, routes, xray } = fixture;
+  routes.active = active;
+  const data = vi.fn(async () => true), recover = vi.fn();
+  Reflect.set(routes, "authentication", {});
+  Reflect.set(routes, "probeCurrent", data);
+  const originalRecovery = Reflect.get(controller, "beginTunnelRecovery");
+  Reflect.set(controller, "beginTunnelRecovery", recover);
+  xray.isHealthy.mockResolvedValue(false);
+  return { ...fixture, data, recover, originalRecovery };
+}
+
+describe("HotSwitch health and control failure isolation", () => {
+  it.each([true, false])("uses independent data proof to retain a manual core despite API failure (service policy=%s)", async (active) => {
+    const { controller, data, recover, xray } = await controlledHealth(active);
+    for (let i = 0; i < 4; i++) await checkTunnel(controller, true);
+    expect(data).toHaveBeenCalledTimes(4);
+    expect(xray.isHealthy).toHaveBeenCalledTimes(active ? 4 : 0);
+    expect(recover).not.toHaveBeenCalled(); expect(xray.stop).not.toHaveBeenCalled();
+    expect(controller.snapshot().status).toBe("connected");
+    if (active) expect(controller.snapshot().statusDetail).toContain("Управление маршрутами временно недоступно");
+  });
+
+  it.each([true, false])("recovers genuinely failed data even when the control API replies (service policy=%s)", async (active) => {
+    const { controller, data, recover, xray } = await controlledHealth(active);
+    xray.isHealthy.mockResolvedValue(true); data.mockResolvedValue(false);
+    await checkTunnel(controller); await checkTunnel(controller);
+    expect(recover).not.toHaveBeenCalled();
+    await checkTunnel(controller);
+    expect(recover).toHaveBeenCalledOnce(); expect(data).toHaveBeenCalledTimes(3);
+  });
+
+  it("does not infer an uncertain live route from the last acknowledged target, but still detects core death", async () => {
+    const { controller, routes, data, recover, xray } = await controlledHealth(true);
+    routes.mainSelectionCertain = false;
+    for (let i = 0; i < 4; i++) await checkTunnel(controller, true);
+    expect(data).not.toHaveBeenCalled(); expect(xray.isHealthy).not.toHaveBeenCalled(); expect(recover).not.toHaveBeenCalled();
+    expect(controller.snapshot()).toMatchObject({ status: "connected", hotSwitch: { phase: "uncertain" } });
+    expect(controller.snapshot().statusDetail).toContain("маршрут не подтверждён");
+    await xray.stop(); await checkTunnel(controller, true);
+    expect(recover).toHaveBeenCalledOnce();
+  });
+
+  it("defers health work to an in-flight manual selection while preserving dead-core recovery", async () => {
+    const { controller, routes, data, recover, originalRecovery, xray, second } = await controlledHealth(true);
+    const pending = pendingMainSelection(); routes.selectMain.mockReturnValueOnce(pending.promise);
+    const operation = controller.chooseServer(second.id);
+    await vi.waitFor(() => expect(routes.selectMain).toHaveBeenCalled());
+    await checkTunnel(controller, true);
+    expect(data).not.toHaveBeenCalled(); expect(xray.isHealthy).not.toHaveBeenCalled(); expect(recover).not.toHaveBeenCalled();
+    expect(controller.snapshot().hotSwitch?.phase).toBe("preparing");
+    recover.mockImplementation((...args: unknown[]) => Reflect.apply(originalRecovery, controller, args));
+    await xray.stop(); await checkTunnel(controller, true);
+    expect(recover).toHaveBeenCalledOnce();
+    expect(controller.snapshot()).toMatchObject({ status: "reconnecting", hotSwitch: null });
+    pending.resolve({ status: "cancelled" }); await operation;
+    await controller.disconnect();
+  });
+
+  it("discards a late failed probe of the old target after a successful manual switch", async () => {
+    const { controller, data, recover, xray, second } = await controlledHealth(true);
+    let complete: (value: boolean) => void = () => { throw new Error("Missing probe"); };
+    data.mockImplementationOnce(() => new Promise<boolean>((resolve) => { complete = resolve; }));
+    xray.isHealthy.mockResolvedValue(true);
+    const check = checkTunnel(controller, true);
+    await vi.waitFor(() => expect(data).toHaveBeenCalled());
+    await controller.chooseServer(second.id);
+    complete(false); await check;
+    expect(recover).not.toHaveBeenCalled();
+    expect(controller.snapshot()).toMatchObject({ status: "connected", selectedServerId: second.id, hotSwitch: { phase: "applied" } });
   });
 });

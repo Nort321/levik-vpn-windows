@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
+import { spawn, execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import { randomUUID, randomBytes, createHash } from 'node:crypto';
 import { createServer, connect } from 'node:net';
 import dgram from 'node:dgram';
 import { build } from 'esbuild';
@@ -13,14 +14,15 @@ const repository = fileURLToPath(new URL('../', import.meta.url));
 const bundle = await build({ entryPoints: [join(repository, 'src/main/vpn/serviceRouteTransport.ts')], bundle: true, platform: 'node', format: 'esm', write: false, logLevel: 'silent' });
 const { overrideServiceRoute, queryServiceRouteStatistics } = await import(`data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0].contents).toString('base64')}`);
 const statsBundle = await build({ entryPoints: [join(repository, 'src/main/vpn/xrayStats.ts')], bundle: true, platform: 'node', format: 'esm', write: false, logLevel: 'silent' });
-const { XrayStatsClient } = await import(`data:text/javascript;base64,${Buffer.from(statsBundle.outputFiles[0].contents).toString('base64')}`);
+const { parseXrayStats } = await import(`data:text/javascript;base64,${Buffer.from(statsBundle.outputFiles[0].contents).toString('base64')}`);
+const execute = promisify(execFile);
 const controlBundle = await build({ stdin: { contents: 'export {withServiceRoutes, compiledServiceRoutes} from "./src/main/vpn/serviceRoutes"; export {ServiceRouteSession} from "./src/main/vpn/serviceRouteSession";', resolveDir: repository, sourcefile: 'live-flow-fixture.ts', loader: 'ts' }, bundle: true, platform: 'node', format: 'esm', write: false, logLevel: 'silent' });
 const { withServiceRoutes, compiledServiceRoutes, ServiceRouteSession } = await import(`data:text/javascript;base64,${Buffer.from(controlBundle.outputFiles[0].contents).toString('base64')}`);
 
 const system = process.platform === 'darwin' ? 'darwin' : process.platform === 'win32' ? 'windows' : process.platform === 'linux' ? 'linux' : null;
 if (!system) throw new Error('Unsupported platform');
 const executable = process.env.LEVIK_SMART_AUTO_XRAY ?? join(repository, 'vendor/xray', `${system}-${process.arch}`, process.platform === 'win32' ? 'xray.exe' : 'xray');
-const sockets = new Set(), servers = [], datagrams = [], children = [], statsClients = [];
+const sockets = new Set(), servers = [], datagrams = [], children = [], owners = [];
 function track(socket) { sockets.add(socket); socket.on('error', () => {}); socket.on('close', () => sockets.delete(socket)); return socket; }
 async function listen(server) {
   await new Promise((resolve,reject) => { server.once('error',reject); server.listen(0,'127.0.0.1',resolve); });
@@ -33,7 +35,12 @@ async function udpEcho(label) {
   await new Promise((resolve,reject)=>{socket.once('error',reject);socket.bind(0,'127.0.0.1',resolve);});
   return socket.address().port;
 }
-async function tcpEcho(label) { return listen(createServer(socket=>{track(socket);socket.on('data',data=>socket.write(Buffer.concat([Buffer.from(label+':'),data])));})); }
+async function tcpEcho(label) { return listen(createServer(socket=>{
+  track(socket);let buffered='';socket.on('data',data=>{
+    buffered+=data.toString();let end;
+    while((end=buffered.indexOf('\n'))>=0){socket.write(`${label}:${buffered.slice(0,end+1)}`);buffered=buffered.slice(end+1);}
+  });
+})); }
 async function start(config,readyPort) {
   const child=spawn(executable,['run','-format','json','-config','stdin:'],{stdio:['pipe','ignore','ignore']});
   children.push(child); child.stdin.on('error',()=>{}); child.stdin.end(JSON.stringify(config));
@@ -116,38 +123,62 @@ async function run(mux,compiledOverlay=false){
     for(const candidate of compiled.automatic.candidates)candidate.port=remap.get(candidate.port);
   }
   const core=await start(launch,user);
+  let owner,failProof=false;
   if(compiledOverlay){
-    const owner=new ServiceRouteSession(()=>{});
-    try{
+    owner=new ServiceRouteSession(()=>{}, {verifyMain:async candidate=>{
+      const flow=await httpFlow(candidate.port,auth);
+      try{assert.equal(await tcpMessage(flow,'preflight'),`${candidate.id}:preflight`);return !failProof;}
+      finally{flow.socket.destroy();}
+    }});
+    owners.push(owner);
       owner.configureSmartAuto({controls:()=>({}),canTransfer:()=>false,networkKey:()=> 'local-fixture',report:()=>{}});
       await owner.start(launch);assert.equal(owner.automaticAvailable,true);assert.equal(owner.smartAutoActive,false);
       await owner.setAutomaticEnabled(true);assert.equal(owner.smartAutoActive,true);
       await owner.setAutomaticEnabled(false);assert.equal(owner.smartAutoActive,false);
       assert.equal(core.exitCode,null,'hot mode changes must preserve core');
-    }finally{owner.stop();}
   }
+  const switchMain=async(id,tag)=>{
+    if(owner)assert.deepEqual(await owner.selectMain(id),{status:'applied',serverId:id});
+    else await overrideServiceRoute('levik-service-main',tag,`127.0.0.1:${api}`);
+  };
   const pid=core.pid;
-  const rawStats=compiledOverlay?null:new XrayStatsClient(`127.0.0.1:${api}`);if(rawStats)statsClients.push(rawStats);
-  const stats={query:async pattern=>compiledOverlay?queryServiceRouteStatistics(auth):rawStats.query(pattern)};
+  const stats={query:async pattern=>compiledOverlay?queryServiceRouteStatistics(auth):parseXrayStats((await execute(executable,['api','statsquery',`--server=127.0.0.1:${api}`,`-pattern=${pattern}`],{timeout:5000})).stdout)};
   const pattern='inbound>>>levik-tun-in>>>traffic>>>';
   const beforeProbe=await stats.query(pattern);
   const probeFlow=await httpFlow(compiledOverlay?compiled.probes[0].port:probe,auth);assert.equal(await tcpMessage(probeFlow,'measurement'),'A:measurement');probeFlow.socket.destroy();
   assert.deepEqual(await stats.query(pattern),beforeProbe,'private route probes must not count as user TUN activity');
   const old=await socksFlow(socks),oldUDP=await udpFlow(socks);
   assert.equal(await tcpMessage(old,'before'),'A:before');assert.equal(await udpMessage(oldUDP,'before'),'A:before');
-  await overrideServiceRoute('levik-service-main','levik-service-endpoint-01',`127.0.0.1:${api}`,auth);
+  const large=await socksFlow(socks);assert.equal(await tcpMessage(large,'large-open'),'A:large-open');
+  const payload=randomBytes(512*1024).toString('base64');const midpoint=Math.floor(payload.length/2);
+  const digest=value=>createHash('sha256').update(value).digest('hex');
+  large.socket.write(payload.slice(0,midpoint));
+  await switchMain('B','levik-service-endpoint-01');
+  large.socket.write(payload.slice(midpoint)+'\n');
+  const delivered=(await large.reader.until('\n')).toString();
+  assert.equal(delivered.slice(0,2),'A:');assert.equal(digest(delivered.slice(2,-1)),digest(payload),'in-flight large transfer must stay intact across HotSwitch');
   assert.equal(await tcpMessage(old,'after'),'A:after');assert.equal(await udpMessage(oldUDP,'after'),'A:after');
   const next=await socksFlow(socks),nextUDP=await udpFlow(socks);
   assert.equal(await tcpMessage(next,'new'),'B:new');assert.equal(await udpMessage(nextUDP,'new'),'B:new');
-  await overrideServiceRoute('levik-service-main','levik-service-endpoint-00',`127.0.0.1:${api}`,auth);
+  if(owner){
+    failProof=true;assert.deepEqual(await owner.selectMain('A'),{status:'failed'});
+    const retained=await socksFlow(socks);assert.equal(await tcpMessage(retained,'failed-switch'),'B:failed-switch');
+    failProof=false;
+  }
+  await switchMain('A','levik-service-endpoint-00');
   assert.equal(await tcpMessage(next,'retained'),'B:retained');assert.equal(await udpMessage(nextUDP,'retained'),'B:retained');
   assert.equal(await tcpMessage(old,'retained'),'A:retained');assert.equal(await udpMessage(oldUDP,'retained'),'A:retained');
+  for(const [id,tag] of [['B','levik-service-endpoint-01'],['A','levik-service-endpoint-00'],['B','levik-service-endpoint-01'],['A','levik-service-endpoint-00']]){
+    await switchMain(id,tag);
+    assert.equal(await tcpMessage(old,'repeated'),'A:repeated');assert.equal(await udpMessage(oldUDP,'repeated'),'A:repeated');
+    assert.equal(await tcpMessage(next,'repeated'),'B:repeated');assert.equal(await udpMessage(nextUDP,'repeated'),'B:repeated');
+  }
   assert.equal(core.pid,pid);assert.equal(core.exitCode,null);
   const userTraffic=await stats.query(pattern);assert.ok(userTraffic.uplink>0&&userTraffic.downlink>0,'real user TCP/UDP must advance TUN activity counters');
-  console.log(JSON.stringify({result:'PASS',mux,compiledOverlay,pidStable:true,existingTCP:'retained',existingUDP:'retained',newTCP:'new target',newUDP:'new target',privateProbesExcluded:true,userTrafficCounted:true}));
+  console.log(JSON.stringify({result:'PASS',mux,compiledOverlay,manualHotSwitch:Boolean(owner),failedPreflightPreservesMain:Boolean(owner),largeTransferChecksum:true,repeatedSwitches:6,pidStable:true,existingTCP:'retained',existingUDP:'retained',newTCP:'new target',newUDP:'new target',privateProbesExcluded:true,userTrafficCounted:true}));
 }
 try{await run(false);await run(true);await run(false,true);await run(true,true);}finally{
-  for(const client of statsClients)client.close();
+  for(const owner of owners)owner.stop();
   for(const socket of sockets)socket.destroy();
   for(const socket of datagrams)try{socket.close();}catch{}
   await Promise.all(children.map(child=>new Promise(resolve=>{if(child.exitCode!==null||child.signalCode!==null)return resolve();child.once('exit',resolve);child.kill();setTimeout(()=>{child.kill('SIGKILL');resolve();},800).unref();})));

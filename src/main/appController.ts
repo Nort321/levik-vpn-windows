@@ -300,6 +300,10 @@ export class AppController extends EventEmitter<AppControllerEvents> {
   private lastConfig: Record<string, unknown> | null = null;
   private lastTuic: TuicEndpoint | undefined;
   private connectionGeneration = 0;
+  private manualSwitchIntent = 0;
+  private manualSwitchPending: number | null = null;
+  private selectedServerWriting: Promise<void> = Promise.resolve();
+  private readonly installedMainSources = new WeakMap<Record<string, unknown>, ReadonlyMap<string, string>>();
   private tunnelOperation: Promise<void> = Promise.resolve();
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private tunnelHealthTimer: ReturnType<typeof setInterval> | null = null;
@@ -612,7 +616,13 @@ export class AppController extends EventEmitter<AppControllerEvents> {
   }
 
   snapshot(): AppSnapshot {
-    return structuredClone(this.state);
+    const installed = this.xray.serviceRoutes?.selectableMainIds;
+    const hotSwitchServerIds = this.state.status === "connected" && installed?.length && this.xray.isRunning()
+      ? installed.filter((id) => this.canManualHotSwitch(id)) : [];
+    const hotSwitch = this.state.status === "connected" && this.xray.serviceRoutes?.mainSelectionCertain === false
+      ? { phase: "uncertain" as const, targetServerId: this.state.hotSwitch?.targetServerId ?? this.state.selectedServerId ?? "",
+        message: "Не удалось подтвердить маршрут. Переподключитесь или повторите выбор." } : this.state.hotSwitch;
+    return structuredClone({ ...this.state, ...(hotSwitch ? { hotSwitch } : {}), hotSwitchServerIds });
   }
 
   async beginLogin(): Promise<LoginChallenge> {
@@ -724,7 +734,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     if (reconnect) await this.stopTunnelForReplacement();
     try {
       this.state.selectedServerId = serverId;
-      await this.secureStore.put("selected_server", Buffer.from(serverId));
+      await this.persistSelectedServer(serverId);
       this.emitChanged();
       if (reconnect && generation === this.connectionGeneration) await this.connect();
     } catch (error) {
@@ -736,15 +746,87 @@ export class AppController extends EventEmitter<AppControllerEvents> {
   /** The user picked a server in the list: Smart Auto stops choosing for them. */
   async chooseServer(serverId: string): Promise<void> {
     if (!this.state.servers.some((item) => item.id === serverId)) throw new Error("Сервер не найден");
-    if (this.state.settings.automaticServer) await this.updateSettings({ automaticServer: false });
-    await this.selectServer(serverId);
+    const replacing = this.manualSwitchPending !== null;
+    const intent = ++this.manualSwitchIntent;
+    this.manualSwitchPending = intent;
+    this.cancelRouteProbes();
+    try {
+      if (this.state.settings.automaticServer) await this.updateSettings({ automaticServer: false });
+      if (intent === this.manualSwitchIntent) await this.chooseManualServer(serverId, intent, replacing);
+    } finally {
+      if (this.manualSwitchPending === intent) this.manualSwitchPending = null;
+    }
   }
 
   /** The user picked a country: its best server, chosen by hand from then on. */
   async chooseCountry(countryCode: string): Promise<void> {
     if (!countryServers(this.state.servers, countryCode).length) throw new Error("Страна не найдена");
-    if (this.state.settings.automaticServer) await this.updateSettings({ automaticServer: false });
-    await this.selectCountry(countryCode);
+    const replacing = this.manualSwitchPending !== null;
+    const intent = ++this.manualSwitchIntent;
+    this.manualSwitchPending = intent;
+    this.cancelRouteProbes();
+    try {
+      if (this.state.settings.automaticServer) await this.updateSettings({ automaticServer: false });
+      if (intent !== this.manualSwitchIntent) return;
+      const servers = countryServers(this.state.servers, countryCode);
+      const selected = servers.find((server) => server.id === this.state.selectedServerId);
+      if (!selected && servers.some((server) => this.state.serverLatencies[server.id] === undefined)) await this.pingServers();
+      if (intent !== this.manualSwitchIntent) return;
+      const best = selected ?? this.bestServer(countryServers(this.state.servers, countryCode));
+      if (best) await this.chooseManualServer(best.id, intent, replacing);
+    } finally {
+      if (this.manualSwitchPending === intent) this.manualSwitchPending = null;
+    }
+  }
+
+  /** Manual routing shares the running owner's queue; recovery keeps selectServer's full replacement path. */
+  private async chooseManualServer(serverId: string, intent: number, replacing: boolean): Promise<void> {
+    const server = this.state.servers.find((item) => item.id === serverId);
+    if (!server) throw new Error("Сервер не найден");
+    if (!this.climbingLadder) this.smartLadder.reset();
+    const routes = this.xray.serviceRoutes;
+    const connected = this.state.status === "connected" && this.xray.isRunning();
+    if (serverId === this.state.selectedServerId && !replacing && routes?.mainSelectionCertain !== false
+      && (!connected || this.canManualHotSwitch(serverId) && routes?.mainServerId === serverId)) {
+      this.patch({ hotSwitch: null });
+      return;
+    }
+    if (!connected || !this.canManualHotSwitch(serverId)) {
+      this.patch({ hotSwitch: null });
+      await this.selectServer(serverId);
+      return;
+    }
+    const generation = this.connectionGeneration;
+    const profile = this.profile, config = this.lastConfig;
+    const current = (): boolean => intent === this.manualSwitchIntent && generation === this.connectionGeneration
+      && this.profile === profile && this.lastConfig === config
+      && this.state.status === "connected" && this.xray.isRunning();
+    this.patch({ hotSwitch: { phase: "preparing", targetServerId: serverId,
+      message: `Проверяем ${server.name}. Текущее подключение продолжает работать.` } });
+    const result = await routes.selectMain(serverId).catch(() => ({
+      status: routes.mainSelectionCertain === false ? "uncertain" as const : "failed" as const,
+    }));
+    if (!current()) return;
+    if (result.status === "applied") {
+      rememberAutomaticMain(this.lastConfig, result.serverId, false);
+      this.state.selectedServerId = result.serverId;
+      this.patch({ statusDetail: this.connectedDetail(server), hotSwitch: { phase: "applied", targetServerId: result.serverId,
+        message: `Новые соединения — через ${server.name}. Ранее открытые могут сохранять прежний выход.` } });
+      try { await this.persistSelectedServer(result.serverId); }
+      catch {
+        if (current()) this.patch({ hotSwitch: { phase: "applied", targetServerId: result.serverId,
+          message: "Сервер переключён, но сохранить выбор не удалось. После перезапуска он может измениться." } });
+      }
+      return;
+    }
+    if (result.status === "cancelled") { this.patch({ hotSwitch: null }); return; }
+    const uncertain = result.status === "uncertain" || routes.mainSelectionCertain === false;
+    const message = uncertain ? "Не удалось подтвердить маршрут. Переподключитесь или повторите выбор."
+      : result.status === "unsupported" ? "Этот переход требует переподключения. Текущее соединение сохранено."
+        : "Не удалось сменить сервер. Предыдущее подключение сохранено.";
+    this.patch({ hotSwitch: { phase: uncertain ? "uncertain" : "failed", targetServerId: serverId, message },
+      ...(uncertain ? { statusDetail: "VPN работает, но текущий маршрут не подтверждён." } : {}) });
+    throw new Error(message);
   }
 
   /**
@@ -752,6 +834,9 @@ export class AppController extends EventEmitter<AppControllerEvents> {
    * Smart Auto picks the server now and on every connection.
    */
   async selectAutomatic(): Promise<void> {
+    this.manualSwitchIntent += 1;
+    this.manualSwitchPending = null;
+    this.patch({ hotSwitch: null });
     if (!this.state.settings.automaticServer) await this.updateSettings({ automaticServer: true });
     if (this.xray.isRunning() && this.xray.serviceRoutes?.automaticAvailable) {
       await this.refreshLiveLoad(15_000);
@@ -922,7 +1007,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     const next = this.bestServer(this.state.servers.filter((item) => !failed.has(item.id)));
     if (!next) return null;
     this.state.selectedServerId = next.id;
-    await this.secureStore.put("selected_server", Buffer.from(next.id));
+    await this.persistSelectedServer(next.id);
     this.emitChanged();
     return next;
   }
@@ -978,6 +1063,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     const hotGameRules = previous.gameEnabled === true && next.gameEnabled === true && this.state.status === "connected" && !this.state.busy;
     let reconnect = this.connectionRequested() && (affectsTunnel(previous, next) || (gameRulesChanged && !hotGameRules));
     const generation = this.connectionGeneration;
+    if (previous.automaticServer !== next.automaticServer && next.automaticServer) this.cancelManualSwitch();
     this.state.settings = next;
     if (previous.automaticServer !== next.automaticServer) {
       await this.xray.serviceRoutes?.setAutomaticEnabled?.(next.automaticServer);
@@ -1344,6 +1430,10 @@ export class AppController extends EventEmitter<AppControllerEvents> {
   }
 
   private async applyTunnelProfile(profile: PreparedTunnelProfile): Promise<void> {
+    if (this.manualSwitchPending !== null) {
+      this.cancelManualSwitch();
+      await this.xray.serviceRoutes?.setAutomaticEnabled?.(this.state.settings.automaticServer);
+    }
     if (profile.game?.enabled && profile.subscriptionExpiresAt && !(Date.parse(profile.subscriptionExpiresAt) > Date.now())) {
       profile = { ...profile, game: { ...profile.game, enabled: false } };
     }
@@ -1394,7 +1484,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
       ? selected
       : this.bestServer(profile.servers)?.id ?? null;
     await this.secureStore.put("tunnel_profile", Buffer.from(JSON.stringify(profile)));
-    if (serverId) await this.secureStore.put("selected_server", Buffer.from(serverId));
+    if (serverId) await this.persistSelectedServer(serverId, () => this.profile === profile);
     this.patch({ servers: profile.servers, serverLatencies: {}, selectedServerId: serverId, selectedSubscriptionId: profile.subscriptionId });
     await this.reconcileFavorites();
     void this.pingServers();
@@ -1670,6 +1760,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
   }
 
   private serviceConnectionDetail(server: TunnelServer | null): string {
+    if (this.xray.serviceRoutes?.mainSelectionCertain === false) return "VPN работает, но текущий маршрут не подтверждён.";
     if (!this.xray.serviceRoutes?.active) return `Защищено через ${server?.name ?? "VPN"}`;
     const actual = this.activeMainServer();
     if (this.xray.serviceRoutes.smartAutoActive && !this.xray.serviceRoutes.policyActive) return `Защищено через ${actual?.name ?? server?.name ?? "VPN"}`;
@@ -2355,6 +2446,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
   }
 
   private async clearLocalSession(statusDetail: string | null): Promise<void> {
+    this.cancelManualSwitch();
     this.cancelRouteProbes();
     this.invalidateRouteMeasurements();
     if (this.serviceRoutesRetry) clearTimeout(this.serviceRoutesRetry);
@@ -2446,6 +2538,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
   }
 
   private beginTunnelRecovery(detail: string, cause: AttemptCause | null = null): void {
+    this.cancelManualSwitch();
     this.recoveryHeldForMatch = false;
     this.cancelGameProbes();
     this.recoveryCause = cause;
@@ -2488,7 +2581,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
             const server = this.bestServer(reachable.length ? reachable : candidates);
             if (server) {
               this.patch({ selectedServerId: server.id });
-              await this.secureStore.put("selected_server", Buffer.from(server.id));
+              await this.persistSelectedServer(server.id);
               this.lastConfig = buildXrayConfig(this.profile, server, this.state.settings, this.gamePassword);
               this.lastTuic = server.tuic;
             }
@@ -2538,22 +2631,58 @@ export class AppController extends EventEmitter<AppControllerEvents> {
   private async verifyTunnelHealth(immediate = false, cause: AttemptCause | null = null): Promise<void> {
     if (this.tunnelHealthCheckRunning || this.state.status !== "connected") return;
     const generation = this.connectionGeneration;
+    const selection = this.manualSwitchIntent, routes = this.xray.serviceRoutes, mainServerId = routes?.mainServerId;
     this.tunnelHealthCheckRunning = true;
     try {
+      // Selection owns the live route while preparing/committing. A probe of
+      // the previous target cannot authorize restarting its still-live core.
+      // A dead process bypasses this guard and retains normal recovery.
+      const deferToSelection = (): boolean => {
+        if (!this.xray.isRunning()) return false;
+        if (this.manualSwitchPending !== null || selection !== this.manualSwitchIntent || routes?.mainServerId !== mainServerId) {
+          this.tunnelHealthFailures = 0;
+          return true;
+        }
+        if (routes?.mainSelectionCertain === false) {
+          this.tunnelHealthFailures = 0;
+          this.patch({ statusDetail: "VPN работает, но текущий маршрут не подтверждён." });
+          return true;
+        }
+        return false;
+      };
+      if (deferToSelection()) return;
       let codes = ["no_vpn_network"];
-      const healthy = await this.xray.isHealthy() && (this.xray.serviceRoutes?.authentication || await isTunnelHealthy({ onFailure: (failures) => { codes = failures; } }));
+      let healthy = false, controlHealthy = true;
+      if (this.xray.isRunning()) {
+        // Active routing uses isHealthy() to query its API. A manual ordinary
+        // owner without rules already uses a data probe there; do not repeat it.
+        if (!routes?.authentication || routes.active || routes.smartAutoActive) controlHealthy = await this.xray.isHealthy();
+        if (generation !== this.connectionGeneration || this.state.status !== "connected" || deferToSelection()) return;
+        if (routes?.authentication) {
+          // This authenticated fixed-outbound proxy is independent of QueryStats.
+          // An API reply alone also cannot prove that the data plane works.
+          codes = ["other"];
+          healthy = await routes.probeCurrent().catch(() => false);
+        } else {
+          healthy = controlHealthy && await isTunnelHealthy({ onFailure: (failures) => { codes = failures; } });
+        }
+      }
       if (generation !== this.connectionGeneration || this.state.status !== "connected") return;
+      if (deferToSelection()) return;
+      healthy = this.xray.isRunning() && healthy;
       this.tunnelHealthFailures = healthy ? 0 : this.tunnelHealthFailures + 1;
       this.telemetry.record((session) => {
         if (healthy) session.probeSucceeded();
         else session.probeFailed(codes);
       });
-      if (!healthy && this.xray.serviceRoutes?.smartAutoActive && this.xray.isRunning()) {
-        this.tunnelHealthFailures = 0;
-        this.patch({ statusDetail: "Smart Auto временно недоступен. Текущее подключение сохранено." });
-        void this.xray.serviceRoutes.refreshAutomatic();
+      if (healthy && !controlHealthy && routes?.authentication) {
+        this.patch({ statusDetail: routes.smartAutoActive
+          ? "Smart Auto временно недоступен. Текущее подключение сохранено."
+          : "Управление маршрутами временно недоступно. Текущее подключение сохранено." });
+        if (routes.smartAutoActive) void routes.refreshAutomatic();
         return;
       }
+      if (!healthy && routes?.smartAutoActive && this.xray.isRunning()) void routes.refreshAutomatic();
       if (!healthy && (immediate || this.tunnelHealthFailures >= 3)) {
         // Recovery restarts the core and with it the game's paths: a match whose UDP
         // crosses the game nodes keeps them, and the tunnel recovers once it ends.
@@ -2605,6 +2734,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
   }
 
   private cancelTunnelRecovery(): void {
+    this.cancelManualSwitch();
     this.cancelGameProbes();
     this.recoveryCause = null;
     this.connectionGeneration += 1;
@@ -2702,6 +2832,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
   }
 
   private connectedDetail(server: TunnelServer | null): string {
+    if (this.xray.serviceRoutes?.mainSelectionCertain === false) return "VPN работает, но текущий маршрут не подтверждён.";
     if (this.xray.serviceRoutes?.active) return this.serviceConnectionDetail(server);
     const name = server?.name ?? "VPN";
     return this.killSwitchFailure
@@ -2711,6 +2842,9 @@ export class AppController extends EventEmitter<AppControllerEvents> {
 
   private async startXray(config: Record<string, unknown>, generation: number): Promise<void> {
     this.assertCurrentConnection(generation);
+    // Recovery can restart a retained config after its source profile changed.
+    // Keep the original fingerprint for retained configs, capture new builds once.
+    if (!this.installedMainSources.has(config)) this.rememberInstalledMainSources(config);
     const gameTuic = this.state.settings.gameEnabled && this.profile?.game?.enabled
       ? this.profile.game.servers.flatMap((server, index) => server.tuic ? [{ tag: gameTag(index), endpoint: server.tuic }] : []) : [];
     const current = (): boolean => generation === this.connectionGeneration;
@@ -3190,6 +3324,8 @@ export class AppController extends EventEmitter<AppControllerEvents> {
 
   private smartAutoLiveChanged(update: LiveAutoUpdate): void {
     if (!this.xray.serviceRoutes?.automaticAvailable || !this.xray.isRunning()) return;
+    if (this.manualSwitchPending !== null) return;
+    if (!this.state.settings.automaticServer && update.currentId !== this.xray.serviceRoutes.mainServerId) return;
     const server = this.state.servers.find((candidate) => candidate.id === update.currentId);
     if (!server) return;
     this.routeMeasurementNetwork = this.protocolHistory.networkKey();
@@ -3202,7 +3338,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     const changed = update.switched && this.state.selectedServerId !== server.id;
     if (changed) {
       this.state.selectedServerId = server.id;
-      void this.secureStore.put("selected_server", Buffer.from(server.id)).catch(() => {});
+      void this.persistSelectedServer(server.id).catch(() => {});
       this.addLog(`Smart Auto: новые соединения направлены через ${server.name}`);
     }
     this.patch({ serverLatencies: this.displayedRouteLatencies(this.endpointLatencies),
@@ -3331,7 +3467,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     const best = this.bestServer(servers);
     if (!best || best.id === this.state.selectedServerId) return;
     this.state.selectedServerId = best.id;
-    await this.secureStore.put("selected_server", Buffer.from(best.id));
+    await this.persistSelectedServer(best.id);
     this.emitChanged();
   }
 
@@ -3572,6 +3708,42 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     this.diskLog?.write(cleaned);
     this.state.logs = [`${new Date().toLocaleTimeString("ru-RU")}  ${cleaned}`, ...this.state.logs].slice(0, 200);
     this.emitChanged();
+  }
+
+  private cancelManualSwitch(): void {
+    this.manualSwitchIntent += 1;
+    this.manualSwitchPending = null;
+    this.state.hotSwitch = null;
+  }
+
+  /** SecureStore uses one temporary filename per key; selection writes must not overlap. */
+  private persistSelectedServer(serverId: string, current = () => this.state.selectedServerId === serverId): Promise<void> {
+    const write = this.selectedServerWriting.catch(() => {}).then(async () => {
+      if (current()) await this.secureStore.put("selected_server", Buffer.from(serverId));
+    });
+    this.selectedServerWriting = write;
+    return write;
+  }
+
+  /** A refreshed profile may reuse an id with different credentials or transport settings. */
+  private mainServerSourceKey(server: TunnelServer): string {
+    return createHash("sha256").update(JSON.stringify([server.outbound, server.tuic ?? null,
+      server.countryCode, server.nodeId ?? null])).digest("hex");
+  }
+
+  private rememberInstalledMainSources(config: Record<string, unknown>): void {
+    const installed = new Set(compiledServiceRoutes(config)?.automatic?.candidates.map((candidate) => candidate.id) ?? []);
+    this.installedMainSources.set(config, new Map((this.profile?.servers ?? []).filter((server) => installed.has(server.id))
+      .map((server) => [server.id, this.mainServerSourceKey(server)])));
+  }
+
+  private canManualHotSwitch(serverId: string): boolean {
+    const server = this.state.servers.find((item) => item.id === serverId);
+    const profileServer = this.profile?.servers.find((item) => item.id === serverId);
+    if (!server || !this.lastConfig || this.profile?.gameOnly || server.tuic || isHomeRoadServer(server.name)) return false;
+    return Boolean(profileServer && this.mainServerSourceKey(profileServer) === this.mainServerSourceKey(server))
+      && this.installedMainSources.get(this.lastConfig)?.get(serverId) === this.mainServerSourceKey(server)
+      && this.xray.serviceRoutes?.canSelectMain?.(serverId) === true;
   }
 
   private patch(patch: Partial<AppSnapshot>): void {

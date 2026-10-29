@@ -10,6 +10,7 @@ import type { IssuedCommand, RemoteCommand, RemoteDevice } from "../shared/remot
 import { dropStatusText, formatDropBytes, isOpenDropState } from "../shared/drop";
 import type { DropControl, DropDevice, DropTransfer } from "../shared/drop";
 import { dropAmountText, dropDeviceStatus, dropFilesText, dropPercent, mountDropUi } from "./dropUi";
+import { countrySwitchLabel, serverSwitchLabel } from "./serverSwitchUi";
 
 const SUPPORT_CHAT_URL = "https://t.me/leviksupportbot";
 
@@ -143,7 +144,7 @@ function render(preserveScroll = true): void {
         </nav>
         <div class="sidebar-status">
           <div class="status-line"><span class="status-dot ${escapeHtml(state.status)}"></span><span>${state.game?.only && state.status === "connected" ? "Game включён" : statusTitle(state.status)}</span></div>
-          <div class="status-subtitle">${escapeHtml(state.statusDetail ?? (state.game?.only ? "Тариф Levik Game, без VPN" : "VPN готов к подключению"))}</div>
+          <div class="status-subtitle">${escapeHtml(state.hotSwitch?.phase === "uncertain" ? "Текущий маршрут не подтверждён" : state.statusDetail ?? (state.game?.only ? "Тариф Levik Game, без VPN" : "VPN готов к подключению"))}</div>
         </div>
       </aside>
       <main class="content"><div class="content-inner">${renderElevationNotice()}${renderUpdateNotice()}${renderConflicts()}${renderAnnouncements()}${renderTelemetryNotice()}${renderPage()}</div></main>
@@ -431,7 +432,7 @@ function renderHome(): string {
   const connected = state.status === "connected";
   const transitional = ["connecting", "disconnecting", "reconnecting"].includes(state.status);
   const disconnectAction = ["connected", "connecting", "reconnecting"].includes(state.status) || (state.status === "error" && state.settings.killSwitch);
-  const server = selectedServer();
+  const server = state.hotSwitch?.phase === "uncertain" ? null : selectedServer();
   return `
     <header class="page-header"><div><h1>Главная</h1><div class="subtitle">${state.game?.only ? "Тариф Levik Game" : "Защищённый доступ к интернету"}</div></div></header>
     ${renderGameOnlyNotice()}
@@ -443,10 +444,12 @@ function renderHome(): string {
         <label class="home-server-picker">
           <span class="home-server-flag" aria-hidden="true">${countryFlagSvg(server?.countryCode ?? null)}</span>
           <select id="home-server-select" aria-label="Сервер быстрого подключения" ${state.servers.length && !state.busy ? "" : "disabled"}>
-            ${state.servers.length ? `<option value="auto" ${state.settings.automaticServer ? "selected" : ""}>${escapeHtml(state.settings.automaticServer && automaticServerName() ? `Автоматически · ${automaticServerName()}` : "Автоматически")}</option>${groupByCountry(state.servers).map(serverOptions).join("")}` : `<option>Сервер не выбран</option>`}
+            ${state.hotSwitch?.phase === "uncertain" ? `<option value="" selected disabled>Маршрут не подтверждён</option>` : ""}
+            ${state.servers.length ? `<option value="auto" ${state.settings.automaticServer && state.hotSwitch?.phase !== "uncertain" ? "selected" : ""}>${escapeHtml(state.settings.automaticServer && automaticServerName() ? `Автоматически · ${automaticServerName()}` : "Автоматически")}</option>${groupByCountry(state.servers).map(serverOptions).join("")}` : `<option>Сервер не выбран</option>`}
           </select>
         </label>
-        <div class="connection-detail">${escapeHtml(state.statusDetail ?? "Нажмите кнопку, чтобы включить защиту")}</div>
+        <div class="connection-detail">${escapeHtml(state.hotSwitch?.phase === "uncertain" ? "VPN работает, но текущий маршрут не подтверждён." : state.statusDetail ?? "Нажмите кнопку, чтобы включить защиту")}</div>
+        ${renderHotSwitchNotice()}
       </section>
       <div class="side-stack">
         <section class="compact-card card"><h2 class="card-title">Текущая сессия</h2><div class="card-caption">Счётчики рассчитываются локально</div><div class="metric-grid"><div class="metric"><div class="metric-label">Время</div><div class="metric-value" data-session-duration>${formatDuration(sessionSeconds())}</div></div><div class="metric"><div class="metric-label">Режим</div><div class="metric-value">${routingTitle(state.settings.routingMode)}</div></div></div></section>
@@ -459,8 +462,20 @@ function renderServers(): string {
   if (!state) return "";
   return `
     <header class="page-header"><div><h1>VPN-серверы</h1><div class="subtitle">Выберите точку подключения Levik VPN</div></div><div class="toolbar"><button class="button icon-button ${favoritesOnly ? "active" : ""}" id="favorites-filter-button" aria-label="Показать избранные" aria-pressed="${favoritesOnly}">${icon("star")}</button><button class="button icon-button" id="ping-button" aria-label="Измерить задержку">${icon("pulse")}</button><button class="button icon-button" id="refresh-button" aria-label="Обновить профиль">${icon("refresh")}</button></div></header>
+    ${state.status === "connected" ? `<p class="server-switch-explainer">HotSwitch сохраняет открытые соединения. Переходы с пометкой «с переподключением» перезапускают VPN.</p>` : ""}
+    ${renderHotSwitchNotice()}
     <label class="server-search"><span>${icon("search")}</span><input id="server-search-input" type="search" placeholder="Поиск по серверу или стране" autocomplete="off" value="${escapeAttribute(serverSearchQuery)}" /></label>
     ${state.servers.length ? `<div class="server-list">${autoCard()}${groupByCountry(state.servers).map(countryCard).join("")}</div><div class="empty card-flat server-empty" hidden>Серверы не найдены</div>` : `<div class="empty card-flat">Для выбранной подписки нет совместимых серверов</div>`}`;
+}
+
+function renderHotSwitchNotice(): string {
+  const change = state?.status === "connected" ? state.hotSwitch : null;
+  if (!change) return "";
+  const preparing = change.phase === "preparing";
+  const warning = change.phase === "failed" || change.phase === "uncertain";
+  const title = preparing ? "HotSwitch: проверяем новый сервер" : change.phase === "applied" ? "Сервер переключён"
+    : change.phase === "uncertain" ? "Маршрут не подтверждён" : "Смена сервера не выполнена";
+  return `<div class="hot-switch-notice ${warning ? "warning" : ""}" role="status" aria-live="polite" aria-busy="${preparing}"><strong>${escapeHtml(title)}</strong><span>${escapeHtml(change.message)}</span>${preparing ? "" : `<button class="button secondary" id="hot-switch-reconnect" title="Закрыть текущие соединения и заново подключить выбранный сервер">Переподключить всё</button>`}</div>`;
 }
 
 const maintenanceTime = new Intl.DateTimeFormat("ru-RU", { hour: "2-digit", minute: "2-digit" });
@@ -475,12 +490,12 @@ function serverLoadLabel(load: number | undefined): { level: "free" | "busy" | "
 
 /** The server picked by hand; null while Smart Auto chooses. */
 function manualServerId(): string | null {
-  return state && !state.settings.automaticServer ? state.selectedServerId : null;
+  return state && !state.settings.automaticServer && state.hotSwitch?.phase !== "uncertain" ? state.selectedServerId : null;
 }
 
 /** «Германия · Франкфурт» for the server Smart Auto is on now. */
 function automaticServerName(): string | null {
-  if (!state?.selectedServerId) return null;
+  if (!state?.selectedServerId || state.hotSwitch?.phase === "uncertain") return null;
   for (const country of groupByCountry(state.servers)) {
     const node = country.nodes.find((item) => item.variants.some((variant) => variant.id === state?.selectedServerId));
     if (node) return country.nodes.length > 1 ? `${countryTitle(country)} · ${node.label}` : countryTitle(country);
@@ -505,7 +520,8 @@ function serverOptions(country: CountryGroup): string {
     const variant = activeVariant(node, state?.selectedServerId ?? null);
     const name = country.nodes.length > 1 ? `${title} · ${node.label}` : title;
     const text = node.variants.length > 1 ? `${name} · ${serverProtocolShortLabel(variant)}` : name;
-    return `<option value="${escapeAttribute(variant.id)}" ${variant.id === manualServerId() ? "selected" : ""}>${escapeHtml(text)}</option>`;
+    const hint = serverSwitchLabel(state, variant.id);
+    return `<option value="${escapeAttribute(variant.id)}" ${variant.id === manualServerId() ? "selected" : ""}>${escapeHtml(hint ? `${text} · ${hint}` : text)}</option>`;
   }).join("");
 }
 
@@ -524,7 +540,8 @@ function countryCard(country: CountryGroup): string {
   const latency = selectedNode
     ? latencyLabel(state?.serverLatencies[activeVariant(selectedNode, selectedId).id])
     : latencies.length ? `от ${Math.min(...latencies)} мс` : "не измерен";
-  const summary = [`${country.nodes.length} ${serverCountWord(country.nodes.length)}`, selectedNode?.label, latency].filter(Boolean).join(" · ");
+  const hint = countrySwitchLabel(state, country.nodes.flatMap((node) => node.variants.map((variant) => variant.id)));
+  const summary = [`${country.nodes.length} ${serverCountWord(country.nodes.length)}`, selectedNode?.label, latency, hint].filter(Boolean).join(" · ");
   const filter = [title, code, ...country.nodes.flatMap((node) => [node.label, ...node.variants.map((variant) => `${variant.name} ${serverProtocolShortLabel(variant)}`)])]
     .join(" ").toLocaleLowerCase("ru");
   const listId = `country-servers-${code}`;
@@ -556,7 +573,8 @@ function countryNodeRow(node: CountryServer, countryTitle: string): string {
 /** Protocol, latency and load; HTML. */
 function serverStatus(server: TunnelServer, maintenance: string): string {
   const load = serverLoadLabel(state?.serverLoad[server.id]);
-  return `${escapeHtml(serverProtocol(server))} · ${latencyLabel(state?.serverLatencies[server.id])}${load && !maintenance ? ` · <span class="server-load ${load.level}">${load.text}</span>` : ""}`;
+  const hint = serverSwitchLabel(state, server.id);
+  return `${escapeHtml(serverProtocol(server))} · ${latencyLabel(state?.serverLatencies[server.id])}${load && !maintenance ? ` · <span class="server-load ${load.level}">${load.text}</span>` : ""}${hint ? ` · <span class="server-switch-label">${escapeHtml(hint)}</span>` : ""}`;
 }
 
 function latencyLabel(latency: number | null | undefined): string {
@@ -581,7 +599,8 @@ function protocolSwitch(node: CountryServer, server: TunnelServer, title: string
   if (node.variants.length < 2) return "";
   return `<div class="protocol-switch" role="radiogroup" aria-label="Протокол: ${escapeAttribute(title)}">${node.variants.map((variant) => {
     const active = variant.id === server.id;
-    return `<button class="protocol-option ${active ? "active" : ""}" role="radio" aria-checked="${active}" data-server-id="${escapeAttribute(variant.id)}">${escapeHtml(serverProtocolShortLabel(variant))}</button>`;
+    const hint = serverSwitchLabel(state, variant.id);
+    return `<button class="protocol-option ${active ? "active" : ""}" role="radio" aria-checked="${active}" data-server-id="${escapeAttribute(variant.id)}" aria-label="${escapeAttribute(`${serverProtocolShortLabel(variant)}${hint ? `, ${hint}` : ""}`)}">${escapeHtml(serverProtocolShortLabel(variant))}${hint ? `<span class="protocol-switch-caption">${escapeHtml(hint)}</span>` : ""}</button>`;
   }).join("")}</div>`;
 }
 
@@ -1216,6 +1235,18 @@ function bindPageEvents(): void {
   document.getElementById("game-data-license")?.addEventListener("click", () => void run(() => window.levik.openExternal("https://creativecommons.org/licenses/by/4.0/")));
   document.getElementById("game-measure")?.addEventListener("click", () => void run(() => window.levik.measureGameRoutes()));
   document.getElementById("power-button")?.addEventListener("click", () => run(() => state && (["connected", "connecting", "reconnecting"].includes(state.status) || (state.status === "error" && state.settings.killSwitch)) ? window.levik.disconnect() : window.levik.connect()));
+  document.getElementById("hot-switch-reconnect")?.addEventListener("click", (event) => {
+    const change = state?.hotSwitch;
+    if (!change || change.phase === "preparing" || state?.status !== "connected") return;
+    const target = change.targetServerId;
+    const button = event.currentTarget instanceof HTMLButtonElement ? event.currentTarget : null;
+    if (button) button.disabled = true;
+    void run(async () => {
+      await window.levik.disconnect();
+      await window.levik.selectServer(target);
+      await window.levik.connect();
+    }).finally(() => { if (button?.isConnected) button.disabled = false; });
+  });
   document.getElementById("home-server-select")?.addEventListener("change", (event) => {
     const serverId = (event.target as HTMLSelectElement).value;
     if (serverId === "auto") {

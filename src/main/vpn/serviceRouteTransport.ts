@@ -143,9 +143,10 @@ function probe(port: number, address: string, servername: string, auth: ServiceR
 
 
 /** Checks an actual DNS wire answer through the candidate, independently of transport-only main health. */
-export async function probeServiceRouteDns(port: number, auth: ServiceRouteAuth, resolvers: readonly string[]): Promise<boolean> {
+export async function probeServiceRouteDns(port: number, auth: ServiceRouteAuth, resolvers: readonly string[], signal?: AbortSignal): Promise<boolean> {
   for (const resolver of resolvers) {
-    if (await queryResolver(port, auth, resolver)) return true;
+    if (signal?.aborted) return false;
+    if (await queryResolver(port, auth, resolver, signal)) return true;
   }
   return false;
 }
@@ -188,7 +189,8 @@ function dnsAnswer(value: Buffer, expectedId: number): boolean {
   return foundAddress;
 }
 
-async function queryResolver(port: number, auth: ServiceRouteAuth, resolver: string): Promise<boolean> {
+async function queryResolver(port: number, auth: ServiceRouteAuth, resolver: string, signal?: AbortSignal): Promise<boolean> {
+  if (signal?.aborted) return false;
   let url: URL;
   try { url = new URL(resolver); } catch { return false; }
   if (!["https:", "tcp:"].includes(url.protocol) || url.username || url.password || url.hash) return false;
@@ -201,9 +203,12 @@ async function queryResolver(port: number, auth: ServiceRouteAuth, resolver: str
     const proxy = request({ hostname: "127.0.0.1", port, method: "CONNECT", path: destination, agent: false,
       headers: { "Proxy-Authorization": proxyAuthorization(auth) } });
     const finish = (ok: boolean): void => {
-      if (settled) return; settled = true; clearTimeout(timer); dnsRequest?.destroy(); tls?.destroy(); socket?.destroy(); proxy.destroy(); resolve(ok);
+      if (settled) return; settled = true; clearTimeout(timer); signal?.removeEventListener("abort", onAbort);
+      dnsRequest?.destroy(); tls?.destroy(); socket?.destroy(); proxy.destroy(); resolve(ok);
     };
+    const onAbort = (): void => finish(false);
     const timer = setTimeout(() => finish(false), 3500);
+    signal?.addEventListener("abort", onAbort, { once: true });
     proxy.once("error", () => finish(false)); proxy.once("response", () => finish(false));
     proxy.once("connect", (response, connected, head) => {
       socket = connected;

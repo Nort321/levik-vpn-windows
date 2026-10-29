@@ -48,6 +48,23 @@ describe("service route transport", () => {
     await expect(overrideServiceRoute("game-balancer", "direct")).rejects.toThrow();
     await expect(overrideServiceRoute("levik-service-rule-0", "unknown-exit")).rejects.toThrow();
   });
+  it("cancels an in-flight DNS preflight and closes the private proxy connection", async () => {
+    upstream = createServer();
+    let connected!: () => void;
+    const accepted = new Promise<void>((resolveAccepted) => { connected = resolveAccepted; });
+    let closed!: Promise<unknown[]>;
+    upstream.on("connect", (_req, socket) => {
+      socket.on("error", () => {}); socket.on("end", () => socket.destroy()); socket.resume();
+      closed = once(socket, "close"); connected();
+    });
+    upstream.listen(0, "127.0.0.1"); await once(upstream, "listening");
+    const address = upstream.address(); if (!address || typeof address === "string") throw new Error("No proxy test port");
+    const abort = new AbortController();
+    const probing = probeServiceRouteDns(address.port, { port: address.port, user: "levik-service", password: "b".repeat(48) },
+      ["tcp://1.1.1.1"], abort.signal);
+    await accepted; abort.abort();
+    expect(await probing).toBe(false); await closed;
+  });
   it.skipIf(process.platform !== "darwin" || !existsSync(executable))("switches only one live route using the real pinned core", async () => {
     // Entirely loopback: no TUN, privileges, public network, customer keys or live VPN nodes.
     const api = await freePort(); const routeA = await freePort(); const routeB = await freePort();

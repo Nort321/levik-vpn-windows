@@ -106,7 +106,9 @@ export class ServiceRouteRuntime {
   private stopped = false;
   private suspended = false;
   private generation = 0;
-  private updating = false;
+  private updating: Promise<void> | null = null;
+  private reconciling: number | null = null;
+  private readonly unconfirmed = new Set<string>();
   constructor(private readonly plans: readonly RouteRuntimePlan[], private readonly probe: (tag: string) => Promise<boolean>,
     private readonly override: (balancer: string, target: string) => Promise<void>,
     private readonly onChange: (routes: ServiceRouteSelection[]) => void = () => {},
@@ -127,61 +129,108 @@ export class ServiceRouteRuntime {
   }
   stop(): void { this.stopped = true; this.generation += 1; }
   setSuspended(suspended: boolean): void { this.suspended = suspended; this.generation += 1; }
-  /** Called only after the shared owner's API override was acknowledged. */
-  setExternalMain(tag: string): void {
+  private externalMain(tag: string): RouteRuntimePlan {
     const main = this.plans.find((plan) => plan.id === "__main" && plan.externallyManaged);
     if (!main || ![...main.primary, ...main.fallback].includes(tag)) throw new Error("Invalid automatic main target");
+    return main;
+  }
+  private installExternalMain(main: RouteRuntimePlan, tag: string): void {
     this.current.set(main.id, { tag, fallback: false, since: this.clock() });
     this.health.set(tag, { healthy: true, failures: 0, successes: 1, down: false });
   }
-  async refresh(): Promise<void> {
-    if (this.stopped || this.suspended || this.updating) return;
-    const generation = this.generation;
-    this.updating = true;
+  /** Called only after the shared owner's API override was acknowledged. */
+  setExternalMain(tag: string): void {
+    const main = this.externalMain(tag);
+    this.generation += 1;
+    this.installExternalMain(main, tag);
+  }
+  /** Wait for older policy writes, then confirm every main-dependent route against
+   * the acknowledged target. The shared owner serializes external MAIN writes. */
+  async reconcileExternalMain(tag: string, signal?: AbortSignal): Promise<void> {
+    const main = this.externalMain(tag);
+    if (this.stopped) throw new Error("Main route reconciliation cancelled");
+    const generation = ++this.generation;
+    // MAIN has already been acknowledged by the owner. Remember that fact even
+    // during sleep, so resuming policy reconciliation follows a compensating pin.
+    this.installExternalMain(main, tag);
+    this.reconciling = generation;
+    const abort = (): void => { if (this.generation === generation) this.generation += 1; };
+    signal?.addEventListener("abort", abort, { once: true });
+    if (signal?.aborted) abort();
     try {
-      const candidates = [...new Set(this.plans.filter((plan) => !plan.externallyManaged).flatMap((plan) => [
-        ...(plan.primaryRef ? [this.current.get(plan.primaryRef)?.tag].filter((tag): tag is string => Boolean(tag)) : plan.primary),
-        ...(plan.fallbackRef ? [this.current.get(plan.fallbackRef)?.tag].filter((tag): tag is string => Boolean(tag)) : plan.fallback),
-      ]))];
-      await Promise.all(candidates.map(async (tag) => {
-        const healthy = await this.probe(tag).catch(() => false);
-        if (generation !== this.generation) return;
-        this.recordHealth(this.health, tag, healthy);
-        const dnsHealthy = healthy && (this.dnsProbe ? await this.dnsProbe(tag).catch(() => false) : true);
-        if (generation !== this.generation) return;
-        this.recordHealth(this.dnsHealth, tag, dnsHealthy);
-      }));
+      // An old write may fail after it reached the core. The fresh cycle repairs
+      // unconfirmed writes; an old failure must not prevent that reconciliation.
+      await this.updating?.catch(() => {});
+      const valid = (): boolean => !this.stopped && !this.suspended && !signal?.aborted && generation === this.generation;
+      if (!valid()) throw new Error("Main route reconciliation cancelled");
+      const affected = this.plans.filter((plan) => plan.primaryRef === "__main" || plan.fallbackRef === "__main" || this.unconfirmed.has(plan.id));
+      await this.startRefresh(generation, affected);
+      if (!valid()) throw new Error("Main route reconciliation cancelled");
+    } finally {
+      signal?.removeEventListener("abort", abort);
+      if (this.reconciling === generation) this.reconciling = null;
+    }
+  }
+  refresh(): Promise<void> {
+    if (this.stopped || this.suspended) return Promise.resolve();
+    if (this.updating) return this.updating;
+    if (this.reconciling !== null) return Promise.resolve();
+    return this.startRefresh(this.generation);
+  }
+  private startRefresh(generation: number, plans: readonly RouteRuntimePlan[] = this.plans): Promise<void> {
+    const update = this.refreshOnce(generation, plans).finally(() => {
+      if (this.updating === update) this.updating = null;
+    });
+    this.updating = update;
+    return update;
+  }
+  private async refreshOnce(generation: number, plans: readonly RouteRuntimePlan[]): Promise<void> {
+    const candidates = [...new Set(plans.filter((plan) => !plan.externallyManaged).flatMap((plan) => [
+      ...(plan.primaryRef ? [this.current.get(plan.primaryRef)?.tag].filter((tag): tag is string => Boolean(tag)) : plan.primary),
+      ...(plan.fallbackRef ? [this.current.get(plan.fallbackRef)?.tag].filter((tag): tag is string => Boolean(tag)) : plan.fallback),
+    ]))];
+    await Promise.all(candidates.map(async (tag) => {
+      const healthy = await this.probe(tag).catch(() => false);
+      if (generation !== this.generation) return;
+      this.recordHealth(this.health, tag, healthy);
+      const dnsHealthy = healthy && (this.dnsProbe ? await this.dnsProbe(tag).catch(() => false) : true);
+      if (generation !== this.generation) return;
+      this.recordHealth(this.dnsHealth, tag, dnsHealthy);
+    }));
+    if (this.stopped || this.suspended || generation !== this.generation) return;
+    for (const plan of plans) {
+      if (plan.externallyManaged) continue;
+      const prior = this.current.get(plan.id);
+      const available = (tag: string): boolean => this.health.get(tag)?.healthy === true && (!plan.requireDns || this.dnsHealth.get(tag)?.healthy === true);
+      // A healthy selected server stays selected; a recovered primary does not bounce a live session.
+      const referenced = plan.primaryRef ? this.current.get(plan.primaryRef)?.tag : plan.fallbackRef && prior?.fallback ? this.current.get(plan.fallbackRef)?.tag : undefined;
+      const retained = prior && (available(prior.tag) || prior.tag === plan.finalTag && plan.finalTag !== "levik-block")
+        && (!referenced || prior.tag === referenced) ? prior : null;
+      const primary = plan.primaryRef ? this.current.get(plan.primaryRef)?.tag : plan.primary.find(available);
+      const fallback = plan.fallbackRef ? this.current.get(plan.fallbackRef)?.tag : plan.fallback.find(available);
+      const healthyPrimary = primary && available(primary) ? primary : undefined;
+      const healthyFallback = fallback && available(fallback) ? fallback : undefined;
+      const recovered = retained?.fallback && healthyPrimary && retained.tag !== healthyPrimary
+        && (this.health.get(healthyPrimary)?.successes ?? 0) >= 2
+        && (!plan.requireDns || (this.dnsHealth.get(healthyPrimary)?.successes ?? 0) >= 2)
+        && this.clock() - retained.since >= 30000;
+      const selected = recovered ? { tag: healthyPrimary, fallback: false, since: this.clock() } : retained
+        ?? (healthyPrimary ? { tag: healthyPrimary, fallback: false, since: this.clock() } : healthyFallback
+        ? { tag: healthyFallback, fallback: true, since: this.clock() } : { tag: plan.finalTag, fallback: plan.finalTag !== "levik-block", since: this.clock() });
+      if (prior?.tag === selected.tag && prior.fallback === selected.fallback && !this.unconfirmed.has(plan.id)) continue;
+      // Even a timed-out or superseded RPC may have reached Xray. Keep the
+      // previous sticky decision, but force its successor to reassert it.
+      this.unconfirmed.add(plan.id);
+      await this.override(plan.balancerTag, selected.tag);
       if (this.stopped || this.suspended || generation !== this.generation) return;
-      for (const plan of this.plans) {
-        if (plan.externallyManaged) continue;
-        const prior = this.current.get(plan.id);
-        const available = (tag: string): boolean => this.health.get(tag)?.healthy === true && (!plan.requireDns || this.dnsHealth.get(tag)?.healthy === true);
-        // A healthy selected server stays selected; a recovered primary does not bounce a live session.
-        const referenced = plan.primaryRef ? this.current.get(plan.primaryRef)?.tag : plan.fallbackRef && prior?.fallback ? this.current.get(plan.fallbackRef)?.tag : undefined;
-        const retained = prior && (available(prior.tag) || prior.tag === plan.finalTag && plan.finalTag !== "levik-block")
-          && (!referenced || prior.tag === referenced) ? prior : null;
-        const primary = plan.primaryRef ? this.current.get(plan.primaryRef)?.tag : plan.primary.find(available);
-        const fallback = plan.fallbackRef ? this.current.get(plan.fallbackRef)?.tag : plan.fallback.find(available);
-        const healthyPrimary = primary && available(primary) ? primary : undefined;
-        const healthyFallback = fallback && available(fallback) ? fallback : undefined;
-        const recovered = retained?.fallback && healthyPrimary && retained.tag !== healthyPrimary
-          && (this.health.get(healthyPrimary)?.successes ?? 0) >= 2
-          && (!plan.requireDns || (this.dnsHealth.get(healthyPrimary)?.successes ?? 0) >= 2)
-          && this.clock() - retained.since >= 30000;
-        const selected = recovered ? { tag: healthyPrimary, fallback: false, since: this.clock() } : retained
-          ?? (healthyPrimary ? { tag: healthyPrimary, fallback: false, since: this.clock() } : healthyFallback
-          ? { tag: healthyFallback, fallback: true, since: this.clock() } : { tag: plan.finalTag, fallback: plan.finalTag !== "levik-block", since: this.clock() });
-        if (prior?.tag === selected.tag && prior.fallback === selected.fallback) continue;
-        await this.override(plan.balancerTag, selected.tag);
-        if (this.stopped || this.suspended || generation !== this.generation) return;
-        this.current.set(plan.id, selected);
-      }
-      this.onChange(this.plans.map((plan) => {
-        const current = this.current.get(plan.id);
-        return { id: plan.id, state: !current || current.tag === "levik-block" ? "blocked"
-          : current.fallback ? "fallback" : "active", exitId: current ? plan.exits[current.tag] ?? null : null };
-      }));
-    } finally { this.updating = false; }
+      this.current.set(plan.id, selected);
+      this.unconfirmed.delete(plan.id);
+    }
+    this.onChange(this.plans.map((plan) => {
+      const current = this.current.get(plan.id);
+      return { id: plan.id, state: !current || current.tag === "levik-block" ? "blocked"
+        : current.fallback ? "fallback" : "active", exitId: current ? plan.exits[current.tag] ?? null : null };
+    }));
   }
 }
 

@@ -54,6 +54,24 @@ This repository is independent from the Android source tree. It consumes the sam
 - The tray icon, tooltip, and actions follow the live connection state. Window-close behavior is user-configurable.
 - `electron-updater` consumes `latest.yml` and the matching installer from the latest public GitHub Release.
 
+## Manual HotSwitch
+
+Manual server/country selection can change the main balancer in the running core. Existing TCP/UDP associations keep their original outbound; subsequent independent connections use the newly acknowledged target. TUN, WFP, system DNS, the session timer and traffic offsets remain installed. HTTP/2, HTTP/3 and application connection reuse can retain the previous exit even after a new user action. A dead previous exit cannot preserve its flows.
+
+The supported set is the bounded ordinary Xray pool compiled at connection startup (at most 32 candidates). Configuration is predeclared, not a requirement to keep 32 transports warm. The controller checks the current profile against the installed source configuration, including credentials and transport settings. A target outside that immutable set, a changed profile or a protected/sidecar mode uses the existing reconnect path, labelled before selection. Recovery and maintenance retain their explicit replacement paths.
+
+`ServiceRouteSession.selectMain()` stops automatic decisions without destroying the pool, verifies a bounded HTTPS response body and configured DNS through the candidate's authenticated private proxy, and commits through the same MAIN queue as Auto. A 15-second deadline cancels verification/policy work; safety compensation may continue until its acknowledgements complete. New intent, Auto selection, stop, suspension and changed network identity invalidate earlier work.
+
+The main override and dependent `primaryRef`/`fallbackRef` service balancers are acknowledged before publishing success. Policy reconciliation preserves independent DNS/failure policies and fixed country/exit rules. During the pending multi-RPC operation, new connections may use either authorized exit. A stale or failed policy write remains unconfirmed and must be reasserted by its successor. Acknowledged MAIN state is remembered even during suspension, while further policy writes wait for resume.
+
+An RPC error does not prove that Xray rejected the write. The owner reasserts the previous target and reconciles its dependent rules before reporting failure. If that compensation is also unconfirmed, the UI displays route uncertainty and hides current-country assertions. No active-flow count is inferred from byte statistics, and no outbound is removed as part of HotSwitch. Subscription revocation and intentional disconnect still stop access.
+
+The notice provides an explicit “Reconnect everything” action: disconnect, select the notice's target, then connect using the existing validated IPC. It intentionally closes old flows when the user wants all connections to start through the selected server. A failed step stops the sequence.
+
+`node scripts/smoke-smart-auto-flows.mjs` checks real-core TCP/UDP retention with mux on/off, compiled ordinary controls, manual A→B→A, failed candidate verification, stable core PID and probe exclusion from user counters. It uses synthetic credentials and loopback services, with no TUN or public VPN nodes. `LEVIK_SMART_AUTO_XRAY` can select the same pinned native core on another host. CI also runs this script on the bundled patched Windows executable.
+
+Real Windows acceptance additionally requires Wintun/WFP packet evidence, IPv4/IPv6, actual long downloads/uploads, WebSocket/QUIC, the customer's call/game applications, rapid manual choices, Auto/manual races, profile refresh and sleep/resume. The cross-platform loopback smoke establishes core behavior, not native Windows datapath or universal application-session continuity.
+
 ## Packaging
 
 Electron-builder creates an NSIS installer for Windows x64. Every successful `main` build is published as a GitHub Release. Production distribution requires Authenticode signing; CI accepts the certificate only through `WINDOWS_CSC_LINK` and `WINDOWS_CSC_KEY_PASSWORD` repository secrets.
