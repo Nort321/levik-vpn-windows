@@ -202,6 +202,8 @@ const ENDPOINTS_RETRY_MS = 60_000;
 const HOME_ROAD_REFRESH_MS = 6 * 60 * 60_000;
 /** Repeated connection failures look for conflicting apps at most this often. */
 const CONFLICT_RESCAN_MS = 15_000;
+/** A restart held back during a game is retried this often until the game ends. */
+const HELD_RESTART_CHECK_MS = 15_000;
 const NOT_ELEVATED_MESSAGE = "Levik VPN запущен без прав администратора и не может создать туннель. Нажмите «Перезапустить от имени администратора».";
 const GAME_ONLY_MESSAGE = "Тариф Levik Game — это не VPN: через Levik идут только матчи выбранных игр. Включите Game на вкладке Game или получите пробный VPN в кабинете.";
 
@@ -254,6 +256,13 @@ export class AppController extends EventEmitter<AppControllerEvents> {
   private gamePlaying = false;
   /** The tunnel failed its checks during a match; it recovers once the match ends. */
   private recoveryHeldForMatch = false;
+  /**
+   * Remote changes that need a core restart, held while a game runs: a
+   * restart drops every UDP flow and with it the match. `generation` is the
+   * connection they were held on; any later restart already applies them.
+   */
+  private heldRestart: { serviceRoutes: boolean; accountRules: boolean; generation: number } | null = null;
+  private heldRestartTimer: ReturnType<typeof setInterval> | null = null;
   private currentGameId = "custom";
   private gameProcessCheckAt = 0;
   private gameProcessCheckRunning = false;
@@ -1178,6 +1187,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     this.cancelRouteProbes();
     if (this.serviceRoutesRetry) clearTimeout(this.serviceRoutesRetry);
     this.serviceRoutesRetry = null;
+    this.clearHeldRestart();
     this.loginGeneration += 1;
     const saved = this.telemetry.finish("system", reason === "app_update" ? "app_update" : null);
     await this.stopConnection("system", null);
@@ -1887,8 +1897,14 @@ export class AppController extends EventEmitter<AppControllerEvents> {
       if (this.profile !== profile || this.accessToken !== token) return false;
       this.serviceRouteState.propose(profile.subscriptionId, policy);
       this.xray.serviceRoutes?.setPolicySuspended(false);
-      if (previous?.fingerprint === policy.fingerprint) this.xray.serviceRoutes?.acknowledgeRevision(policy);
-      return previous?.fingerprint !== policy.fingerprint;
+      // The live-events stream reopens every 14 minutes and each "ready" asks
+      // again. A policy the running core already carries is not a change, even
+      // when it was never acknowledged (Smart Auto without rules stays pending):
+      // restarting for it dropped every connection, games included.
+      const running = this.lastConfig ? compiledServiceRoutes(this.lastConfig)?.policy : undefined;
+      const current = previous?.fingerprint === policy.fingerprint || running?.fingerprint === policy.fingerprint;
+      if (current) this.xray.serviceRoutes?.acknowledgeRevision(policy);
+      return !current;
     } catch {
       if (this.profile !== profile || this.accessToken !== token) return false;
       this.patch({ serviceRouteNotice: previous
@@ -1952,6 +1968,10 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     const profile = this.profile;
     const candidateProfile = this.serviceProfileFor(server); const policy = candidateProfile.serviceRoutes;
     if (!changed || !policy || !serviceExitForServer(policy, server) || !this.xray.isRunning()) return;
+    if (this.gameSessionActive()) {
+      this.holdRestartForGame("serviceRoutes", "Новые сервисные маршруты");
+      return;
+    }
     const candidate = buildXrayConfig(candidateProfile, server, this.state.settings, this.gamePassword);
     const compiled = compiledServiceRoutes(candidate);
     if (compiled && ["unsupported", "error", "suspended"].includes(compiled.status.state)) {
@@ -1993,6 +2013,10 @@ export class AppController extends EventEmitter<AppControllerEvents> {
       await this.loadTunnelProfile(subscriptionId);
       if (this.guestConnection.active) return;
       if (ruleRoutingKey(this.profile) === before || !this.xray.isRunning()) return;
+      if (this.gameSessionActive()) {
+        this.holdRestartForGame("accountRules", "Правила аккаунта изменились");
+        return;
+      }
       this.addLog("Правила аккаунта изменились: переподключение");
       await this.stopTunnelForReplacement();
       await this.connect();
@@ -2716,6 +2740,48 @@ export class AppController extends EventEmitter<AppControllerEvents> {
   private liveMatch(): boolean {
     return this.state.settings.gameEnabled === true && this.xray.isRunning() && this.xray.gameFallback !== "tunnel"
       && Boolean(this.xray.gameRuntimeSnapshot?.currentMatch);
+  }
+
+  /** A chosen game is running or a match is live: a core restart now would disconnect it. */
+  private gameSessionActive(): boolean {
+    return this.xray.isRunning() && ((this.state.settings.gameEnabled === true && this.gamePlaying) || this.liveMatch());
+  }
+
+  private holdRestartForGame(kind: "serviceRoutes" | "accountRules", what: string): void {
+    const generation = this.connectionGeneration;
+    if (this.heldRestart?.generation !== generation) this.heldRestart = { serviceRoutes: false, accountRules: false, generation };
+    if (!this.heldRestart[kind]) this.addLog(`${what}: применим после игры, чтобы не разорвать матч`);
+    this.heldRestart[kind] = true;
+    this.heldRestartTimer ??= setInterval(() => void this.resumeHeldRestart(), HELD_RESTART_CHECK_MS);
+  }
+
+  private clearHeldRestart(): void {
+    if (this.heldRestartTimer) clearInterval(this.heldRestartTimer);
+    this.heldRestartTimer = null;
+    this.heldRestart = null;
+  }
+
+  private async resumeHeldRestart(): Promise<void> {
+    const held = this.heldRestart;
+    if (!held) return this.clearHeldRestart();
+    // A restart since then (server switch, recovery, reconnect) already built the new configuration.
+    if (held.generation !== this.connectionGeneration || !this.xray.isRunning() || this.guestConnection.active) {
+      return this.clearHeldRestart();
+    }
+    if (this.gameSessionActive() || this.state.busy || this.state.status !== "connected") return;
+    this.clearHeldRestart();
+    if (held.accountRules) {
+      this.addLog("Игра завершена: применяем изменённые правила аккаунта");
+      try {
+        await this.stopTunnelForReplacement();
+        await this.connect();
+      } catch (error) {
+        this.addLog(`Правила аккаунта: ${messageOf(error)}`);
+      }
+      return;
+    }
+    this.addLog("Игра завершена: применяем новые сервисные маршруты");
+    await this.applyServiceRoutes().catch(() => {});
   }
 
   private async verifyTunnelHealth(immediate = false, cause: AttemptCause | null = null): Promise<void> {

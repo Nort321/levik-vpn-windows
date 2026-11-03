@@ -276,6 +276,8 @@ export function withServiceRoutes(base: Record<string, unknown>, input: {
   if (serviceUnsupported && !automatic) return inactive("unsupported", serviceUnsupported);
   const policyActive = policy.rules.length > 0 && !serviceUnsupported;
   if (serviceUnsupported) { status.state = "unsupported"; status.detail = serviceUnsupported; }
+  // No rules: the runtime never reports route states, so the policy is applied once the core runs it.
+  else if (!policy.rules.length) status.state = "applied";
   if (hasTuic(input.selected)) return inactive("unsupported", "unsupported_transport");
   const candidates = input.servers.filter((server) => !hasTuic(server) && serviceExitForServer(policy, server)?.state === "enabled");
   const selectedExit = serviceExitForServer(policy, input.selected)!;
