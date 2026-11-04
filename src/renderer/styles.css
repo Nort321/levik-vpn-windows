@@ -767,8 +767,6 @@ select option { color: var(--text); background-color: var(--select-bg); }
 .guest-actions { display: flex; flex-wrap: wrap; gap: 10px; margin: 18px 0; }
 .guest-proxy-help { border-top: 1px solid var(--border); padding-top: 18px; margin-top: 24px; }
 .guest-proxy-help summary { cursor: pointer; font-weight: 600; }
-.guest-entry { display: flex; justify-content: space-between; align-items: center; gap: 16px; margin-bottom: 20px; }
-.guest-entry p { margin-bottom: 0; }
 
 .drop-overlay { position: fixed; inset: 0; z-index: 25; display: grid; place-items: center; padding: 32px; background: var(--dialog-backdrop, rgba(2,7,14,.72)); backdrop-filter: blur(10px); opacity: 0; transition: opacity 160ms ease; }
 .drop-overlay[hidden] { display: none; }
