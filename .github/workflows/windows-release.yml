@@ -65,6 +65,8 @@ jobs:
       - run: npm run lint
       - run: npm run build
       - run: npm test
+        env:
+          LEVIK_TEST_CORE: ${{ github.workspace }}/vendor/levik-core/windows-x64/levik_core.node
 
       - name: Verify manual HotSwitch on the pinned Windows Xray
         run: node scripts/smoke-smart-auto-flows.mjs
@@ -86,6 +88,13 @@ jobs:
         run: npm run package:win
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: "false"
+
+      - name: Load bundled Rust core in Electron
+        shell: pwsh
+        run: |
+          $env:ELECTRON_RUN_AS_NODE = "1"
+          & "./release/win-unpacked/Levik VPN.exe" "./scripts/smoke-bundled-core.cjs" "./release/win-unpacked/resources/levik-core/levik_core.node" "0.5.0"
+          if ($LASTEXITCODE -ne 0) { throw "Bundled Rust core did not load in Electron" }
 
       - name: Prepare release files
         shell: pwsh

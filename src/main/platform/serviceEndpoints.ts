@@ -118,6 +118,7 @@ export async function fetchEndpointsDocument(
   urls: readonly string[],
   minSequence: number,
   fetchImpl: Fetch = fetch,
+  verify: (body: Buffer, signature: string) => ServiceEndpointsDocument | null = verifyEndpointsDocument,
 ): Promise<{ document: ServiceEndpointsDocument; body: Buffer; signature: string } | null> {
   const get = (url: string, limit: number) => fetchImpl(url, {
     method: "GET",
@@ -131,7 +132,7 @@ export async function fetchEndpointsDocument(
       const [body, signature] = await Promise.all([get(url, MAX_DOCUMENT_BYTES), get(`${url}.sig`, MAX_SIGNATURE_BYTES)]);
       if (!body || !signature) continue;
       const text = signature.toString("utf8");
-      const document = verifyEndpointsDocument(body, text);
+      const document = verify(body, text);
       if (document && document.sequence >= minSequence) return { document, body, signature: text };
     } catch {
       // A blocked or broken mirror: try the next one.
@@ -177,7 +178,11 @@ export class ServiceEndpointsStore {
   private refreshing: Promise<boolean> | null = null;
   private lastAttemptAt = 0;
 
-  constructor(private readonly path: string, private readonly fetchImpl: Fetch = fetch) {}
+  constructor(
+    private readonly path: string,
+    private readonly fetchImpl: Fetch = fetch,
+    private readonly verify: (body: Buffer, signature: string) => ServiceEndpointsDocument | null = verifyEndpointsDocument,
+  ) {}
 
   async load(): Promise<void> {
     try {
@@ -185,7 +190,7 @@ export class ServiceEndpointsStore {
       if (typeof value !== "object" || value === null) return;
       const { body, signature } = value as Record<string, unknown>;
       if (typeof body !== "string" || typeof signature !== "string") return;
-      useEndpointsDocument(verifyEndpointsDocument(Buffer.from(body, "base64"), signature));
+      useEndpointsDocument(this.verify(Buffer.from(body, "base64"), signature));
     } catch {
       // No stored document yet: the built-in hosts apply.
     }
@@ -201,7 +206,7 @@ export class ServiceEndpointsStore {
     this.lastAttemptAt = Date.now();
     this.refreshing = (async () => {
       const before = current;
-      const fetched = await fetchEndpointsDocument(before.configUrls, Math.max(1, before.sequence), this.fetchImpl);
+      const fetched = await fetchEndpointsDocument(before.configUrls, Math.max(1, before.sequence), this.fetchImpl, this.verify);
       if (!fetched || (fetched.document.sequence === before.sequence && before.sequence > 0)) return false;
       useEndpointsDocument(fetched.document);
       await mkdir(dirname(this.path), { recursive: true });

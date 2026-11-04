@@ -180,6 +180,35 @@ export class RustCore {
     return expected;
   }
 
+  /** Pure operations on a typed native handle. Errors never expose key material. */
+  runNative<Output>(name: string, rust: () => Output, typescript: () => Output, accept: (value: unknown) => value is Output): Output {
+    if (this.modeValue === "ts") return typescript();
+    const ask = (): { ok: true; value: Output } | { ok: false } => {
+      try {
+        const value = rust();
+        if (!accept(value)) throw new Error("shape");
+        return { ok: true, value };
+      } catch {
+        this.problem(name, "failed", "операция не выполнена");
+        return { ok: false };
+      }
+    };
+    if (this.modeValue === "rust") {
+      const answer = ask();
+      if (!answer.ok) return typescript();
+      this.counters.decided += 1;
+      return answer.value;
+    }
+    const expected = typescript();
+    const answer = ask();
+    if (answer.ok) {
+      this.counters.compared += 1;
+      // Crypto values are compared as scalars; no byte or value enters the journal.
+      if (jsonDifference(toJson(expected), toJson(answer.value))) this.problem(name, "differs", "ответ расходится с TypeScript");
+    }
+    return expected;
+  }
+
   private ask(name: string, input: unknown): { ok: true; value: unknown } | { ok: false } {
     try {
       const value: unknown = JSON.parse(this.bridge?.call(name, JSON.stringify(input) ?? "null") ?? "null");

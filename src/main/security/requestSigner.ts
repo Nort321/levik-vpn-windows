@@ -1,3 +1,4 @@
+import type { NativeApiRequest } from "../core/nativeIdentity";
 import { createHash, randomBytes } from "node:crypto";
 import { DeviceIdentity } from "./deviceIdentity";
 
@@ -16,6 +17,10 @@ export function sha256Hex(value: Uint8Array | string): string {
 export class RequestSigner {
   constructor(private readonly identity: DeviceIdentity) {}
 
+  requestWithRust(input: NativeApiRequest): Promise<string> | null {
+    return this.identity.requestWithRust(input);
+  }
+
   sign(method: string, path: string, accessToken: string | null, body: Uint8Array): SignedRequest {
     if (!/^[A-Z]{3,10}$/.test(method)) throw new Error("Invalid HTTP method");
     if (!path.startsWith("/") || path.includes("?") || path.includes("#")) {
@@ -24,24 +29,26 @@ export class RequestSigner {
     if (body.byteLength > 1024 * 1024) throw new Error("Signed request body is too large");
     const timestamp = Math.floor(Date.now() / 1000);
     const nonce = randomBytes(16).toString("base64url");
-    const deviceId = this.identity.deviceId();
-    const canonical = [
-      "v1",
-      method,
-      path,
-      String(timestamp),
-      nonce,
-      deviceId,
-      sha256Hex(accessToken ?? ""),
-      sha256Hex(body),
-    ].join("\n");
-    return {
-      deviceId,
-      timestamp,
-      nonce,
-      signature: this.identity.sign(Buffer.from(canonical)),
-      requestHash: createHash("sha256").update(canonical).digest("base64url"),
-    };
+    return this.identity.signedRequest(method, path, accessToken, body, timestamp, nonce, () => {
+      const deviceId = this.identity.deviceId();
+      const canonical = [
+        "v1",
+        method,
+        path,
+        String(timestamp),
+        nonce,
+        deviceId,
+        sha256Hex(accessToken ?? ""),
+        sha256Hex(body),
+      ].join("\n");
+      return {
+        deviceId,
+        timestamp,
+        nonce,
+        signature: this.identity.sign(Buffer.from(canonical)),
+        requestHash: createHash("sha256").update(canonical).digest("base64url"),
+      };
+    });
   }
 }
 

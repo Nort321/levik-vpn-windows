@@ -3,8 +3,8 @@
 // private Nort321/levik-desktop release pinned below into vendor/levik-core/<platform>-<arch>/
 // and checks it against the SHA-256 pinned here, not against anything in the release.
 // Needs LEVIK_CORE_TOKEN: a fine-grained token with "Contents: read" on that repository only.
-// Without the token it skips with a warning: in stage 0 the module only reports itself and
-// the app runs on its TypeScript code without it. A token that is set but fails is an error.
+// Main/tag CI builds require the module. Local and fork builds may use TypeScript
+// without a token. A token that is set but fails is always an error.
 // Usage: node scripts/download-levik-core.mjs   (LEVIK_BUILD_ARCH overrides the arch on macOS)
 import { createHash } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
@@ -12,12 +12,14 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const REPOSITORY = "Nort321/levik-desktop";
-const VERSION = "v0.4.0";
+const VERSION = "v0.5.0";
+// Drafts are addressed by immutable release ID; the tag endpoint is published-only.
+const RELEASE_ID = 434477273;
 const SHA256 = {
-  "darwin-arm64": "4ac0d41ab6bb4cb734b5003f836edd5e3158da726a30281f74ebdf7817c517dd",
-  "darwin-x64": "965903c61b183c6a28e7cc44c27c901df15bbdb201fd9b2c2de81993d6e4df04",
-  "windows-x64": "d15744b29bb3246138915b088f373a471b7253ed073b2947b640b56e54833976",
-  "linux-x64": "e8ed07d1097db5b009ccfd8c15a375332731b5c1d4118494b3767034eebd50b7",
+  "darwin-arm64": "4c64720afe251aa6f39b0710ed6a19e94db258a2147c9159915a6ce21d5d57c2",
+  "darwin-x64": "2472abeb50e921a15a64e1cd62fed5a4d03ea93c6733b3918521699755646b15",
+  "windows-x64": "d419942bffeb845f38817cd45b5334c5993836a253981fbb94cf7774c024824f",
+  "linux-x64": "b595ddc6f8e08b82bc21455c347931a20695d31c32ab4aee847f6ff4bbc3f885",
 };
 
 const os = { darwin: "darwin", win32: "windows", linux: "linux" }[process.platform];
@@ -28,12 +30,16 @@ if (!expected) throw new Error(`No Levik core module for ${dir}`);
 const token = process.env.LEVIK_CORE_TOKEN?.trim();
 if (!token) {
   const message = "LEVIK_CORE_TOKEN is not set: building without the Rust core module";
+  if (process.env.GITHUB_ACTIONS === "true" && (process.env.GITHUB_REF === "refs/heads/main" || process.env.GITHUB_REF?.startsWith("refs/tags/"))) {
+    throw new Error("LEVIK_CORE_TOKEN is required for a main/tag CI build");
+  }
   console.warn(process.env.GITHUB_ACTIONS ? `::warning::${message}` : message);
   process.exit(0);
 }
 
 async function request(url, headers) {
   // Redirects are followed by hand so the token never leaves api.github.com.
+  if (new URL(url).origin !== "https://api.github.com") throw new Error("Levik core API origin rejected");
   const response = await fetch(url, { headers, redirect: "manual", signal: AbortSignal.timeout(120_000) });
   if (response.status >= 300 && response.status < 400) {
     const location = response.headers.get("location");
@@ -44,12 +50,14 @@ async function request(url, headers) {
 }
 
 const api = { Authorization: `Bearer ${token}`, "X-GitHub-Api-Version": "2022-11-28" };
-const release = await request(`https://api.github.com/repos/${REPOSITORY}/releases/tags/${VERSION}`, {
+const releasePath = RELEASE_ID === null ? `tags/${VERSION}` : String(RELEASE_ID);
+const release = await request(`https://api.github.com/repos/${REPOSITORY}/releases/${releasePath}`, {
   ...api,
   Accept: "application/vnd.github+json",
 });
 if (!release.ok) throw new Error(`Levik core ${VERSION}: release lookup failed with HTTP ${release.status}`);
-const { assets } = await release.json();
+const { assets, tag_name: tag } = await release.json();
+if (tag !== VERSION) throw new Error(`Levik core ${VERSION}: release tag mismatch`);
 const name = `levik_core-${dir}.node`;
 const asset = Array.isArray(assets) ? assets.find((item) => item?.name === name) : undefined;
 if (typeof asset?.url !== "string") throw new Error(`Levik core ${VERSION}: ${name} is not in the release`);

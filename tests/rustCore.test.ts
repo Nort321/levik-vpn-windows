@@ -590,7 +590,9 @@ describe("telemetry codes through the core", () => {
 });
 
 // The real module, when `npm run download:levik-core` (or a local build) put it into vendor.
-const status = loadLevikCore(levikCorePath({ packaged: false, resourcesPath: "", appPath: join(__dirname, "..") }));
+const requestedCore = process.env.LEVIK_TEST_CORE;
+const status = loadLevikCore(requestedCore ?? levikCorePath({ packaged: false, resourcesPath: "", appPath: join(__dirname, "..") }));
+if (requestedCore && status.state !== "loaded") throw new Error("The requested Rust test module did not load");
 const bridge = coreBridge(status);
 
 describe.runIf(bridge !== null)("the Rust core in shadow mode agrees with TypeScript", () => {

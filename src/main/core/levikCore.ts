@@ -1,3 +1,5 @@
+import { isNativeReplyKey, type NativeReplyCrypto, type NativeReplyKey } from "./nativeReply";
+import { isNativeIdentity, type NativeIdentity } from "./nativeIdentity";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 
@@ -18,6 +20,9 @@ export interface LevikCoreInfo {
 
 export interface LevikCoreModule {
   coreInfo(): LevikCoreInfo;
+  /** Optional wave-B handle; older contract-2 modules still work. */
+  restoreIdentity?(serialized: string): NativeIdentity;
+  replyCrypto?: NativeReplyCrypto;
   /** Names of the core functions this build offers. */
   functions(): string[];
   /** Runs a core function: JSON in, JSON out; throws on bad input. */
@@ -83,7 +88,7 @@ export function loadLevikCore(path: string, options: {
   if (!isRecord(loaded) || typeof loaded.coreInfo !== "function") {
     return { state: "rejected", reason: "нет coreInfo()" };
   }
-  const { coreInfo, functions, call } = loaded;
+  const { coreInfo, functions, call, restoreIdentity, createReplyKey, sealReply } = loaded;
   let info: unknown;
   try {
     info = coreInfo();
@@ -106,6 +111,23 @@ export function loadLevikCore(path: string, options: {
   const described: LevikCoreInfo = info;
   const module: LevikCoreModule = {
     coreInfo: () => described,
+    ...(typeof createReplyKey === "function" && typeof sealReply === "function" ? { replyCrypto: {
+      createKey: (): NativeReplyKey => {
+        const key: unknown = createReplyKey();
+        if (!isNativeReplyKey(key)) throw new Error("Invalid native reply key");
+        return key;
+      },
+      seal: (publicKey: string, link: string): string => {
+        const sealed: unknown = sealReply(publicKey, link);
+        if (typeof sealed !== "string" || !/^[A-Za-z0-9+/]{300,1500}={0,2}$/.test(sealed)) throw new Error("Invalid native encrypted reply");
+        return sealed;
+      },
+    } } : {}),
+    ...(typeof restoreIdentity === "function" ? { restoreIdentity: (serialized: string): NativeIdentity => {
+      const identity: unknown = restoreIdentity(serialized);
+      if (!isNativeIdentity(identity)) throw new Error("Invalid native identity handle");
+      return identity;
+    } } : {}),
     functions: (): string[] => {
       const names: unknown = functions();
       return Array.isArray(names) ? names.filter((name): name is string => typeof name === "string") : [];
