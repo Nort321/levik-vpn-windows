@@ -125,20 +125,16 @@ import { LiveEvents, presenceReport, samePresence } from "./platform/liveEvents"
 import type { LiveEvent, PresenceReport } from "./platform/liveEvents";
 import { isAccountHint, isApprovalAnswer, isTelegramLink, matchNumber, parseApprovals } from "./platform/loginApproval";
 import {
-  canonicalNodeList,
   isCanonicalNodeList,
   nodeIdForServer,
   nodeIdForEndpoint,
   nodeIdForHost,
   serverSyncEndpoint,
   nodeLoadForServer,
-  parseNodeList,
-  reconcileFavorites,
-  serversByNode,
-  unionNodeLists,
 } from "./platform/favoriteNodes";
 import { avoidMaintenance, IdleMeter, maintenanceFor, maintenanceMove, type MaintenanceWindow } from "./platform/maintenance";
 import { countryServersWithCore } from "./core/coreServers";
+import { reconcileFavoritesWithCore, unionNodeListsWithCore } from "./core/coreFavorites";
 import { captivePortal, checkServices, diagnosisSummary, diagnosisVerdict, parseDiagnoseReport, vpnPhase, type DiagnosisInput } from "./platform/diagnosis";
 import type { LevikCoreStatus } from "./core/levikCore";
 import { coreBridge, coreModeFor, RustCore } from "./core/rustCore";
@@ -2480,7 +2476,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
       if (theirs !== undefined) await this.updateSettings({ favoriteNodes: theirs }, "sync");
       return;
     }
-    const joined = theirs === undefined ? mine : unionNodeLists(mine, theirs);
+    const joined = theirs === undefined ? mine : unionNodeListsWithCore(this.core, mine, theirs);
     if (joined !== mine) await this.updateSettings({ favoriteNodes: joined }, "sync");
     if (joined !== theirs) this.pendingSync = { ...this.pendingSync, favoriteNodes: joined };
     this.favoritesJoined = true;
@@ -2501,12 +2497,14 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     this.reconcilingFavorites = true;
     try {
       const settings = this.state.settings;
-      const result = reconcileFavorites(
-        { nodes: parseNodeList(settings.favoriteNodes), reconciledLocal: this.favoriteReconciledLocal },
-        new Set(settings.favoriteServerIds),
-        serversByNode(this.state.servers),
+      const result = reconcileFavoritesWithCore(
+        this.core,
+        settings.favoriteNodes,
+        this.favoriteReconciledLocal,
+        settings.favoriteServerIds,
+        this.state.servers,
       );
-      const nodes = canonicalNodeList(result.nodes);
+      const nodes = result.nodes;
       const ids = [...result.local];
       this.favoriteReconciledLocal = result.local;
       await this.saveSyncState();

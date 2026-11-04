@@ -5,6 +5,7 @@ import type { ProtocolAdvice } from "../platform/remoteConfig";
 import type { ProtocolHistory, RankedServer } from "../vpn/smartAuto";
 import type { TunnelProfileOutcome } from "../vpn/tunnelProfile";
 import type { CompiledServiceRoutes } from "../vpn/serviceRoutes";
+import { isCanonicalNodeList } from "../platform/favoriteNodes";
 
 /**
  * Shape checks for answers from the Rust core. In "rust" mode an answer is
@@ -198,4 +199,20 @@ export function isXrayConfigAnswer(value: unknown): value is XrayConfigAnswer {
 export function isListPositions(value: unknown, length: number): value is number[] {
   return Array.isArray(value) && value.every((position) => isCount(position) && position < length)
     && new Set(value).size === value.length;
+}
+
+/** The account's node list and the local favourites after a reconcile. */
+export interface FavoritesAnswer {
+  nodes: string;
+  local: string[];
+}
+
+/** A node list as the account stores it: canonical. */
+export function isNodeListAnswer(value: unknown): value is string {
+  return isString(value) && isCanonicalNodeList(value);
+}
+
+export function isFavoritesAnswer(value: unknown): value is FavoritesAnswer {
+  return isRecord(value) && Object.keys(value).length === 2 && isNodeListAnswer(value.nodes)
+    && isStringList(value.local) && new Set(value.local).size === value.local.length;
 }

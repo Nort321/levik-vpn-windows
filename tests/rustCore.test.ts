@@ -1,10 +1,12 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { isDiagnosisVerdict, isIndexList, isListPositions, isTunnelProfileOutcome } from "../src/main/core/coreGuards";
+import { isDiagnosisVerdict, isFavoritesAnswer, isIndexList, isListPositions, isTunnelProfileOutcome } from "../src/main/core/coreGuards";
 import { prepareProfileWithCore } from "../src/main/core/coreProfile";
 import { buildXrayConfigWithCore } from "../src/main/core/coreXray";
 import { countryServersWithCore } from "../src/main/core/coreServers";
+import { reconcileFavoritesWithCore, unionNodeListsWithCore } from "../src/main/core/coreFavorites";
+import { nodeIdForHost } from "../src/main/platform/favoriteNodes";
 import { compiledServiceRoutes } from "../src/main/vpn/serviceRoutes";
 import { buildXrayConfig } from "../src/main/vpn/xrayConfig";
 import type { AppSettings } from "../src/shared/contracts";
@@ -402,6 +404,44 @@ describe("countryServersWithCore", () => {
   });
 });
 
+const FAVORITE_IDS = COUNTRY_SERVERS.map((server) => server.id);
+const FAVORITE_NODES = ["a.example.com", "b.example.com", "c.example.com"].map((host) => nodeIdForHost(host) ?? "").sort();
+
+describe("reconcileFavoritesWithCore", () => {
+  const account = FAVORITE_NODES.slice(0, 2).join(",");
+
+  it("asks nothing in ts mode", () => {
+    const bridge = fakeBridge({ "favoriteNodes.reconcile": () => ({}) });
+    const result = reconcileFavoritesWithCore(new RustCore(bridge, () => {}, "ts"), account, new Set(), [FAVORITE_IDS[0]!], COUNTRY_SERVERS);
+    expect(bridge.calls).toEqual([]);
+    expect(result.local.has(FAVORITE_IDS[0]!)).toBe(true);
+  });
+
+  it("uses the Rust answer in rust mode, and TypeScript for a list that is not canonical", () => {
+    const answers: unknown[] = [{ nodes: FAVORITE_NODES[2], local: ["x"] }, { nodes: "b,a", local: [] }, { nodes: "", local: ["x", "x"] }];
+    const core = new RustCore(fakeBridge({ "favoriteNodes.reconcile": () => answers.shift() }), () => {}, "rust");
+    expect(reconcileFavoritesWithCore(core, account, new Set(), [], COUNTRY_SERVERS)).toEqual({ nodes: FAVORITE_NODES[2], local: new Set(["x"]) });
+    const typescript = reconcileFavoritesWithCore(new RustCore(null, () => {}, "ts"), account, new Set(), [], COUNTRY_SERVERS);
+    expect(reconcileFavoritesWithCore(core, account, new Set(), [], COUNTRY_SERVERS)).toEqual(typescript);
+    expect(reconcileFavoritesWithCore(core, account, new Set(), [], COUNTRY_SERVERS)).toEqual(typescript);
+    expect(core.stats()).toMatchObject({ decided: 1, failed: 2 });
+  });
+
+  it("accepts a canonical list and distinct server ids only", () => {
+    expect(isFavoritesAnswer({ nodes: FAVORITE_NODES.join(","), local: ["a", "b"] })).toBe(true);
+    expect(isFavoritesAnswer({ nodes: "", local: [] })).toBe(true);
+    expect(isFavoritesAnswer({ nodes: [...FAVORITE_NODES].reverse().join(","), local: [] })).toBe(false);
+    expect(isFavoritesAnswer({ nodes: "", local: ["a", "a"] })).toBe(false);
+    expect(isFavoritesAnswer({ nodes: "", local: [], extra: 1 })).toBe(false);
+  });
+
+  it("joins node lists through the core", () => {
+    const core = new RustCore(fakeBridge({ "favoriteNodes.unionNodeLists": () => "not,canonical" }), () => {}, "rust");
+    expect(unionNodeListsWithCore(core, FAVORITE_NODES[0]!, FAVORITE_NODES[1]!)).toBe(FAVORITE_NODES.slice(0, 2).join(","));
+    expect(core.stats()).toMatchObject({ failed: 1 });
+  });
+});
+
 // The real module, when `npm run download:levik-core` (or a local build) put it into vendor.
 const status = loadLevikCore(levikCorePath({ packaged: false, resourcesPath: "", appPath: join(__dirname, "..") }));
 const bridge = coreBridge(status);
@@ -540,5 +580,25 @@ describe.runIf(bridge !== null)("the Rust core in shadow mode agrees with TypeSc
     expect(core.stats()).toMatchObject({ differed: 0, failed: 0 });
     expect(core.stats().compared - before).toBe(COUNTRY_CODES.length);
     expect(COUNTRY_CODES.filter((code) => countryServers(COUNTRY_SERVERS, code).length > 0).length).toBeGreaterThan(2);
+  });
+
+  it("favourites and the account's node list", () => {
+    expect(core.has("favoriteNodes.reconcile")).toBe(true);
+    const before = core.stats().compared;
+    const accountNodes = [...new Set(COUNTRY_SERVERS.map((server) => nodeIdForHost(String((server.outbound.settings as { vnext?: Array<{ address?: string }>; address?: string } | undefined)?.vnext?.[0]?.address ?? "")) ?? ""))]
+      .filter(Boolean).sort();
+    const accounts = [null, "", accountNodes.slice(0, 1).join(","), accountNodes.join(","), "broken", FAVORITE_NODES.join(",")];
+    const idSets = [[], FAVORITE_IDS.slice(0, 1), FAVORITE_IDS.slice(0, 3), FAVORITE_IDS.slice(-2), ["unknown", ...FAVORITE_IDS.slice(1, 2)]];
+    for (const account of accounts) {
+      for (const reconciled of idSets) {
+        for (const local of idSets) reconcileFavoritesWithCore(core, account, new Set(reconciled), local, COUNTRY_SERVERS);
+      }
+    }
+    for (const first of accounts) {
+      for (const second of accounts) unionNodeListsWithCore(core, first ?? "", second ?? "");
+    }
+    expect(lines).toEqual([]);
+    expect(core.stats()).toMatchObject({ differed: 0, failed: 0 });
+    expect(core.stats().compared - before).toBe(accounts.length * idSets.length ** 2 + accounts.length ** 2);
   });
 });
