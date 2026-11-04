@@ -1,3 +1,4 @@
+import { corePublicFetch, type NativePublicClient } from "./core/publicFetch";
 import { CoreApprovals } from "./core/coreApprovals";
 import { CoreEndpoints } from "./core/coreEndpoints";
 import { CoreSettings } from "./core/coreSettings";
@@ -376,15 +377,17 @@ export class AppController extends EventEmitter<AppControllerEvents> {
   private lastDiagnosis: { at: number; summary: DiagnosisSummary } | null = null;
   private killSwitchHealthTimer: ReturnType<typeof setInterval> | null = null;
   private killSwitchHealthCheckRunning = false;
+  private publicHttp: NativePublicClient | null = null;
+  private readonly publicFetch = corePublicFetch(() => this.publicHttp, () => this.core.mode);
   private readonly telemetry = new ConnectionTelemetry(join(app.getPath("userData"), "telemetry"), {
     platform: "windows",
     app: app.getVersion(),
     os: windowsMajorVersion(release()),
-  });
+  }, new TelemetryClient(this.publicFetch));
   private diskLog: DiskLog | null = null;
-  private readonly remoteConfig = new RemoteConfigClient("windows", app.getVersion());
+  private readonly remoteConfig = new RemoteConfigClient("windows", app.getVersion(), this.publicFetch);
   private readonly remoteConfigStore = new RemoteConfigStore(join(app.getPath("userData"), "remote-config.json"));
-  private readonly endpointsStore = new ServiceEndpointsStore(join(app.getPath("userData"), "service-endpoints.json"), fetch, (body, signature) => this.endpointsCore.verify(body, signature));
+  private readonly endpointsStore = new ServiceEndpointsStore(join(app.getPath("userData"), "service-endpoints.json"), this.publicFetch, (body, signature) => this.endpointsCore.verify(body, signature));
   private remoteStored: StoredRemoteConfig | null = null;
   /** Stage 2 of the Rust migration: TypeScript alone until main.ts hands over the loaded module. */
   private core = new RustCore(null, () => {}, "ts");
@@ -394,7 +397,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
   private readonly settingsCore = new CoreSettings(() => this.core);
   private readonly loadCore = new CoreLiveLoad(() => this.core);
   /** Node load, full nodes and quality, docs/app-platform.md "Node load". */
-  private readonly liveLoadClient = new LiveLoadClient("windows", app.getVersion(), fetch, (value) => this.loadCore.parse(value));
+  private readonly liveLoadClient = new LiveLoadClient("windows", app.getVersion(), this.publicFetch, (value) => this.loadCore.parse(value));
   private liveLoad: LiveLoad | null = null;
   private liveLoadRefresh: Promise<void> | null = null;
   private nextConnectedLoadAt = 0;
@@ -523,6 +526,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
       new RequestSigner(this.identity),
       app.getVersion(),
       () => this.endpointsStore.refresh(ENDPOINTS_RETRY_MS),
+      this.publicFetch,
     );
     this.xray.on("log", (line) => this.handleCoreLog(line));
     this.xray.on("exit", (code, expected) => this.handleXrayExit(code, expected));
@@ -3265,6 +3269,9 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     this.applyCoreMode();
     this.identity.useRustCore(this.core, status.state === "loaded" ? status.module.restoreIdentity : undefined);
     this.replyCrypto = status.state === "loaded" ? status.module.replyCrypto ?? null : null;
+    this.publicHttp = null;
+    try { this.publicHttp = status.state === "loaded" ? status.module.createPublicClient?.() ?? null : null; }
+    catch { this.recordDiagnostic("Rust-ядро: служебный HTTP-клиент недоступен"); }
   }
 
   private applyCoreMode(): void {

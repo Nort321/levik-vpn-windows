@@ -1,3 +1,4 @@
+import { isNativePublicClient, type NativePublicClient } from "./publicFetch";
 import { isNativeReplyKey, type NativeReplyCrypto, type NativeReplyKey } from "./nativeReply";
 import { isNativeIdentity, type NativeIdentity } from "./nativeIdentity";
 import { existsSync } from "node:fs";
@@ -23,6 +24,7 @@ export interface LevikCoreModule {
   /** Optional wave-B handle; older contract-2 modules still work. */
   restoreIdentity?(serialized: string): NativeIdentity;
   replyCrypto?: NativeReplyCrypto;
+  createPublicClient?(): NativePublicClient;
   /** Names of the core functions this build offers. */
   functions(): string[];
   /** Runs a core function: JSON in, JSON out; throws on bad input. */
@@ -88,7 +90,7 @@ export function loadLevikCore(path: string, options: {
   if (!isRecord(loaded) || typeof loaded.coreInfo !== "function") {
     return { state: "rejected", reason: "нет coreInfo()" };
   }
-  const { coreInfo, functions, call, restoreIdentity, createReplyKey, sealReply } = loaded;
+  const { coreInfo, functions, call, restoreIdentity, createReplyKey, sealReply, createPublicClient } = loaded;
   let info: unknown;
   try {
     info = coreInfo();
@@ -111,6 +113,11 @@ export function loadLevikCore(path: string, options: {
   const described: LevikCoreInfo = info;
   const module: LevikCoreModule = {
     coreInfo: () => described,
+    ...(typeof createPublicClient === "function" ? { createPublicClient: (): NativePublicClient => {
+      const client: unknown = createPublicClient();
+      if (!isNativePublicClient(client)) throw new Error("Invalid native public client");
+      return client;
+    } } : {}),
     ...(typeof createReplyKey === "function" && typeof sealReply === "function" ? { replyCrypto: {
       createKey: (): NativeReplyKey => {
         const key: unknown = createReplyKey();

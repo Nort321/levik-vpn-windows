@@ -9,7 +9,7 @@ export class ApiEndpoints {
   private verifiedUntil = 0;
   private pending: Promise<URL> | null = null;
 
-  constructor(baseUrl: string, private readonly refreshEndpoints: () => Promise<boolean> = async () => false) {
+  constructor(baseUrl: string, private readonly refreshEndpoints: () => Promise<boolean> = async () => false, private readonly fetchImpl: typeof fetch = fetch) {
     const origin = new URL(baseUrl);
     if (origin.protocol !== "https:" || origin.pathname !== "/" ||
         origin.username || origin.password || origin.search || origin.hash) {
@@ -50,7 +50,7 @@ export class ApiEndpoints {
       try {
         // Discover availability without tokens or device identifiers, before
         // sending a signed operation. Never replay a possibly completed POST.
-        const response = await fetch(new URL("/api/health", origin), {
+        const response = await this.fetchImpl(new URL("/api/health", origin), {
           method: "GET",
           credentials: "omit",
           redirect: "error",

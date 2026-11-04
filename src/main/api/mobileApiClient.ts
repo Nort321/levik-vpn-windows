@@ -44,8 +44,9 @@ export class MobileApiClient {
     private readonly signer: RequestSigner,
     private readonly version: string,
     refreshEndpoints?: () => Promise<boolean>,
+    publicFetch: typeof fetch = fetch,
   ) {
-    this.endpoints = new ApiEndpoints(baseUrl, refreshEndpoints);
+    this.endpoints = new ApiEndpoints(baseUrl, refreshEndpoints, publicFetch);
   }
 
   createChallenge(payload: Record<string, unknown>): Promise<AuthChallengeResponse> {
