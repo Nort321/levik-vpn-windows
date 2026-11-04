@@ -12,12 +12,12 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const REPOSITORY = "Nort321/levik-desktop";
-const VERSION = "v0.3.0";
+const VERSION = "v0.4.0";
 const SHA256 = {
-  "darwin-arm64": "a4c3044daac8b89200b7380d22177bbae030326a71621fe633034ac5d1617eec",
-  "darwin-x64": "68cc63aa06550f78ef727d1ba6d217c6aeab93aaa88b48235035a51622be35fb",
-  "windows-x64": "67b324136768079908eb556ebe71d00dae8ae83b2c389f603bcb08bc36a7b1cc",
-  "linux-x64": "f3c62e4f07a51c2ab9ddd714283bf3bb7f450c82d3422c692dbc182ef4bd2a23",
+  "darwin-arm64": "4ac0d41ab6bb4cb734b5003f836edd5e3158da726a30281f74ebdf7817c517dd",
+  "darwin-x64": "965903c61b183c6a28e7cc44c27c901df15bbdb201fd9b2c2de81993d6e4df04",
+  "windows-x64": "d15744b29bb3246138915b088f373a471b7253ed073b2947b640b56e54833976",
+  "linux-x64": "e8ed07d1097db5b009ccfd8c15a375332731b5c1d4118494b3767034eebd50b7",
 };
 
 const os = { darwin: "darwin", win32: "windows", linux: "linux" }[process.platform];
