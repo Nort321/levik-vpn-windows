@@ -20,7 +20,31 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  core:
+    name: Fetch pinned Rust module
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      # No checkout or application/dependency code runs with this write token.
+      - name: Read own-repository draft assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p core-input/windows-x64
+          gh api "repos/$GITHUB_REPOSITORY/releases/assets/711070040" -H "Accept: application/octet-stream" > core-input/windows-x64/levik_core.node
+          printf '%s\n' 'c5f05ae3f8f6384ac17ba8f3929a136b8d5d3cb0d0c18bf36f5193faed7ec604  core-input/windows-x64/levik_core.node' | sha256sum --check
+      - uses: actions/upload-artifact@v4
+        with:
+          name: levik-core-pinned
+          path: core-input/
+          if-no-files-found: error
+          retention-days: 1
   build:
+    needs: core
+    if: ${{ always() && (needs.core.result == 'success' || (github.event_name == 'pull_request' && needs.core.result == 'skipped')) }}
     name: Check and build installer
     runs-on: windows-latest
     timeout-minutes: 35
@@ -59,14 +83,22 @@ jobs:
 
       - run: npm run download:xray
       - run: npm run download:singbox
-      - run: npm run download:levik-core
-        env:
-          LEVIK_CORE_TOKEN: ${{ secrets.LEVIK_CORE_TOKEN }}
+      - uses: actions/download-artifact@v4
+        if: needs.core.result == 'success'
+        with:
+          name: levik-core-pinned
+          path: vendor/levik-core
+      - name: Verify pinned Rust module
+        if: needs.core.result == 'success'
+        run: npm run download:levik-core -- --verify-local
+      - name: Optional Rust module for pull requests
+        if: needs.core.result == 'skipped'
+        run: npm run download:levik-core
       - run: npm run lint
       - run: npm run build
       - run: npm test
         env:
-          LEVIK_TEST_CORE: ${{ github.workspace }}/vendor/levik-core/windows-x64/levik_core.node
+          LEVIK_TEST_CORE: ${{ needs.core.result == 'success' && format('{0}/vendor/levik-core/windows-x64/levik_core.node', github.workspace) || '' }}
 
       - name: Verify manual HotSwitch on the pinned Windows Xray
         run: node scripts/smoke-smart-auto-flows.mjs
@@ -90,10 +122,11 @@ jobs:
           CSC_IDENTITY_AUTO_DISCOVERY: "false"
 
       - name: Load bundled Rust core in Electron
+        if: needs.core.result == 'success'
         shell: pwsh
         run: |
           $env:ELECTRON_RUN_AS_NODE = "1"
-          & "./release/win-unpacked/Levik VPN.exe" "./scripts/smoke-bundled-core.cjs" "./release/win-unpacked/resources/levik-core/levik_core.node" "0.5.0"
+          & "./release/win-unpacked/Levik VPN.exe" "./scripts/smoke-bundled-core.cjs" "./release/win-unpacked/resources/levik-core/levik_core.node" "0.6.0"
           if ($LASTEXITCODE -ne 0) { throw "Bundled Rust core did not load in Electron" }
 
       - name: Prepare release files
