@@ -3268,6 +3268,8 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     const version = status.state === "loaded" ? status.info.version : null;
     this.core = new RustCore(coreBridge(status), (line) => this.recordDiagnostic(line), "ts", version);
     this.telemetry.useCore(() => this.core.tally());
+    this.telemetry.useRustCore(this.core, status.state === "loaded" ? status.module.openTelemetryQueue : undefined,
+      () => this.recordDiagnostic("Rust-ядро: очередь анонимных отчётов использует резервную реализацию"));
     this.applyCoreMode();
     this.identity.useRustCore(this.core, status.state === "loaded" ? status.module.restoreIdentity : undefined);
     this.replyCrypto = status.state === "loaded" ? status.module.replyCrypto ?? null : null;

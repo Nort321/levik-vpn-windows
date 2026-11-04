@@ -1,3 +1,4 @@
+import { isNativeTelemetryQueue, type NativeTelemetryQueue, type OpenTelemetryQueue } from "./nativeTelemetry";
 import { isNativeSecureStore, type OpenNativeStore, type NativeSecureStore } from "./nativeStore";
 import { isNativePublicClient, type NativePublicClient } from "./publicFetch";
 import { isNativeReplyKey, type NativeReplyCrypto, type NativeReplyKey } from "./nativeReply";
@@ -27,6 +28,7 @@ export interface LevikCoreModule {
   replyCrypto?: NativeReplyCrypto;
   createPublicClient?(): NativePublicClient;
   openSecureStore?: OpenNativeStore;
+  openTelemetryQueue?: OpenTelemetryQueue;
   /** Names of the core functions this build offers. */
   functions(): string[];
   /** Runs a core function: JSON in, JSON out; throws on bad input. */
@@ -92,7 +94,7 @@ export function loadLevikCore(path: string, options: {
   if (!isRecord(loaded) || typeof loaded.coreInfo !== "function") {
     return { state: "rejected", reason: "нет coreInfo()" };
   }
-  const { coreInfo, functions, call, restoreIdentity, createReplyKey, sealReply, createPublicClient, openSecureStore } = loaded;
+  const { coreInfo, functions, call, restoreIdentity, createReplyKey, sealReply, createPublicClient, openSecureStore, openTelemetryQueue } = loaded;
   let info: unknown;
   try {
     info = coreInfo();
@@ -115,6 +117,11 @@ export function loadLevikCore(path: string, options: {
   const described: LevikCoreInfo = info;
   const module: LevikCoreModule = {
     coreInfo: () => described,
+    ...(typeof openTelemetryQueue === "function" ? { openTelemetryQueue: async (directory: string, initial?: string): Promise<NativeTelemetryQueue> => {
+      const queue: unknown = await openTelemetryQueue(directory, initial);
+      if (!isNativeTelemetryQueue(queue)) throw new Error("Invalid native anonymous queue");
+      return queue;
+    } } : {}),
     ...(typeof openSecureStore === "function" ? { openSecureStore: async (directory: string, backend: string): Promise<NativeSecureStore> => {
       const store: unknown = await openSecureStore(directory, backend);
       if (!isNativeSecureStore(store)) throw new Error("Invalid native secure store");

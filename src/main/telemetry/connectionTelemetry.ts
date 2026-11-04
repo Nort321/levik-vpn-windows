@@ -1,4 +1,5 @@
-import type { CoreTally } from "../core/rustCore";
+import type { OpenTelemetryQueue } from "../core/nativeTelemetry";
+import type { CoreTally, RustCore } from "../core/rustCore";
 import { coreReport } from "./coreReport";
 import { buildBatches, TelemetryClient, type NetworkToken } from "./telemetryClient";
 import { TelemetryQueue } from "./telemetryQueue";
@@ -22,6 +23,7 @@ const NETWORK_TOKEN_WAIT_MS = 1_500;
  */
 export class ConnectionTelemetry {
   private enabled = false;
+  private consentEpoch = 0;
   private session: SessionRecorder | null = null;
   private readonly queue: TelemetryQueue;
   private persistTimer: ReturnType<typeof setTimeout> | null = null;
@@ -32,6 +34,7 @@ export class ConnectionTelemetry {
   private coreTally: () => CoreTally | null = () => null;
   /** The tally at the previous session's final report; each session reports what came after. */
   private coreBaseline: CoreTally | null = null;
+  private batches: typeof buildBatches = buildBatches;
 
   constructor(
     directory: string,
@@ -45,6 +48,7 @@ export class ConnectionTelemetry {
   async setEnabled(enabled: boolean): Promise<void> {
     if (enabled === this.enabled) return;
     this.enabled = enabled;
+    const epoch = ++this.consentEpoch;
     if (!enabled) {
       this.session = null;
       this.networkToken = null;
@@ -53,8 +57,8 @@ export class ConnectionTelemetry {
       return;
     }
     this.flushTimer = setInterval(() => void this.flush(), FLUSH_INTERVAL_MS);
-    await this.finishInterrupted();
-    void this.flush();
+    await this.finishInterrupted(epoch);
+    if (epoch === this.consentEpoch) void this.flush();
   }
 
   /**
@@ -66,8 +70,9 @@ export class ConnectionTelemetry {
     if (!this.enabled) return;
     if (this.networkToken && this.now() - this.networkToken.fetchedAt < NETWORK_TOKEN_REUSE_MS) return;
     this.networkToken = null;
+    const epoch = this.consentEpoch;
     const request = this.http.networkToken().then((value) => {
-      if (!value || !this.enabled) return;
+      if (!value || !this.enabled || epoch !== this.consentEpoch) return;
       this.networkToken = { value, fetchedAt: this.now() };
       if (this.session && !this.session.finished && !this.session.hasNetworkToken) this.session.setNetworkToken(value.token);
     }).catch(() => {});
@@ -80,6 +85,12 @@ export class ConnectionTelemetry {
   useCore(tally: () => CoreTally | null): void {
     this.coreTally = tally;
     this.coreBaseline = null;
+  }
+
+  useRustCore(core: RustCore, open: OpenTelemetryQueue | undefined, report: () => void): void {
+    this.queue.useRustCore(core, open, report);
+    this.batches = (install, entries, now) => core.run("telemetryClient.buildBatches", { install, entries, now },
+      () => buildBatches(install, entries, now), (value): value is ReturnType<typeof buildBatches> => batchesValid(value, install));
   }
 
   /** Starts a session unless one is already running. */
@@ -157,20 +168,22 @@ export class ConnectionTelemetry {
   }
 
   private async sendQueued(): Promise<void> {
+    const epoch = this.consentEpoch;
     const pending = await this.queue.pending();
-    if (!pending.length) return;
+    if (!pending.length || !this.enabled || epoch !== this.consentEpoch) return;
     const install = await this.queue.installId();
-    for (const batch of buildBatches(install, pending, this.now())) {
-      if (!this.enabled) return;
+    for (const batch of this.batches(install, pending, this.now())) {
+      if (!this.enabled || epoch !== this.consentEpoch) return;
       const outcome = await this.http.send(batch.body);
-      if (outcome === "retry" || !this.enabled) return;
+      if (outcome === "retry" || !this.enabled || epoch !== this.consentEpoch) return;
       await this.queue.acknowledge(batch.sessions);
     }
   }
 
   /** A checkpoint left by an app that stopped without ending its session. */
-  private async finishInterrupted(): Promise<void> {
+  private async finishInterrupted(epoch: number): Promise<void> {
     for (const entry of await this.queue.unfinished()) {
+      if (!this.enabled || epoch !== this.consentEpoch) return;
       if (entry.body.sid === this.session?.sid) continue;
       const lastT = entry.body.timeline.at(-1)?.t ?? 0;
       await this.queue.put({
@@ -192,4 +205,26 @@ export class ConnectionTelemetry {
     this.checkpointTimer = null;
     this.flushTimer = null;
   }
+}
+
+
+function batchesValid(value: unknown, install: string): value is ReturnType<typeof buildBatches> {
+  if (!Array.isArray(value) || value.length > 300) return false;
+  return value.every((batch: unknown) => {
+    if (typeof batch !== "object" || batch === null || !("body" in batch) || typeof batch.body !== "string"
+      || Buffer.byteLength(batch.body) > 128 * 1024 || !("sessions" in batch) || !Array.isArray(batch.sessions)
+      || batch.sessions.length === 0 || batch.sessions.length > 20) return false;
+    let body: unknown;
+    try { body = JSON.parse(batch.body); } catch { return false; }
+    if (typeof body !== "object" || body === null || !("install" in body) || body.install !== install
+      || !("sessions" in body) || !Array.isArray(body.sessions) || body.sessions.length !== batch.sessions.length) return false;
+    const payload = body.sessions;
+    return batch.sessions.every((entry: unknown, index: number) => {
+      const session: unknown = payload[index];
+      return typeof entry === "object" && entry !== null && "sid" in entry && typeof entry.sid === "string"
+        && "seq" in entry && typeof entry.seq === "number" && Number.isFinite(entry.seq)
+        && typeof session === "object" && session !== null && "sid" in session && session.sid === entry.sid
+        && "seq" in session && session.seq === entry.seq;
+    });
+  });
 }
