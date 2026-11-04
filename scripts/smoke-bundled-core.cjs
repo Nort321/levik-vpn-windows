@@ -23,6 +23,8 @@ assert.equal(identity.deviceId(), createHash("sha256").update(spki).digest("hex"
 const payload = Buffer.from("Levik bundled module check: TEST ONLY");
 assert.equal(identity.sign(payload), sign("RSA-SHA256", payload, pair.privateKey).toString("base64url"));
 async function checkAsyncHandles() {
+  assert.equal(typeof core.openSecureStore, "function");
+  await assert.rejects(core.openSecureStore("relative-path-is-rejected", "secret_service"));
   const events = identity.openEventStream(JSON.stringify({ origin: "https://unused.invalid", method: "GET",
     path: "/api/mobile/v1/events", accessToken: "TEST token", body: "", platform: info.os, version: "1.0.0", road: false, game: false }));
   events.close(); events.close();
