@@ -11,6 +11,7 @@ import { isCabinetTarget } from "../platform/links";
 import type { ExpiryNotice } from "../platform/notices";
 import type { DeliveredCommand } from "../platform/remoteCommands";
 import { isRemoteCommand, type IssuedCommand, type RemoteDevice } from "../../shared/remote";
+import { parseControl, type Plaintext } from "../platform/levikDrop/protocol";
 
 /**
  * Shape checks for answers from the Rust core. In "rust" mode an answer is
@@ -282,4 +283,61 @@ export function isCoreLogCode(value: unknown): value is string | null {
 
 export function isNetworkType(value: unknown): value is "wifi" | "cellular" | "ethernet" | "unknown" {
   return value === "wifi" || value === "cellular" || value === "ethernet" || value === "unknown";
+}
+
+// LevikDrop ---------------------------------------------------------------------------------
+
+/** What a protocol function gives: its value, or the text of the ProtocolError it throws. */
+export type DropOutcome<T> = { ok: T } | { error: string };
+
+/** Lowercase hex of `min` to `max` bytes. */
+function isHex(value: unknown, min: number, max = min): value is string {
+  return typeof value === "string" && value.length % 2 === 0 && value.length >= min * 2 && value.length <= max * 2 && /^[0-9a-f]*$/.test(value);
+}
+
+export function isDropOutcome<T>(ok: (value: unknown) => value is T): (value: unknown) => value is DropOutcome<T> {
+  return (value: unknown): value is DropOutcome<T> => {
+    if (!isRecord(value) || Object.keys(value).length !== 1) return false;
+    if ("ok" in value) return ok(value.ok);
+    return typeof value.error === "string" && value.error.length > 0 && value.error.length <= 80;
+  };
+}
+
+/** A handshake message with its bytes as hex. */
+export interface WireSenderHello { transfer: string; identity: string; ephemeral: string; commit: string }
+export interface WireReceiverHello { transfer: string; identity: string; ephemeral: string; nonce: string }
+export interface WireSenderProof { nonce: string; signature: string }
+export interface WireReceiverProof { signature: string }
+
+export function isWireSenderHello(value: unknown): value is WireSenderHello {
+  return isRecord(value) && isHex(value.transfer, 16) && isHex(value.identity, 1, 512) && isHex(value.ephemeral, 65) && isHex(value.commit, 32);
+}
+
+export function isWireReceiverHello(value: unknown): value is WireReceiverHello {
+  return isRecord(value) && isHex(value.transfer, 16) && isHex(value.identity, 1, 512) && isHex(value.ephemeral, 65) && isHex(value.nonce, 32);
+}
+
+export function isWireSenderProof(value: unknown): value is WireSenderProof {
+  return isRecord(value) && isHex(value.nonce, 32) && isHex(value.signature, 1, 80);
+}
+
+export function isWireReceiverProof(value: unknown): value is WireReceiverProof {
+  return isRecord(value) && isHex(value.signature, 1, 80);
+}
+
+/** A SHA-256 as hex. */
+export function isHashHex(value: unknown): value is string {
+  return isHex(value, 32);
+}
+
+/** A control message or a type this version skips; file data never comes back from Rust. */
+export function isControlPlaintext(value: unknown): value is Plaintext {
+  if (!isRecord(value)) return false;
+  if (value.kind === "unknown") return Object.keys(value).length === 1;
+  if (value.kind !== "control" || Object.keys(value).length !== 2) return false;
+  try {
+    return parseControl(value.control) !== null;
+  } catch {
+    return false;
+  }
 }

@@ -27,6 +27,7 @@ import type {
 } from "../shared/contracts";
 import { isAuthenticationRejected, MobileApiClient, MobileApiError } from "./api/mobileApiClient";
 import { DropEngine } from "./platform/levikDrop/engine";
+import { dropProtocolWithCore } from "./core/coreDrop";
 import type { DropApi } from "./platform/levikDrop/engine";
 import { markDownloaded } from "./windows/downloadMark";
 import type { DropAnswer, DropControl } from "../shared/drop";
@@ -551,6 +552,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
       markDownloaded,
       errorCode: (error) => error instanceof MobileApiError ? error.code ?? (error.status ? `http_${error.status}` : null) : null,
       log: (line) => this.addLog(line),
+      protocol: dropProtocolWithCore(() => this.core),
     });
     this.drop.on("changed", () => {
       if (this.drop) this.patch({ drop: this.drop.snapshot() });

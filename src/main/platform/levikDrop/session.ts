@@ -50,6 +50,29 @@ export type SessionOutcome =
   | { kind: "cancelled"; by: "self" | "peer" }
   | { kind: "failed"; by: "self" | "peer"; reason: FailReason };
 
+/** The protocol functions a session reads the peer's handshake and messages with. */
+export interface DropProtocol {
+  decodeSenderHello: typeof decodeSenderHello;
+  decodeReceiverHello: typeof decodeReceiverHello;
+  decodeSenderProof: typeof decodeSenderProof;
+  decodeReceiverProof: typeof decodeReceiverProof;
+  commitment: typeof commitment;
+  transcript: typeof transcript;
+  verifyTranscript: typeof verifyTranscript;
+  decodePlaintext: typeof decodePlaintext;
+}
+
+export const TYPESCRIPT_PROTOCOL: DropProtocol = {
+  decodeSenderHello,
+  decodeReceiverHello,
+  decodeSenderProof,
+  decodeReceiverProof,
+  commitment,
+  transcript,
+  verifyTranscript,
+  decodePlaintext,
+};
+
 export interface Identity {
   privateKey: KeyObject;
   spki: Buffer;
@@ -78,7 +101,8 @@ interface Common {
   expectedFiles?: number;
   expectedBytes?: number;
   selectRoute?(path: SessionPath): Promise<boolean>;
-
+  /** How the peer's bytes are read; the app may run these through the Rust core. TypeScript by default. */
+  protocol?: DropProtocol;
 }
 
 export interface SenderWork extends Common {
@@ -182,7 +206,10 @@ export class Session {
   private lastAck: number[] = [];
   private written: number[] = [];
 
+  private readonly protocol: DropProtocol;
+
   constructor(private readonly relay: FrameSocket, private readonly work: SenderWork | ReceiverWork) {
+    this.protocol = work.protocol ?? TYPESCRIPT_PROTOCOL;
     this.transfer = transferBytes(work.transferId);
     this.result = new Promise((resolve) => {
       this.settle = resolve;
@@ -251,28 +278,29 @@ export class Session {
 
   private async handshake(): Promise<{ keys: SessionKeys; peerKey: Buffer }> {
     const own = this.work.identity;
+    const protocol = this.protocol;
     const ecdh = ephemeralKey();
     const ephemeral = ecdh.getPublicKey();
     if (this.work.role === "sender") {
       const nonce = randomBytes(32);
-      const hello: SenderHello = { transfer: this.transfer, identity: own.spki, ephemeral, commit: commitment(own.spki, ephemeral, nonce) };
+      const hello: SenderHello = { transfer: this.transfer, identity: own.spki, ephemeral, commit: protocol.commitment(own.spki, ephemeral, nonce) };
       await this.relay.send(encodeSenderHello(hello));
-      const reply = decodeReceiverHello(await this.inbox.next(STEP_TIMEOUT_MS));
+      const reply = protocol.decodeReceiverHello(await this.inbox.next(STEP_TIMEOUT_MS));
       if (!sameBytes(reply.transfer, this.transfer)) throw new ProtocolError("another transfer");
-      const th = transcript(hello, reply, nonce);
+      const th = protocol.transcript(hello, reply, nonce);
       await this.relay.send(encodeSenderProof(nonce, signTranscript("sender", own.privateKey, th)));
-      const signature = decodeReceiverProof(await this.inbox.next(STEP_TIMEOUT_MS));
-      if (!verifyTranscript("receiver", reply.identity, th, signature)) throw new ProtocolError("receiver signature");
+      const signature = protocol.decodeReceiverProof(await this.inbox.next(STEP_TIMEOUT_MS));
+      if (!protocol.verifyTranscript("receiver", reply.identity, th, signature)) throw new ProtocolError("receiver signature");
       return { keys: sessionKeys(ecdh, reply.ephemeral, th), peerKey: reply.identity };
     }
-    const hello = decodeSenderHello(await this.inbox.next(STEP_TIMEOUT_MS));
+    const hello = protocol.decodeSenderHello(await this.inbox.next(STEP_TIMEOUT_MS));
     if (!sameBytes(hello.transfer, this.transfer)) throw new ProtocolError("another transfer");
     const reply: ReceiverHello = { transfer: this.transfer, identity: own.spki, ephemeral, nonce: randomBytes(32) };
     await this.relay.send(encodeReceiverHello(reply));
-    const proof = decodeSenderProof(await this.inbox.next(STEP_TIMEOUT_MS));
-    if (!sameBytes(commitment(hello.identity, hello.ephemeral, proof.nonce), hello.commit)) throw new ProtocolError("commitment");
-    const th = transcript(hello, reply, proof.nonce);
-    if (!verifyTranscript("sender", hello.identity, th, proof.signature)) throw new ProtocolError("sender signature");
+    const proof = protocol.decodeSenderProof(await this.inbox.next(STEP_TIMEOUT_MS));
+    if (!sameBytes(protocol.commitment(hello.identity, hello.ephemeral, proof.nonce), hello.commit)) throw new ProtocolError("commitment");
+    const th = protocol.transcript(hello, reply, proof.nonce);
+    if (!protocol.verifyTranscript("sender", hello.identity, th, proof.signature)) throw new ProtocolError("sender signature");
     await this.relay.send(encodeReceiverProof(signTranscript("receiver", own.privateKey, th)));
     return { keys: sessionKeys(ecdh, hello.ephemeral, th), peerKey: hello.identity };
   }
@@ -372,7 +400,7 @@ export class Session {
       for (;;) {
         const frame = await this.nextRecord();
         if (this.outcome) return;
-        const plaintext = decodePlaintext(opener.open(frame));
+        const plaintext = this.protocol.decodePlaintext(opener.open(frame));
         if (plaintext.kind === "unknown") continue;
         if (plaintext.kind === "data") {
           if (this.work.route && frame[0] !== 0x11) throw new ProtocolError("unmarked file data");

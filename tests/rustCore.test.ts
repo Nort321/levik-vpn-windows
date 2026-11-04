@@ -1,3 +1,4 @@
+import { generateKeyPairSync, randomBytes } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -20,6 +21,10 @@ import { bindXrayOutboundInterface, buildXrayConfig } from "../src/main/vpn/xray
 import type { AppSettings } from "../src/shared/contracts";
 import { levikCorePath, loadLevikCore } from "../src/main/core/levikCore";
 import { coreBridge, coreModeFor, jsonDifference, RustCore, type CoreBridge } from "../src/main/core/rustCore";
+import { dropProtocolWithCore } from "../src/main/core/coreDrop";
+import { isControlPlaintext, isDropOutcome, isWireSenderHello } from "../src/main/core/coreGuards";
+import * as drop from "../src/main/platform/levikDrop/protocol";
+import { SessionRecorder, type SessionClient, type SessionSettings, type TelemetrySessionBody } from "../src/main/telemetry/sessionRecorder";
 import { diagnosisSummary, diagnosisVerdict, parseDiagnoseReport, type DiagnosisInput, type DiagnosisVerdict } from "../src/main/platform/diagnosis";
 import { avoidMaintenance, maintenanceFor, maintenanceMove, parseMaintenance } from "../src/main/platform/maintenance";
 import { flagEnabled, parseAdvice, parseRemoteConfig, visibleAnnouncements, type RemoteConfig } from "../src/main/platform/remoteConfig";
@@ -798,5 +803,193 @@ describe.runIf(bridge !== null)("the Rust core in shadow mode agrees with TypeSc
     expect(lines).toEqual([]);
     expect(core.stats()).toMatchObject({ differed: 0, failed: 0 });
     expect(core.stats().compared - before).toBe(count);
+  });
+});
+
+function dropHandshake() {
+  const identity = () => {
+    const pair = generateKeyPairSync("ec", { namedCurve: "prime256v1" });
+    return { privateKey: pair.privateKey, spki: pair.publicKey.export({ type: "spki", format: "der" }) };
+  };
+  const sender = identity();
+  const receiver = identity();
+  const transfer = drop.transferBytes("0f8fad5b-d9cb-469f-a165-70867728950e");
+  const senderEphemeral = drop.ephemeralKey().getPublicKey();
+  const nonce = randomBytes(32);
+  const hello: drop.SenderHello = { transfer, identity: sender.spki, ephemeral: senderEphemeral, commit: drop.commitment(sender.spki, senderEphemeral, nonce) };
+  const reply: drop.ReceiverHello = { transfer, identity: receiver.spki, ephemeral: drop.ephemeralKey().getPublicKey(), nonce: randomBytes(32) };
+  const th = drop.transcript(hello, reply, nonce);
+  return {
+    sender, receiver, nonce, hello, reply, th,
+    senderSignature: drop.signTranscript("sender", sender.privateKey, th),
+    receiverSignature: drop.signTranscript("receiver", receiver.privateKey, th),
+  };
+}
+
+const control = (text: string): Buffer => Buffer.concat([Buffer.from([0x01]), Buffer.from(text, "utf8")]);
+const outcomeText = (run: () => unknown): string => {
+  try {
+    return JSON.stringify(run());
+  } catch (error) {
+    return error instanceof drop.ProtocolError ? `ProtocolError: ${error.message}` : `${String(error)}`;
+  }
+};
+
+describe("LevikDrop through the core", () => {
+  const shake = dropHandshake();
+  const helloBytes = drop.encodeSenderHello(shake.hello);
+
+  it("asks nothing in ts mode", () => {
+    const bridge = fakeBridge({ "levikDrop.decodeHandshake": () => ({ error: "x" }), "levikDrop.decodePlaintext": () => ({ error: "x" }) });
+    const protocol = dropProtocolWithCore(() => new RustCore(bridge, () => {}, "ts"));
+    expect(protocol.decodeSenderHello(helloBytes)).toEqual(drop.decodeSenderHello(helloBytes));
+    expect(protocol.decodePlaintext(control("{\"t\":\"done\"}"))).toEqual({ kind: "control", control: { t: "done" } });
+    expect(bridge.calls).toEqual([]);
+  });
+
+  it("keeps TypeScript's answers and refusals in shadow mode and compares them", () => {
+    const lines: string[] = [];
+    const core = new RustCore(fakeBridge({
+      "levikDrop.decodeHandshake": (input) => (input as { kind: string }).kind === "receiverHello" ? { error: "unexpected message" } : { error: "message too short" },
+    }), (line) => lines.push(line), "shadow");
+    const protocol = dropProtocolWithCore(() => core);
+    expect(protocol.decodeSenderHello(helloBytes)).toEqual(drop.decodeSenderHello(helloBytes));
+    expect(() => protocol.decodeReceiverHello(helloBytes)).toThrow(new drop.ProtocolError("unexpected message"));
+    expect(core.stats()).toMatchObject({ compared: 2, differed: 1 });
+    expect(lines.join("\n")).not.toContain(helloBytes.toString("hex").slice(0, 16));
+  });
+
+  it("uses Rust answers of the right shape in rust mode, and never sends file data", () => {
+    const answers: unknown[] = [
+      { ok: { kind: "control", control: { t: "pause" } } }, { ok: { kind: "data", file: 0, offset: 0, bytes: "07" } },
+      { ok: { kind: "control", control: { t: "ack", file: -1, offset: 0 } } }, { error: "bad control" }, "yes", false,
+    ];
+    const bridge = fakeBridge({ "levikDrop.decodePlaintext": () => answers.shift(), "levikDrop.verifyTranscript": () => answers.shift() });
+    const core = new RustCore(bridge, () => {}, "rust");
+    const protocol = dropProtocolWithCore(() => core);
+    const done = control("{\"t\":\"done\"}");
+    expect(protocol.decodePlaintext(done)).toEqual({ kind: "control", control: { t: "pause" } });
+    expect(protocol.decodePlaintext(done)).toEqual({ kind: "control", control: { t: "done" } });
+    expect(protocol.decodePlaintext(done)).toEqual({ kind: "control", control: { t: "done" } });
+    expect(() => protocol.decodePlaintext(done)).toThrow(new drop.ProtocolError("bad control"));
+    const data = drop.encodeData(0, 0, Buffer.from([7]));
+    expect(protocol.decodePlaintext(data)).toMatchObject({ kind: "data" });
+    expect(protocol.verifyTranscript("sender", shake.sender.spki, shake.th, shake.senderSignature)).toBe(true);
+    expect(protocol.verifyTranscript("sender", shake.sender.spki, shake.th, shake.senderSignature)).toBe(false);
+    expect(bridge.calls.filter((name) => name === "levikDrop.decodePlaintext")).toHaveLength(4);
+    expect(core.stats()).toMatchObject({ decided: 3, failed: 3 });
+  });
+
+  it("accepts only well-formed answers", () => {
+    expect(isControlPlaintext({ kind: "unknown" })).toBe(true);
+    expect(isControlPlaintext({ kind: "unknown", extra: 1 })).toBe(false);
+    expect(isControlPlaintext({ kind: "control", control: { t: "lan", addrs: ["8.8.8.8"], port: 1 } })).toBe(false);
+    expect(isControlPlaintext({ kind: "control", control: { t: "new_type" } })).toBe(false);
+    const hello = isDropOutcome(isWireSenderHello);
+    expect(hello({ error: "unexpected message" })).toBe(true);
+    expect(hello({ error: "" })).toBe(false);
+    expect(hello({ ok: { transfer: "00".repeat(16), identity: "30", ephemeral: "04".repeat(65), commit: "AA".repeat(32) } })).toBe(false);
+    expect(hello({ ok: { transfer: "00".repeat(16), identity: "30", ephemeral: "04".repeat(65), commit: "aa".repeat(32) } })).toBe(true);
+  });
+});
+
+describe.runIf(bridge !== null)("LevikDrop in Rust agrees with TypeScript", () => {
+  const lines: string[] = [];
+  const core = new RustCore(bridge, (line) => lines.push(line), "shadow");
+  const protocol = dropProtocolWithCore(() => core);
+  const shake = dropHandshake();
+  const patch = (bytes: Buffer, index: number, value: number): Buffer => { const copy = Buffer.from(bytes); copy[index] = value; return copy; };
+
+  it("handshake messages, commitments, transcripts and signatures", () => {
+    const sender = drop.encodeSenderHello(shake.hello);
+    const receiver = drop.encodeReceiverHello(shake.reply);
+    const senderProof = drop.encodeSenderProof(shake.nonce, shake.senderSignature);
+    const receiverProof = drop.encodeReceiverProof(shake.receiverSignature);
+    const messages = [sender, receiver, senderProof, receiverProof, Buffer.alloc(0), Buffer.from([1]), patch(sender, 1, 2),
+      sender.subarray(0, sender.length - 1), Buffer.concat([sender, Buffer.from([0])]), patch(sender, 2 + 16 + 2 + shake.sender.spki.length, 0x03),
+      Buffer.concat([receiverProof, Buffer.from([1])]), drop.encodeSenderProof(shake.nonce, Buffer.alloc(81, 1))];
+    const decoders = [[protocol.decodeSenderHello, drop.decodeSenderHello], [protocol.decodeReceiverHello, drop.decodeReceiverHello],
+      [protocol.decodeSenderProof, drop.decodeSenderProof], [protocol.decodeReceiverProof, drop.decodeReceiverProof]] as const;
+    for (const message of messages) {
+      for (const [rust, typescript] of decoders) expect(outcomeText(() => rust(message))).toBe(outcomeText(() => typescript(message)));
+    }
+    expect(protocol.commitment(shake.sender.spki, shake.hello.ephemeral, shake.nonce)).toEqual(shake.hello.commit);
+    expect(protocol.transcript(shake.hello, shake.reply, shake.nonce)).toEqual(shake.th);
+    const flipped = patch(shake.senderSignature, shake.senderSignature.length - 1, (shake.senderSignature.at(-1) ?? 0) ^ 1);
+    for (const [role, key, signature] of [["sender", shake.sender.spki, shake.senderSignature], ["receiver", shake.receiver.spki, shake.receiverSignature],
+      ["receiver", shake.sender.spki, shake.senderSignature], ["sender", shake.receiver.spki, shake.senderSignature], ["sender", shake.sender.spki, flipped],
+      ["sender", Buffer.from("3030", "hex"), shake.senderSignature], ["sender", shake.sender.spki, Buffer.alloc(0)]] as const) {
+      expect(protocol.verifyTranscript(role, key, shake.th, signature)).toBe(drop.verifyTranscript(role, key, shake.th, signature));
+    }
+    expect(lines).toEqual([]);
+    expect(core.stats()).toMatchObject({ differed: 0, failed: 0 });
+    expect(core.stats().compared).toBe(messages.length * 4 + 2 + 7);
+  });
+
+  it("control messages", () => {
+    const before = core.stats().compared;
+    const H = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+    const controls: drop.Control[] = [
+      { t: "route", path: "lan" }, { t: "manifest_part", files: [{ name: "фото «1».jpg", size: 1_048_576 }], total: 1_048_576, final: true },
+      { t: "accept_part", offsets: [0, 5], prefix: [null, H], final: false }, { t: "manifest", files: [{ name: "a", size: 0 }], total: 0 },
+      { t: "accept", offsets: [], prefix: [] }, { t: "decline" }, { t: "ack", file: 2, offset: 9_007_199_254_740_991 }, { t: "end", file: 0, sha256: H },
+      { t: "file_ok", file: 1 }, { t: "done" }, { t: "pause" }, { t: "cancel" }, { t: "fail", reason: "integrity" },
+      { t: "lan", addrs: ["192.168.1.2", "10.0.0.1"], port: 49_152 }, { t: "lan_on" }, { t: "lan_ok" },
+    ];
+    const raw = ["{", "[]", "{}", "{\"t\":1}", "{\"t\":\"hello\"}", "{\"t\":\"fail\",\"reason\":\"nope\"}", "{\"t\":\"ack\",\"file\":1.0,\"offset\":1e3}",
+      "{\"t\":\"ack\",\"file\":1,\"offset\":2,\"file\":3}", "{\"t\":\"manifest\",\"files\":[{\"name\":\"a\",\"size\":9007199254740991},{\"name\":\"b\",\"size\":3}],\"total\":9007199254740994}",
+      "{\"t\":\"lan\",\"addrs\":[\"010.0.0.1\"],\"port\":1}", " {\"t\" : \"done\"} ", "{\"t\":\"route\",\"path\":\"LAN\"}", "{\"t\":\"end\",\"file\":0,\"sha256\":\"" + H.toUpperCase() + "\"}"];
+    const plaintexts = [...controls.map(drop.encodeControl), ...raw.map(control),
+      Buffer.concat([control("{\"t\":\"fail\",\"reason\":\""), Buffer.from([0xff, 0xfe]), Buffer.from("\"}")]), control(`{"t":"done","x":"${"a".repeat(64 * 1024)}"}`)];
+    for (const plaintext of plaintexts) expect(outcomeText(() => protocol.decodePlaintext(plaintext))).toBe(outcomeText(() => drop.decodePlaintext(plaintext)));
+    expect(lines).toEqual([]);
+    expect(core.stats()).toMatchObject({ differed: 0, failed: 0 });
+    expect(core.stats().compared - before).toBe(plaintexts.length);
+  });
+});
+
+describe.runIf(bridge !== null)("the session recorder in Rust replays like TypeScript", () => {
+  it("a session with retries, probes, core logs and its end", () => {
+    const lines: string[] = [];
+    const core = new RustCore(bridge, (line) => lines.push(line), "shadow");
+    const start = 1_767_225_600_000;
+    const client: SessionClient = { platform: "windows", app: "1.0.0", os: "test" };
+    const settings: SessionSettings = { killSwitch: false, autoRecovery: true, splitTunnel: true };
+    const steps: Array<{ at: number; call: string } & Record<string, unknown>> = [
+      { at: start + 5, call: "setNetwork", type: "ethernet" },
+      { at: start + 10, call: "attempt", node: "Сервер ".repeat(30), proto: "vless", cause: "initial" },
+      { at: start + 20, call: "coreLog", code: "dial_refused" }, { at: start + 30, call: "coreLog", code: "Not Safe" },
+      { at: start + 900, call: "attemptFailed", stage: "verify", code: "timeout" }, { at: start + 1_000, call: "connected" },
+      ...Array.from({ length: 230 }, (_, index) => ({ at: start + 2_000 + index, call: "probeFailed", codes: [`c${index % 6}`, "Bad"] })),
+      { at: start + 3_000, call: "probeSucceeded" }, { at: start + 3_100, call: "trafficCheck", nodeId: "n1aaaaaaaaaaaaaaaaaaaa", ms: 87.5, ok: true },
+      { at: start + 3_200, call: "snapshot" }, { at: start + 1_000, call: "power", state: "suspend" },
+      { at: start + 9_000, call: "end", by: "user", code: null }, { at: start + 9_500, call: "snapshot" },
+    ];
+    const typescript = (): TelemetrySessionBody[] => {
+      let clock = start;
+      const recorder = new SessionRecorder(client, "user", settings, () => clock);
+      const bodies: TelemetrySessionBody[] = [];
+      for (const step of steps) {
+        clock = step.at;
+        const field = (name: string): never => step[name] as never;
+        if (step.call === "setNetwork") recorder.setNetwork(field("type"));
+        else if (step.call === "attempt") recorder.attempt(field("node"), field("proto"), field("cause"));
+        else if (step.call === "coreLog") recorder.coreLog(field("code"));
+        else if (step.call === "attemptFailed") recorder.attemptFailed(field("stage"), field("code"));
+        else if (step.call === "connected") recorder.connected();
+        else if (step.call === "probeFailed") recorder.probeFailed(field("codes"));
+        else if (step.call === "probeSucceeded") recorder.probeSucceeded();
+        else if (step.call === "trafficCheck") recorder.trafficCheck(field("nodeId"), field("ms"), field("ok"));
+        else if (step.call === "power") recorder.power(field("state"));
+        else if (step.call === "end") recorder.end(field("by"), field("code"));
+        else if (step.call === "snapshot") bodies.push({ ...recorder.snapshot(), sid: "s" });
+      }
+      return bodies;
+    };
+    const bodies = core.run("sessionRecorder.replay", { sid: "s", client, trigger: "user", settings, startedAt: start, steps }, typescript);
+    expect(bodies).toHaveLength(2);
+    expect(bodies[0]?.timeline).toHaveLength(200);
+    expect(lines).toEqual([]);
+    expect(core.stats()).toMatchObject({ compared: 1, differed: 0, failed: 0 });
   });
 });

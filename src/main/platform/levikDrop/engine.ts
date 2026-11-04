@@ -7,7 +7,7 @@ import { MAX_FILES, MAX_TOTAL } from "./protocol";
 import type { ManifestFile } from "./protocol";
 import { joinRelay, parseEndpoints } from "./relay";
 import type { RelayEndpoint } from "./relay";
-import type { DropPlatform, ReceiverWork, SenderWork, SessionOutcome, Trust } from "./session";
+import type { DropPlatform, DropProtocol, ReceiverWork, SenderWork, SessionOutcome, Trust } from "./session";
 import { DropStore, loadIdentity, Pins } from "./store";
 import type { Secrets, StoredReceiver, StoredSender } from "./store";
 import type { Identity } from "./session";
@@ -40,6 +40,8 @@ export interface DropEngineOptions {
   log(line: string): void;
   /** Tests join a plain relay; apps always use TLS with the pin. */
   join?: typeof joinRelay;
+  /** How sessions read the peer's bytes; TypeScript unless the app passes the Rust core. */
+  protocol?: DropProtocol;
 }
 
 export interface DropEngineEvents {
@@ -641,6 +643,7 @@ export class DropEngine extends EventEmitter<DropEngineEvents> {
     let peerKey: Buffer | null = null;
     const common = {
       transferId: id,
+      ...(this.options.protocol ? { protocol: this.options.protocol } : {}),
       identity,
       peerDeviceId: stored.peerDeviceId,
       ownPlatform: this.options.platform,
