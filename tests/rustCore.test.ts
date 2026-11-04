@@ -7,6 +7,8 @@ import { buildXrayConfigWithCore } from "../src/main/core/coreXray";
 import { countryServersWithCore } from "../src/main/core/coreServers";
 import { reconcileFavoritesWithCore, unionNodeListsWithCore } from "../src/main/core/coreFavorites";
 import { expiryNoticesWithCore, parseAccountNoticesWithCore } from "../src/main/core/coreNotices";
+import { parseDeliveredCommandsWithCore, parseIssuedCommandsWithCore, parseRemoteDevicesWithCore } from "../src/main/core/coreRemote";
+import { parseIssuedCommands } from "../src/main/platform/remoteCommands";
 import { parseAccountNotices } from "../src/main/platform/accountNotices";
 import { expiryNotices } from "../src/main/platform/notices";
 import type { SubscriptionSummary } from "../src/shared/contracts";
@@ -489,6 +491,50 @@ describe("notices through the core", () => {
   });
 });
 
+const REMOTE_ID = "0f8fad5b-d9cb-469f-a165-70867728950e";
+const RAW_DELIVERED: unknown[] = [undefined, null, {}, [
+  { id: REMOTE_ID, command: "connect" }, { id: REMOTE_ID, command: "unknown", replyKey: "key", via: "family" },
+  { id: REMOTE_ID.toUpperCase(), command: "connect" }, { id: REMOTE_ID, command: "x".repeat(41) }, null, [],
+], Array.from({ length: 60 }, (_, index) => ({ id: REMOTE_ID, command: `c${index}` }))];
+const RAW_DEVICES: unknown[] = [undefined, [], [
+  { deviceId: "d1", name: "Ноутбук", platform: "windows", appVersion: "1.3.84", current: true, remote: true, presence: { online: true, vpnConnected: true, country: "DE" } },
+  { deviceId: "d2", name: "Телефон", platform: "android", presence: { online: "yes", country: "de" } },
+  { deviceId: "d3", name: "iPhone", platform: "ios" }, { deviceId: "", name: "x", platform: "linux" }, null,
+]];
+const RAW_ISSUED: unknown[] = [undefined, "x", [
+  { id: REMOTE_ID, deviceId: "d1", command: "check_update", state: "done", detail: "available:1.3.90" },
+  { id: REMOTE_ID, deviceId: "d1", command: "disconnect", state: "done" }, { id: REMOTE_ID, deviceId: "d1", command: "connect", state: "Done" },
+  { id: REMOTE_ID, deviceId: "d1", command: "connect", state: "failed", detail: "" },
+], [undefined]];
+
+describe("the remote through the core", () => {
+  it("asks nothing in ts mode, nor for a missing list", () => {
+    const bridge = fakeBridge({ "remote.parseIssuedCommands": () => [] });
+    expect(parseIssuedCommandsWithCore(new RustCore(bridge, () => {}, "ts"), RAW_ISSUED[2])).toEqual(parseIssuedCommands(RAW_ISSUED[2]));
+    expect(parseIssuedCommandsWithCore(new RustCore(bridge, () => {}, "shadow"), undefined)).toEqual([]);
+    expect(bridge.calls).toEqual([]);
+  });
+
+  it("uses Rust answers of the right shape in rust mode only", () => {
+    const delivered = { id: REMOTE_ID, command: "connect", replyKey: null, fromFamily: false };
+    const device = { deviceId: "d", name: "n", platform: "linux", appVersion: null, current: false, remote: true, online: false, vpnConnected: false, country: null };
+    const issued = { id: REMOTE_ID, deviceId: "d", command: "connect", state: "done", detail: null };
+    const answers: Record<string, unknown[]> = {
+      "remote.parseDeliveredCommands": [[delivered], [{ ...delivered, fromFamily: "no" }]],
+      "remote.parseRemoteDevices": [[device], [{ ...device, country: "de" }]],
+      "remote.parseIssuedCommands": [[issued], [{ ...issued, command: "disconnect" }]],
+    };
+    const core = new RustCore(fakeBridge(Object.fromEntries(Object.keys(answers).map((name) => [name, () => answers[name]?.shift()]))), () => {}, "rust");
+    expect(parseDeliveredCommandsWithCore(core, [])).toEqual([delivered]);
+    expect(parseRemoteDevicesWithCore(core, [])).toEqual([device]);
+    expect(parseIssuedCommandsWithCore(core, [])).toEqual([issued]);
+    expect(parseDeliveredCommandsWithCore(core, [])).toEqual([]);
+    expect(parseRemoteDevicesWithCore(core, [])).toEqual([]);
+    expect(parseIssuedCommandsWithCore(core, [])).toEqual([]);
+    expect(core.stats()).toMatchObject({ decided: 3, failed: 3 });
+  });
+});
+
 // The real module, when `npm run download:levik-core` (or a local build) put it into vendor.
 const status = loadLevikCore(levikCorePath({ packaged: false, resourcesPath: "", appPath: join(__dirname, "..") }));
 const bridge = coreBridge(status);
@@ -662,5 +708,16 @@ describe.runIf(bridge !== null)("the Rust core in shadow mode agrees with TypeSc
     expect(lines).toEqual([]);
     expect(core.stats()).toMatchObject({ differed: 0, failed: 0 });
     expect(core.stats().compared - before).toBe(3 * nows.length + RAW_NOTICES.length - 1);
+  });
+
+  it("the remote's commands and devices", () => {
+    expect(core.has("remote.parseIssuedCommands")).toBe(true);
+    const before = core.stats().compared;
+    for (const value of RAW_DELIVERED) parseDeliveredCommandsWithCore(core, value);
+    for (const value of RAW_DEVICES) parseRemoteDevicesWithCore(core, value);
+    for (const value of RAW_ISSUED) parseIssuedCommandsWithCore(core, value);
+    expect(lines).toEqual([]);
+    expect(core.stats()).toMatchObject({ differed: 0, failed: 0 });
+    expect(core.stats().compared - before).toBe(RAW_DELIVERED.length + RAW_DEVICES.length + RAW_ISSUED.length - 3);
   });
 });

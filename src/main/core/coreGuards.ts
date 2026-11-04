@@ -9,6 +9,8 @@ import { isCanonicalNodeList } from "../platform/favoriteNodes";
 import type { AccountNotice } from "../platform/accountNotices";
 import { isCabinetTarget } from "../platform/links";
 import type { ExpiryNotice } from "../platform/notices";
+import type { DeliveredCommand } from "../platform/remoteCommands";
+import { isRemoteCommand, type IssuedCommand, type RemoteDevice } from "../../shared/remote";
 
 /**
  * Shape checks for answers from the Rust core. In "rust" mode an answer is
@@ -230,4 +232,34 @@ export function isExpiryNoticeList(value: unknown): value is ExpiryNotice[] {
 export function isAccountNoticeList(value: unknown): value is AccountNotice[] {
   return Array.isArray(value) && value.length <= 20 && value.every((item) => isRecord(item) && isString(item.id)
     && isString(item.title) && item.title.length > 0 && isString(item.body) && item.body.length > 0 && isCabinetTarget(item.cabinet));
+}
+
+function isStringOrNullUpTo(value: unknown, max: number): value is string | null {
+  return value === null || (isString(value) && value.length > 0 && value.length <= max);
+}
+
+function isNonEmptyUpTo(value: unknown, max: number): value is string {
+  return isString(value) && value.length > 0 && value.length <= max;
+}
+
+export function isDeliveredCommandList(value: unknown): value is DeliveredCommand[] {
+  return Array.isArray(value) && value.length <= 50 && value.every((item) => isRecord(item) && isString(item.id)
+    && isNonEmptyUpTo(item.command, 40) && isStringOrNullUpTo(item.replyKey, 1000) && typeof item.fromFamily === "boolean");
+}
+
+export function isRemoteDeviceList(value: unknown): value is RemoteDevice[] {
+  return Array.isArray(value) && value.length <= 50 && value.every((item) => isRecord(item)
+    && isNonEmptyUpTo(item.deviceId, 160) && isNonEmptyUpTo(item.name, 160)
+    && (item.platform === "android" || item.platform === "windows" || item.platform === "macos" || item.platform === "linux")
+    && isStringOrNullUpTo(item.appVersion, 40) && typeof item.current === "boolean" && typeof item.remote === "boolean"
+    && typeof item.online === "boolean" && typeof item.vpnConnected === "boolean"
+    && (item.country === null || (isString(item.country) && /^[A-Z]{2}$/.test(item.country))));
+}
+
+export function isIssuedCommandList(value: unknown): value is IssuedCommand[] {
+  return Array.isArray(value) && value.length <= 50 && value.every((item) => isRecord(item) && isString(item.id)
+    && isNonEmptyUpTo(item.deviceId, 160) && isRemoteCommand(item.command)
+    && (item.state === "pending" || item.state === "delivered" || item.state === "done" || item.state === "failed"
+      || item.state === "unsupported" || item.state === "expired")
+    && isStringOrNullUpTo(item.detail, 1000));
 }
