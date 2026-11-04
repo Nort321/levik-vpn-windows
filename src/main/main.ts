@@ -45,8 +45,10 @@ app.whenReady().then(async () => {
   });
   powerMonitor.on("unlock-screen", () => void controller?.restoreAfterSystemResume());
   await controller.initialize();
-  // Stage 0 of the Rust migration: only records whether the optional module loads.
-  controller.recordDiagnostic(describeLevikCore(loadLevikCore(levikCorePath({ packaged: app.isPackaged, resourcesPath: process.resourcesPath, appPath: app.getAppPath() }))));
+  // The optional Rust core (docs/rust-desktop-migration-plan.md, stage 2).
+  const core = loadLevikCore(levikCorePath({ packaged: app.isPackaged, resourcesPath: process.resourcesPath, appPath: app.getAppPath() }));
+  controller.recordDiagnostic(describeLevikCore(core));
+  controller.useRustCore(core);
   mainWindow.show();
   started = true;
   if (pendingLink) {

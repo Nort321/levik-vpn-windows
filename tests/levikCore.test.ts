@@ -3,7 +3,8 @@ import { describe, expect, it } from "vitest";
 import { describeLevikCore, LEVIK_CORE_CONTRACT, levikCorePath, loadLevikCore } from "../src/main/core/levikCore";
 
 const host = { platform: "darwin" as const, arch: "arm64" };
-const info = { version: "0.1.0", contract: LEVIK_CORE_CONTRACT, os: "macos", arch: "aarch64" };
+const info = { version: "0.2.0", contract: LEVIK_CORE_CONTRACT, os: "macos", arch: "aarch64" };
+const bridge = { functions: () => ["diagnosis.vpnPhase", 5], call: (name: string, input: string) => `${name}:${input}` };
 const present = { exists: () => true, ...host };
 
 describe("levikCorePath", () => {
@@ -18,9 +19,12 @@ describe("levikCorePath", () => {
 
 describe("loadLevikCore", () => {
   it("accepts a module built for this computer", () => {
-    const status = loadLevikCore("/m.node", { ...present, load: () => ({ coreInfo: () => info }) });
+    const status = loadLevikCore("/m.node", { ...present, load: () => ({ coreInfo: () => info, ...bridge }) });
     expect(status.state).toBe("loaded");
-    expect(describeLevikCore(status)).toBe("Rust-ядро 0.1.0 (контракт 1, macos/aarch64) загружено");
+    expect(describeLevikCore(status)).toBe("Rust-ядро 0.2.0 (контракт 2, macos/aarch64) загружено");
+    if (status.state !== "loaded") return;
+    expect(status.module.functions()).toEqual(["diagnosis.vpnPhase"]);
+    expect(status.module.call("f", "null")).toBe("f:null");
   });
 
   it("reports a build without the module", () => {
@@ -32,13 +36,17 @@ describe("loadLevikCore", () => {
     const cases: Array<[unknown, string]> = [
       [{}, "нет coreInfo()"],
       [{ coreInfo: () => ({ version: 1 }) }, "coreInfo() вернул не то"],
-      [{ coreInfo: () => ({ ...info, contract: 2 }) }, "контракт 2, нужен 1"],
-      [{ coreInfo: () => ({ ...info, arch: "x86_64" }) }, "собран для macos/x86_64"],
+      [{ coreInfo: () => ({ ...info, contract: 1 }), ...bridge }, "контракт 1, нужен 2"],
+      [{ coreInfo: () => info }, "нет functions() или call()"],
+      [{ coreInfo: () => ({ ...info, arch: "x86_64" }), ...bridge }, "собран для macos/x86_64"],
       [{ coreInfo: () => { throw new Error("boom"); } }, "coreInfo() упал: boom"],
     ];
     for (const [module, reason] of cases) {
       expect(loadLevikCore("/m.node", { ...present, load: () => module })).toEqual({ state: "rejected", reason });
     }
+    const loaded = loadLevikCore("/m.node", { ...present, load: () => ({ coreInfo: () => info, functions: () => [], call: () => 5 }) });
+    expect(loaded.state).toBe("loaded");
+    if (loaded.state === "loaded") expect(() => loaded.module.call("f", "null")).toThrow("call() вернул не строку");
     expect(loadLevikCore("/m.node", { ...present, load: () => { throw new Error("dlopen failed"); } }))
       .toEqual({ state: "rejected", reason: "не загрузился: dlopen failed" });
   });

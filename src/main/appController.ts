@@ -4,7 +4,7 @@ import { parseServiceRoutePolicy, serviceExitForServer, serviceServerKey, compil
 import { app, net } from "electron";
 import { createHash, randomBytes } from "node:crypto";
 import { EventEmitter } from "node:events";
-import { platform, release } from "node:os";
+import { networkInterfaces, platform, release } from "node:os";
 import { isIPv4 } from "node:net";
 import { join } from "node:path";
 import type {
@@ -136,9 +136,26 @@ import {
   serversByNode,
   unionNodeLists,
 } from "./platform/favoriteNodes";
-import { avoidMaintenance, IdleMeter, maintenanceFor, maintenanceMove } from "./platform/maintenance";
+import { avoidMaintenance, IdleMeter, maintenanceFor, maintenanceMove, type MaintenanceWindow } from "./platform/maintenance";
 import { countryServers } from "../shared/serverGroups";
-import { captivePortal, checkServices, diagnosisSummary, diagnosisVerdict, parseDiagnoseReport, vpnPhase } from "./platform/diagnosis";
+import { captivePortal, checkServices, diagnosisSummary, diagnosisVerdict, parseDiagnoseReport, vpnPhase, type DiagnosisInput } from "./platform/diagnosis";
+import type { LevikCoreStatus } from "./core/levikCore";
+import { coreBridge, coreModeFor, RustCore } from "./core/rustCore";
+import {
+  isAnnouncementList,
+  isBoolean,
+  isDiagnoseReportOrNull,
+  isDiagnosisSummary,
+  isDiagnosisVerdict,
+  isIndexList,
+  isMaintenanceMove,
+  isMaintenanceWindowOrNull,
+  isProtocolHistory,
+  isRankedList,
+  isRankedServerOrNull,
+  isStringList,
+  isStringOrNull,
+} from "./core/coreGuards";
 import { gameExitScope, gameProcesses, GAMES, normalizeGameIds } from "../shared/games";
 import { discoverInstalledGames } from "./windows/installedGames";
 import { listWindowsProcesses } from "./windows/processes";
@@ -379,6 +396,8 @@ export class AppController extends EventEmitter<AppControllerEvents> {
   private readonly remoteConfigStore = new RemoteConfigStore(join(app.getPath("userData"), "remote-config.json"));
   private readonly endpointsStore = new ServiceEndpointsStore(join(app.getPath("userData"), "service-endpoints.json"));
   private remoteStored: StoredRemoteConfig | null = null;
+  /** Stage 2 of the Rust migration: TypeScript alone until main.ts hands over the loaded module. */
+  private core = new RustCore(null, () => {}, "ts");
   /** Node load, full nodes and quality, docs/app-platform.md "Node load". */
   private readonly liveLoadClient = new LiveLoadClient("windows", app.getVersion());
   private liveLoad: LiveLoad | null = null;
@@ -473,12 +492,12 @@ export class AppController extends EventEmitter<AppControllerEvents> {
         const now = Date.now(), resource = this.routeResource(server, now);
         const exit = this.profile?.serviceRoutes ? serviceExitForServer(this.profile.serviceRoutes, server) : null;
         return [server.id, { eligible: !isHomeRoadServer(server.name) && (!exit || exit.state === "enabled")
-          && !maintenanceFor(this.maintenanceWindows(), nodeIdForServer(server), now),
+          && !this.maintenanceWindowOf(server, now),
           state: resource?.state ?? "unknown", resourceHeadroom: resource?.resourceHeadroom ?? null,
           ...(resource?.id ? { routeId: resource.id } : {}) }];
       })),
       canTransfer: () => !this.guestConnection.active && this.state.settings.automaticServer && this.state.status === "connected" && !this.gamePlaying && !this.liveMatch(),
-      networkKey: () => this.protocolHistory.networkKey(),
+      networkKey: () => this.currentNetworkKey(),
       report: (update) => this.smartAutoLiveChanged(update),
     });
     this.homeRoad.on("status", (status, detail) => {
@@ -553,6 +572,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     await this.loadSyncState();
     await this.notices.load();
     this.remoteStored = await this.remoteConfigStore.load();
+    this.applyCoreMode();
     await this.protocolHistory.load();
     this.state.announcements = this.announcements();
     await this.telemetry.setEnabled(telemetryAllowed(this.state.settings)).catch((error: unknown) => {
@@ -1067,10 +1087,10 @@ export class AppController extends EventEmitter<AppControllerEvents> {
    */
   private async automaticConnectFallback(server: TunnelServer, failed: ReadonlySet<string>): Promise<TunnelServer | null> {
     if (!this.state.settings.automaticServer || failed.size >= MAX_AUTOMATIC_CONNECT_SERVERS) return null;
-    const network = this.protocolHistory.networkKey();
+    const network = this.currentNetworkKey();
     if (!network) return null;
     const node = nodeIdForServer(server) ?? server.id;
-    await this.protocolHistory.update((history) => recordFailure(history, network, protocolOf(server), node, Date.now(), server.id));
+    await this.protocolHistory.update((history) => this.recordProtocolFailure(history, network, protocolOf(server), node, server.id));
     const next = this.bestServer(this.state.servers.filter((item) => !failed.has(item.id)));
     if (!next) return null;
     this.state.selectedServerId = next.id;
@@ -1871,7 +1891,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     if (this.serviceRoutesRollback || !profile || !this.accessToken) return false;
     await this.serviceRouteState.load().catch(() => {});
     if (!profile.serviceRoutes && !this.serviceRouteState.enrolled(profile.subscriptionId)
-      && !flagEnabled(this.remoteStored?.config ?? null, "service_routes", this.identity.deviceId())) return false;
+      && !this.remoteFlag("service_routes")) return false;
     const endpoint = extractServerEndpoint(server.outbound); const key = serviceServerKey(server);
     if (!endpoint || !key) return false;
     const previous = this.serviceRouteState.good(profile.subscriptionId) ?? profile.serviceRoutes;
@@ -2314,6 +2334,9 @@ export class AppController extends EventEmitter<AppControllerEvents> {
       const fetched = await this.remoteConfig.fetch();
       if (!fetched) return;
       this.remoteStored = mergeFetched(this.remoteStored, fetched, Date.now(), !outside || this.tunnelActive());
+      // Compared only: the TypeScript parse stays the answer in every mode.
+      this.core.run("remoteConfig.parseRemoteConfig", fetched.response, () => fetched.config);
+      this.applyCoreMode();
       await this.remoteConfigStore.save(this.remoteStored);
       void this.applyServiceRoutes().catch(() => {});
       await this.updateAnnouncements();
@@ -2332,7 +2355,11 @@ export class AppController extends EventEmitter<AppControllerEvents> {
   }
 
   private announcements(): AppAnnouncement[] {
-    return visibleAnnouncements(this.remoteStored?.config ?? null, this.notices.dismissed(), Date.now())
+    const config = this.remoteStored?.config ?? null;
+    const dismissed = this.notices.dismissed();
+    const now = Date.now();
+    return this.core.run("remoteConfig.visibleAnnouncements", { config, dismissed: [...dismissed], now },
+      () => visibleAnnouncements(config, dismissed, now), isAnnouncementList)
       .map((item) => item.linkUrl && !isAllowedExternalUrl(item.linkUrl) ? { ...item, linkUrl: null } : item);
   }
 
@@ -3217,6 +3244,65 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     return this.remoteStored?.config.maintenance ?? [];
   }
 
+  /** The maintenance window that keeps the app off this server now, if any. */
+  private maintenanceWindowOf(server: TunnelServer, now: number): MaintenanceWindow | null {
+    const windows = this.maintenanceWindows();
+    const nodeId = nodeIdForServer(server);
+    return this.core.run("maintenance.maintenanceFor", { windows, nodeId, now },
+      () => maintenanceFor(windows, nodeId, now), isMaintenanceWindowOrNull);
+  }
+
+  /** A remote switch for this install, by the private rollout bucket. */
+  private remoteFlag(key: string): boolean {
+    const config = this.remoteStored?.config ?? null;
+    const salt = this.identity.deviceId();
+    return this.core.run("remoteConfig.flagEnabled", { config, key, salt }, () => flagEnabled(config, key, salt), isBoolean);
+  }
+
+  /** Stage 2 of the Rust migration: the loaded module, compared with TypeScript or in charge per remote config. */
+  useRustCore(status: LevikCoreStatus): void {
+    this.core = new RustCore(coreBridge(status), (line) => this.recordDiagnostic(line), "ts");
+    this.applyCoreMode();
+  }
+
+  private applyCoreMode(): void {
+    this.core.setMode(coreModeFor(this.remoteStored?.config ?? null, this.identity.deviceId()));
+  }
+
+  /** The salted key of the network this computer is on, see ProtocolHistoryStore.networkKey. */
+  private currentNetworkKey(): string | null {
+    const interfaces = networkInterfaces();
+    return this.core.run("smartAuto.networkKey", { salt: this.protocolHistory.localSalt(), interfaces },
+      () => this.protocolHistory.networkKey(interfaces), isStringOrNull);
+  }
+
+  private recordProtocolSuccess(history: ProtocolHistory, networkKey: string, protocol: string, serverId: string): ProtocolHistory {
+    const now = Date.now();
+    return this.core.run("smartAuto.recordSuccess", { history, networkKey, protocol, now, serverId },
+      () => recordSuccess(history, networkKey, protocol, now, serverId), isProtocolHistory);
+  }
+
+  private recordProtocolFailure(history: ProtocolHistory, networkKey: string, protocol: string, nodeId: string, failedServerId: string): ProtocolHistory {
+    const now = Date.now();
+    return this.core.run("smartAuto.recordFailure", { history, networkKey, protocol, nodeId, now, failedServerId },
+      () => recordFailure(history, networkKey, protocol, nodeId, now, failedServerId), isProtocolHistory);
+  }
+
+  private overloadDue(input: Parameters<typeof overloadMoveDue>[0]): boolean {
+    return this.core.run("smartAuto.overloadMoveDue", input, () => overloadMoveDue(input), isBoolean);
+  }
+
+  private relayHostSet(servers: Array<{ host: string | null; countryCode: string }>): Set<string> {
+    return new Set(this.core.run("smartAuto.relayHosts", servers, () => [...relayHosts(servers)], isStringList));
+  }
+
+  private nextSmartRung(ranked: RankedServer[]): RankedServer | null {
+    const triedProtocols = this.smartLadder.triedProtocols();
+    const triedIds = this.smartLadder.triedIds();
+    return this.core.run("smartAuto.nextRung", { ranked, triedProtocols: [...triedProtocols], triedIds: [...triedIds] },
+      () => nextRung(ranked, triedProtocols, triedIds), isRankedServerOrNull);
+  }
+
   /** Node load by server id for the list; a full node shows as full. */
   private serverLoad(now: number): Record<string, number> {
     const view = this.loadView(now);
@@ -3294,7 +3380,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     if (since === null) return;
     // Confirm with fresh readings while the node is full.
     void this.refreshLiveLoad(FULL_NODE_RECHECK_MS, 0);
-    const due = (bestScore: number | null) => overloadMoveDue({
+    const due = (bestScore: number | null) => this.overloadDue({
       fullSince: this.fullSince.get(current.id) ?? null,
       loadAgeMs: now - (this.liveLoad?.fetchedAt ?? 0),
       idle: this.idleMeter.idle(now),
@@ -3327,7 +3413,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
 
   private currentScore(server: TunnelServer, now: number): number {
     const history = this.protocolHistory.current();
-    const network = this.protocolHistory.networkKey();
+    const network = this.currentNetworkKey();
     return smartScore(this.smartCandidate(server, this.loadView(now), now, history, network, this.serverRelayHosts()), currentAdvice(this.remoteStored, now));
   }
 
@@ -3335,7 +3421,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
   private serverMaintenance(now: number): Record<string, number> {
     const marked: Record<string, number> = {};
     for (const server of this.state.servers) {
-      const window = maintenanceFor(this.maintenanceWindows(), nodeIdForServer(server), now);
+      const window = this.maintenanceWindowOf(server, now);
       if (window) marked[server.id] = window.endsAt;
     }
     return marked;
@@ -3355,7 +3441,8 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     if (this.maintenanceMoving || this.state.busy || this.state.status !== "connected" || !this.xray.isRunning()) return;
     const current = this.selectedServer();
     if (!current) return;
-    const move = maintenanceMove(maintenanceFor(this.maintenanceWindows(), nodeIdForServer(current), now), now);
+    const window = this.maintenanceWindowOf(current, now);
+    const move = this.core.run("maintenance.maintenanceMove", { window, now }, () => maintenanceMove(window, now), isMaintenanceMove);
     if (this.xray.serviceRoutes?.smartAutoActive) {
       if (now >= this.nextConnectedLoadAt) {
         this.nextConnectedLoadAt = now + LIVE_LOAD_CONNECTED_EVERY_MS / 2 + Math.floor(Math.random() * 5_000);
@@ -3384,7 +3471,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     const neighbours = countryServers(others, current.countryCode);
     const target = [neighbours, others]
       .map((pool) => this.bestServer(pool))
-      .find((item) => item && !maintenanceFor(this.maintenanceWindows(), nodeIdForServer(item), now));
+      .find((item) => item && !this.maintenanceWindowOf(item, now));
     if (!target) return;
     this.maintenanceMoving = true;
     try {
@@ -3413,7 +3500,8 @@ export class AppController extends EventEmitter<AppControllerEvents> {
       online ? this.remoteConfig.diagnose().catch(() => null) : Promise.resolve(null),
     ]);
     const server = this.selectedServer();
-    const verdict = diagnosisVerdict({
+    const report = this.core.run("diagnosis.parseDiagnoseReport", raw, () => parseDiagnoseReport(raw), isDiagnoseReportOrNull);
+    const input: DiagnosisInput = {
       network: !online ? "none" : captive ? "captive" : "ok",
       cellular: false,
       vpn,
@@ -3422,10 +3510,12 @@ export class AppController extends EventEmitter<AppControllerEvents> {
       protocol: server ? protocolOf(server) : null,
       failingServices: checks.filter((item) => !item.ok).map((item) => item.slug),
       anyServiceWorks: checks.some((item) => item.ok),
-      report: parseDiagnoseReport(raw),
+      report,
       now: Date.now(),
-    });
-    const summary = diagnosisSummary(verdict, { networkSettings: true });
+    };
+    const verdict = this.core.run("diagnosis.diagnosisVerdict", input, () => diagnosisVerdict(input), isDiagnosisVerdict);
+    const summary = this.core.run("diagnosis.diagnosisSummary", { result: verdict, networkSettings: true },
+      () => diagnosisSummary(verdict, { networkSettings: true }), isDiagnosisSummary);
     this.lastDiagnosis = { at: Date.now(), summary };
     this.addLog(`Диагностика: ${summary.verdict}`);
     return summary;
@@ -3458,7 +3548,14 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     const pool = xrayServers.length ? xrayServers : offered;
     const nonRussian = pool.filter((item) => item.countryCode.toUpperCase() !== "RU");
     // Servers going into maintenance are left out while others remain.
-    return avoidMaintenance(nonRussian.length ? nonRussian : pool, this.maintenanceWindows(), nodeIdForServer, Date.now());
+    const candidates = nonRussian.length ? nonRussian : pool;
+    const windows = this.maintenanceWindows();
+    const now = Date.now();
+    const kept = this.core.run("maintenance.avoidMaintenance", { nodeIds: candidates.map(nodeIdForServer), windows, now }, () => {
+      const usable = avoidMaintenance(candidates, windows, nodeIdForServer, now);
+      return usable.map((server) => candidates.indexOf(server));
+    }, isIndexList(candidates.length));
+    return kept.flatMap((index) => candidates[index] ?? []);
   }
 
   /** Best first, docs/app-platform.md "Smart Auto". */
@@ -3466,10 +3563,12 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     const now = Date.now();
     const view = this.loadView(now);
     const history = this.protocolHistory.current();
-    const network = this.protocolHistory.networkKey();
+    const network = this.currentNetworkKey();
     const relays = this.serverRelayHosts();
     const candidates = servers.map((server) => this.smartCandidate(server, view, now, history, network, relays));
-    return rankSmart(candidates, currentAdvice(this.remoteStored, now), spreadSeed(this.protocolHistory.localSalt(), now));
+    const advice = currentAdvice(this.remoteStored, now);
+    const spread = spreadSeed(this.protocolHistory.localSalt(), now);
+    return this.core.run("smartAuto.rankSmart", { candidates, advice, spread, now }, () => rankSmart(candidates, advice, spread, now), isRankedList);
   }
 
   private cancelRouteProbes(): void {
@@ -3493,7 +3592,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     if (!this.state.settings.automaticServer && update.currentId !== this.xray.serviceRoutes.mainServerId) return;
     const server = this.state.servers.find((candidate) => candidate.id === update.currentId);
     if (!server) return;
-    this.routeMeasurementNetwork = this.protocolHistory.networkKey();
+    this.routeMeasurementNetwork = this.currentNetworkKey();
     for (const [id, measurement] of Object.entries(update.measurements)) {
       const candidate = this.state.servers.find((item) => item.id === id);
       if (!candidate) continue;
@@ -3527,7 +3626,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
   }
 
   private measuredRoute(server: TunnelServer, now: number): RouteMeasurement | undefined {
-    if (this.routeMeasurementNetwork !== this.protocolHistory.networkKey()
+    if (this.routeMeasurementNetwork !== this.currentNetworkKey()
       || this.routeMeasurementKeys[server.id] !== this.routeMeasurementKey(server)) return undefined;
     const measurement = this.routeMeasurements[server.id];
     return measuredRouteUsable(measurement, now) ? measurement : undefined;
@@ -3546,7 +3645,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
    * interrupt a running flow or report the current TUN's local accept as RTT. */
   private async refreshRouteMeasurements(): Promise<boolean> {
     if (!this.profile || this.profile.gameOnly || this.xray.isRunning()) return true;
-    const network = this.protocolHistory.networkKey();
+    const network = this.currentNetworkKey();
     const servers = this.automaticCandidates(this.state.servers).filter((server) => !server.tuic && serverSyncEndpoint(server)?.port != null);
     if (!servers.length) return true;
     if (network !== null && servers.every((server) => this.measuredRoute(server, Date.now()))) return true;
@@ -3572,7 +3671,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     try {
       const measurements = await measureRouteCandidates({ executable: this.xray.executablePath(), candidates, signal: abort.signal });
       if (abort.signal.aborted || this.xray.isRunning() || !sameServers(snapshot, this.state.servers)
-        || network !== this.protocolHistory.networkKey() || profile !== this.profile || token !== this.accessToken || intent !== this.connectionIntent) return false;
+        || network !== this.currentNetworkKey() || profile !== this.profile || token !== this.accessToken || intent !== this.connectionIntent) return false;
       this.routeMeasurements = measurements; this.routeMeasurementKeys = keys; this.routeMeasurementNetwork = network;
       this.patch({ serverLatencies: this.displayedRouteLatencies(this.endpointLatencies) });
       return true;
@@ -3581,7 +3680,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     } finally {
       if (this.routeProbeAbort === abort) {
         this.routeProbeAbort = null;
-        if ((abort.signal.aborted || network !== this.protocolHistory.networkKey() || !sameServers(snapshot, this.state.servers))
+        if ((abort.signal.aborted || network !== this.currentNetworkKey() || !sameServers(snapshot, this.state.servers))
           && !this.xray.isRunning() && this.state.status === "connecting") {
           this.patch({ status: "disconnected", statusDetail: null, busy: false });
         }
@@ -3591,7 +3690,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
 
   /** Relay entries among the account's servers, see [relayHosts]. */
   private serverRelayHosts(): Set<string> {
-    return relayHosts(this.state.servers.map((server) => ({
+    return this.relayHostSet(this.state.servers.map((server) => ({
       host: extractServerEndpoint(server.outbound)?.host ?? null,
       countryCode: server.countryCode,
     })));
@@ -3661,13 +3760,13 @@ export class AppController extends EventEmitter<AppControllerEvents> {
       const elapsed = await measureTraffic(current);
       const passed = elapsed !== null;
       if (!current()) return;
-      const network = this.protocolHistory.networkKey();
+      const network = this.currentNetworkKey();
       const protocol = protocolOf(server);
       const checkedNode = nodeIdForServer(server);
       if (passed && checkedNode) this.telemetry.record((session) => session.trafficCheck(checkedNode, elapsed, true));
       if (passed) {
         this.smartLadder.reset();
-        if (network) await this.protocolHistory.update((history) => recordSuccess(history, network, protocol, Date.now(), server.id));
+        if (network) await this.protocolHistory.update((history) => this.recordProtocolSuccess(history, network, protocol, server.id));
         return;
       }
       // No handshake either: the tunnel is down, which the health check handles.
@@ -3676,7 +3775,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
       if (checkedNode) this.telemetry.record((session) => session.trafficCheck(checkedNode, FAILED_TRAFFIC_CHECK_MS, false));
       if (network) {
         const node = nodeIdForServer(server) ?? server.id;
-        await this.protocolHistory.update((history) => recordFailure(history, network, protocol, node, Date.now(), server.id));
+        await this.protocolHistory.update((history) => this.recordProtocolFailure(history, network, protocol, node, server.id));
       }
       this.addLog(`Smart Auto: ${protocolLabel(protocol)} не передаёт трафик через ${server.name}`);
       // The next server gets its own check once it connects.
@@ -3700,7 +3799,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
       return;
     }
     const candidates = this.automaticCandidates(this.state.servers);
-    const next = nextRung(this.rankServers(candidates), this.smartLadder.triedProtocols(), this.smartLadder.triedIds());
+    const next = this.nextSmartRung(this.rankServers(candidates));
     if (!next || next.id === failed.id) return;
     this.smartLadder.climbed();
     this.climbingLadder = true;

@@ -2,12 +2,12 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 
 /**
- * Rust core loaded through Node-API (levik_desktop/crates/levik-napi).
- * Stage 0 of the Rust migration plan: the module is optional and only reports
- * itself. Without it, or with a module that does not match, the app runs exactly
- * as before on its TypeScript code.
+ * Rust core loaded through Node-API (levik_desktop/crates/levik-napi). The
+ * module is optional: without it, or with a module that does not match, the
+ * app runs exactly as before on its TypeScript code. Contract 2 (stage 2 of the
+ * Rust migration plan) adds `functions()` and `call()`, see rustCore.ts.
  */
-export const LEVIK_CORE_CONTRACT = 1;
+export const LEVIK_CORE_CONTRACT = 2;
 
 export interface LevikCoreInfo {
   version: string;
@@ -18,6 +18,10 @@ export interface LevikCoreInfo {
 
 export interface LevikCoreModule {
   coreInfo(): LevikCoreInfo;
+  /** Names of the core functions this build offers. */
+  functions(): string[];
+  /** Runs a core function: JSON in, JSON out; throws on bad input. */
+  call(name: string, input: string): string;
 }
 
 export type LevikCoreStatus =
@@ -79,10 +83,10 @@ export function loadLevikCore(path: string, options: {
   if (!isRecord(loaded) || typeof loaded.coreInfo !== "function") {
     return { state: "rejected", reason: "нет coreInfo()" };
   }
-  const module = loaded as unknown as LevikCoreModule;
+  const { coreInfo, functions, call } = loaded;
   let info: unknown;
   try {
-    info = module.coreInfo();
+    info = coreInfo();
   } catch (error) {
     return { state: "rejected", reason: `coreInfo() упал: ${messageOf(error)}` };
   }
@@ -90,11 +94,28 @@ export function loadLevikCore(path: string, options: {
   if (info.contract !== LEVIK_CORE_CONTRACT) {
     return { state: "rejected", reason: `контракт ${info.contract}, нужен ${LEVIK_CORE_CONTRACT}` };
   }
+  if (typeof functions !== "function" || typeof call !== "function") {
+    return { state: "rejected", reason: "нет functions() или call()" };
+  }
   const platform = options.platform ?? process.platform;
   const arch = options.arch ?? process.arch;
   if (info.os !== RUST_OS[platform] || info.arch !== RUST_ARCH[arch]) {
     return { state: "rejected", reason: `собран для ${info.os}/${info.arch}` };
   }
+  // Node-API functions do not use `this`; the wrappers keep the types exact.
+  const described: LevikCoreInfo = info;
+  const module: LevikCoreModule = {
+    coreInfo: () => described,
+    functions: (): string[] => {
+      const names: unknown = functions();
+      return Array.isArray(names) ? names.filter((name): name is string => typeof name === "string") : [];
+    },
+    call: (name: string, input: string): string => {
+      const output: unknown = call(name, input);
+      if (typeof output !== "string") throw new Error("call() вернул не строку");
+      return output;
+    },
+  };
   return { state: "loaded", info, module };
 }
 
