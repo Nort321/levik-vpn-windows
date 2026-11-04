@@ -1,3 +1,4 @@
+import type { NativeEventStream } from "../core/nativeEvents";
 import type { NativeApiRequest } from "../core/nativeIdentity";
 import { createHash, randomBytes } from "node:crypto";
 import { DeviceIdentity } from "./deviceIdentity";
@@ -19,6 +20,10 @@ export class RequestSigner {
 
   requestWithRust(input: NativeApiRequest): Promise<string> | null {
     return this.identity.requestWithRust(input);
+  }
+
+  openEventsWithRust(input: NativeApiRequest): NativeEventStream | null {
+    return this.identity.openEventsWithRust(input);
   }
 
   sign(method: string, path: string, accessToken: string | null, body: Uint8Array): SignedRequest {

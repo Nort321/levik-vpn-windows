@@ -17,6 +17,18 @@ describe("event stream parser", () => {
     expect(parser.push("data: {}\n\n")).toEqual([]);
   });
 
+  it("treats CRLF split between chunks as one delimiter", () => {
+    const parser = new EventStreamParser();
+    expect(parser.push("event: ready\r")).toEqual([]);
+    expect(parser.push("\n")).toEqual([]);
+    expect(parser.push("\r")).toEqual(["ready"]);
+    expect(parser.push("\n")).toEqual([]);
+  });
+
+  it("bounds a completed oversized line too", () => {
+    expect(() => new EventStreamParser().push("x".repeat(4097) + "\n")).toThrow("too long");
+  });
+
   it("rejects an endless line", () => {
     expect(() => new EventStreamParser().push("x".repeat(5_000))).toThrow("too long");
   });

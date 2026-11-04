@@ -16,14 +16,21 @@ const MAX_LINE = 4_096;
 export class EventStreamParser {
   private buffer = "";
   private name = "message";
+  private afterCr = false;
 
   push(chunk: string): LiveEvent[] {
+    if (this.afterCr && chunk.length) {
+      if (chunk.startsWith("\n")) chunk = chunk.slice(1);
+      this.afterCr = false;
+    }
     this.buffer += chunk;
     const events: LiveEvent[] = [];
     for (;;) {
       const end = this.buffer.search(/\r\n|\r|\n/);
       if (end < 0) break;
       const line = this.buffer.slice(0, end);
+      if (line.length > MAX_LINE) throw new Error("event stream line too long");
+      this.afterCr = this.buffer[end] === "\r" && end === this.buffer.length - 1;
       this.buffer = this.buffer.slice(this.buffer.startsWith("\r\n", end) ? end + 2 : end + 1);
       if (line === "") {
         if ((LIVE_EVENTS as readonly string[]).includes(this.name)) events.push(this.name as LiveEvent);
@@ -42,7 +49,8 @@ export class EventStreamParser {
 export const IDLE_TIMEOUT_MS = 70_000;
 const RETRY_DELAYS_MS = [2_000, 5_000, 15_000, 30_000, 60_000];
 
-export type OpenStream = (signal: AbortSignal) => Promise<ReadableStream<Uint8Array>>;
+export type EventSourceStream = ReadableStream<Uint8Array> | ReadableStream<LiveEvent[]>;
+export type OpenStream = (signal: AbortSignal) => Promise<EventSourceStream>;
 
 export interface LiveEventsEvents {
   event: [LiveEvent];
@@ -117,7 +125,8 @@ export class LiveEvents extends EventEmitter<LiveEventsEvents> {
           if (chunk.done) break;
           clearTimeout(idle);
           idle = setTimeout(() => controller.abort(), IDLE_TIMEOUT_MS);
-          for (const event of parser.push(decoder.decode(chunk.value, { stream: true }))) {
+          const events = Array.isArray(chunk.value) ? chunk.value : parser.push(decoder.decode(chunk.value, { stream: true }));
+          for (const event of events) {
             received = true;
             this.emit("event", event);
           }

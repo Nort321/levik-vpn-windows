@@ -1,3 +1,4 @@
+import type { NativeEventStream } from "./nativeEvents";
 /** A typed main-process handle; private keys never enter RustCore.call() or diagnostics. */
 export interface NativeIdentity {
   deviceId(): string;
@@ -7,6 +8,7 @@ export interface NativeIdentity {
   decryptProfileKey(algorithm: string, encryptedKey: string): Buffer;
   decryptProfile(envelope: string): Buffer;
   apiRequest(input: string): Promise<string>;
+  openEventStream?(input: string): NativeEventStream;
 }
 
 export interface NativeApiRequest {

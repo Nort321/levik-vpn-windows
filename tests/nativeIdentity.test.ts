@@ -137,6 +137,45 @@ describe("native API delivery", () => {
   });
 });
 
+describe("Rust event transport selection", () => {
+  it("uses only the Rust stream in rust mode", async () => {
+    const nativeStream = { read: vi.fn().mockResolvedValueOnce(JSON.stringify({ ok: true, value: { events: ["ready"], done: false } }))
+      .mockResolvedValue(JSON.stringify({ ok: true, value: { events: [], done: true } })), close: vi.fn() };
+    const openEventStream = vi.fn((_input: string) => nativeStream);
+    const { identity } = configured("rust", { openEventStream });
+    const fetch = vi.fn(); vi.stubGlobal("fetch", fetch);
+    const client = new MobileApiClient("https://custom.example", new RequestSigner(identity), "1.0.0");
+    const stream = await client.openEvents("token", new AbortController().signal);
+    const reader = stream.getReader();
+    expect((await reader.read()).value).toEqual(["ready"]);
+    await reader.cancel();
+    expect(openEventStream).toHaveBeenCalledOnce();
+    expect(JSON.parse(openEventStream.mock.calls[0]?.[0] ?? "null")).toMatchObject({ method: "GET", path: "/api/mobile/v1/events", accessToken: "token" });
+    expect(fetch).not.toHaveBeenCalled();
+    expect(nativeStream.close).toHaveBeenCalledOnce();
+  });
+
+  it("opens only one Node stream in shadow mode", async () => {
+    const openEventStream = vi.fn();
+    const { identity } = configured("shadow", { openEventStream });
+    const fetch = vi.fn().mockResolvedValue(new Response("event: ready\n\n", { headers: { "Content-Type": "text/event-stream" } }));
+    vi.stubGlobal("fetch", fetch);
+    const stream = await new MobileApiClient("https://custom.example", new RequestSigner(identity), "1.0.0")
+      .openEvents("token", new AbortController().signal);
+    await stream.cancel();
+    expect(fetch).toHaveBeenCalledOnce();
+    expect(openEventStream).not.toHaveBeenCalled();
+  });
+
+  it("does not try Node after native stream creation fails", async () => {
+    const { identity } = configured("rust", { openEventStream: () => { throw new Error("private token"); } });
+    const fetch = vi.fn(); vi.stubGlobal("fetch", fetch);
+    await expect(new MobileApiClient("https://custom.example", new RequestSigner(identity), "1.0.0")
+      .openEvents("token", new AbortController().signal)).rejects.toThrow("Канал событий недоступен");
+    expect(fetch).not.toHaveBeenCalled();
+  });
+});
+
 const modulePath = process.env.LEVIK_TEST_CORE;
 describe.skipIf(!modulePath)("real Rust module", () => {
   it("passes the typed handle through the verified loader and matches Node crypto", () => {

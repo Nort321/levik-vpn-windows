@@ -1,3 +1,4 @@
+import { isNativeEventStream, type NativeEventStream } from "../core/nativeEvents";
 import type { LevikCoreModule } from "../core/levikCore";
 import type { NativeApiRequest, NativeIdentity } from "../core/nativeIdentity";
 import type { RustCore } from "../core/rustCore";
@@ -66,6 +67,16 @@ export class DeviceIdentity {
     if (this.core?.mode !== "rust") return null;
     const native = this.nativeIdentity();
     return native ? native.apiRequest(JSON.stringify(input)) : null;
+  }
+
+  /** Null means no native network attempt; old modules keep the existing stream. */
+  openEventsWithRust(input: NativeApiRequest): NativeEventStream | null {
+    if (this.core?.mode !== "rust") return null;
+    const identity = this.nativeIdentity();
+    if (!identity?.openEventStream) return null;
+    const stream: unknown = identity.openEventStream(JSON.stringify(input));
+    if (!isNativeEventStream(stream)) throw new Error("Invalid native event stream");
+    return stream;
   }
 
   private constructor(

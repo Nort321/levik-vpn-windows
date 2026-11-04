@@ -1,3 +1,5 @@
+import { nativeEventSource } from "../core/nativeEvents";
+import type { EventSourceStream } from "../platform/liveEvents";
 import type { ServiceRouteStatus } from "../../shared/serviceRoutes";
 import type {
   ApprovalDecisionResponse,
@@ -187,9 +189,16 @@ export class MobileApiClient {
   }
 
   /** Live hints for this account (liveEvents.ts). The caller aborts the stream. */
-  async openEvents(accessToken: string, signal: AbortSignal): Promise<ReadableStream<Uint8Array>> {
+  async openEvents(accessToken: string, signal: AbortSignal): Promise<EventSourceStream> {
     const origin = await this.endpoints.resolve();
     const url = new URL("/api/mobile/v1/events", origin);
+    signal.throwIfAborted();
+    try {
+      const stream = this.signer.openEventsWithRust({ origin: origin.origin, method: "GET", path: url.pathname,
+        accessToken, body: "", platform: "windows", version: this.version, road: false, game: false });
+      if (stream) return nativeEventSource(stream, signal, (status, rejected) =>
+        new MobileApiError(rejected ? "Сессия истекла. Войдите снова." : "Канал событий недоступен", status, rejected));
+    } catch { throw new MobileApiError("Канал событий недоступен"); }
     const signed = this.signer.sign("GET", url.pathname, accessToken, Buffer.alloc(0));
     const response = await fetch(url, {
       method: "GET",
