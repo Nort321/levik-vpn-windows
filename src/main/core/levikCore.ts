@@ -1,0 +1,111 @@
+import { existsSync } from "node:fs";
+import { join } from "node:path";
+
+/**
+ * Rust core loaded through Node-API (levik_desktop/crates/levik-napi).
+ * Stage 0 of the Rust migration plan: the module is optional and only reports
+ * itself. Without it, or with a module that does not match, the app runs exactly
+ * as before on its TypeScript code.
+ */
+export const LEVIK_CORE_CONTRACT = 1;
+
+export interface LevikCoreInfo {
+  version: string;
+  contract: number;
+  os: string;
+  arch: string;
+}
+
+export interface LevikCoreModule {
+  coreInfo(): LevikCoreInfo;
+}
+
+export type LevikCoreStatus =
+  | { state: "loaded"; info: LevikCoreInfo; module: LevikCoreModule }
+  | { state: "missing" }
+  | { state: "rejected"; reason: string };
+
+const RUST_OS: Partial<Record<NodeJS.Platform, string>> = { darwin: "macos", win32: "windows", linux: "linux" };
+const RUST_ARCH: Partial<Record<string, string>> = { arm64: "aarch64", x64: "x86_64" };
+const VENDOR_OS: Partial<Record<NodeJS.Platform, string>> = { darwin: "darwin", win32: "windows", linux: "linux" };
+
+/** Packaged builds carry the module in resources/levik-core; development runs use vendor/levik-core. */
+export function levikCorePath(options: {
+  packaged: boolean;
+  resourcesPath: string;
+  appPath: string;
+  platform?: NodeJS.Platform;
+  arch?: string;
+}): string {
+  if (options.packaged) return join(options.resourcesPath, "levik-core", "levik_core.node");
+  const platform = options.platform ?? process.platform;
+  const arch = options.arch ?? process.arch;
+  return join(options.appPath, "vendor", "levik-core", `${VENDOR_OS[platform] ?? platform}-${arch}`, "levik_core.node");
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function isCoreInfo(value: unknown): value is LevikCoreInfo {
+  return isRecord(value)
+    && typeof value.version === "string"
+    && typeof value.contract === "number"
+    && typeof value.os === "string"
+    && typeof value.arch === "string";
+}
+
+function messageOf(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+/** Never throws: a missing or foreign module leaves the TypeScript code in charge. */
+export function loadLevikCore(path: string, options: {
+  exists?: (path: string) => boolean;
+  load?: (path: string) => unknown;
+  platform?: NodeJS.Platform;
+  arch?: string;
+} = {}): LevikCoreStatus {
+  const exists = options.exists ?? existsSync;
+  // A computed path keeps esbuild from bundling the native module into main.js.
+  const load = options.load ?? ((modulePath: string): unknown => require(modulePath));
+  if (!exists(path)) return { state: "missing" };
+  let loaded: unknown;
+  try {
+    loaded = load(path);
+  } catch (error) {
+    return { state: "rejected", reason: `не загрузился: ${messageOf(error)}` };
+  }
+  if (!isRecord(loaded) || typeof loaded.coreInfo !== "function") {
+    return { state: "rejected", reason: "нет coreInfo()" };
+  }
+  const module = loaded as unknown as LevikCoreModule;
+  let info: unknown;
+  try {
+    info = module.coreInfo();
+  } catch (error) {
+    return { state: "rejected", reason: `coreInfo() упал: ${messageOf(error)}` };
+  }
+  if (!isCoreInfo(info)) return { state: "rejected", reason: "coreInfo() вернул не то" };
+  if (info.contract !== LEVIK_CORE_CONTRACT) {
+    return { state: "rejected", reason: `контракт ${info.contract}, нужен ${LEVIK_CORE_CONTRACT}` };
+  }
+  const platform = options.platform ?? process.platform;
+  const arch = options.arch ?? process.arch;
+  if (info.os !== RUST_OS[platform] || info.arch !== RUST_ARCH[arch]) {
+    return { state: "rejected", reason: `собран для ${info.os}/${info.arch}` };
+  }
+  return { state: "loaded", info, module };
+}
+
+/** One diagnostics line; no paths, so nothing personal ends up in a support report. */
+export function describeLevikCore(status: LevikCoreStatus): string {
+  switch (status.state) {
+    case "loaded":
+      return `Rust-ядро ${status.info.version} (контракт ${status.info.contract}, ${status.info.os}/${status.info.arch}) загружено`;
+    case "missing":
+      return "Rust-ядро не входит в сборку";
+    case "rejected":
+      return `Rust-ядро отклонено: ${status.reason.slice(0, 200)}`;
+  }
+}

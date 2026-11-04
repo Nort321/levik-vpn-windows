@@ -3868,6 +3868,11 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     ];
   }
 
+  /** One line for the local diagnostics log only, not the in-app log. */
+  recordDiagnostic(line: string): void {
+    this.diskLog?.write(line.replace(/[\r\n]/g, " ").slice(0, 1_000));
+  }
+
   private addLog(line: string): void {
     const cleaned = line.replace(/[\r\n]/g, " ").slice(0, 1_000);
     this.diskLog?.write(cleaned);
