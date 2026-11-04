@@ -6,6 +6,9 @@ import type { ProtocolHistory, RankedServer } from "../vpn/smartAuto";
 import type { TunnelProfileOutcome } from "../vpn/tunnelProfile";
 import type { CompiledServiceRoutes } from "../vpn/serviceRoutes";
 import { isCanonicalNodeList } from "../platform/favoriteNodes";
+import type { AccountNotice } from "../platform/accountNotices";
+import { isCabinetTarget } from "../platform/links";
+import type { ExpiryNotice } from "../platform/notices";
 
 /**
  * Shape checks for answers from the Rust core. In "rust" mode an answer is
@@ -215,4 +218,16 @@ export function isNodeListAnswer(value: unknown): value is string {
 export function isFavoritesAnswer(value: unknown): value is FavoritesAnswer {
   return isRecord(value) && Object.keys(value).length === 2 && isNodeListAnswer(value.nodes)
     && isStringList(value.local) && new Set(value.local).size === value.local.length;
+}
+
+export function isExpiryNoticeList(value: unknown): value is ExpiryNotice[] {
+  return Array.isArray(value) && value.every((item) => isRecord(item) && isString(item.key)
+    && (item.milestone === "3d" || item.milestone === "1d" || item.milestone === "expired")
+    && isRecord(item.notice) && isString(item.notice.title) && isString(item.notice.body) && item.notice.tab === "profile"
+    && item.notice.cabinet === undefined);
+}
+
+export function isAccountNoticeList(value: unknown): value is AccountNotice[] {
+  return Array.isArray(value) && value.length <= 20 && value.every((item) => isRecord(item) && isString(item.id)
+    && isString(item.title) && item.title.length > 0 && isString(item.body) && item.body.length > 0 && isCabinetTarget(item.cabinet));
 }

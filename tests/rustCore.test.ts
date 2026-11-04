@@ -6,6 +6,10 @@ import { prepareProfileWithCore } from "../src/main/core/coreProfile";
 import { buildXrayConfigWithCore } from "../src/main/core/coreXray";
 import { countryServersWithCore } from "../src/main/core/coreServers";
 import { reconcileFavoritesWithCore, unionNodeListsWithCore } from "../src/main/core/coreFavorites";
+import { expiryNoticesWithCore, parseAccountNoticesWithCore } from "../src/main/core/coreNotices";
+import { parseAccountNotices } from "../src/main/platform/accountNotices";
+import { expiryNotices } from "../src/main/platform/notices";
+import type { SubscriptionSummary } from "../src/shared/contracts";
 import { nodeIdForHost } from "../src/main/platform/favoriteNodes";
 import { compiledServiceRoutes } from "../src/main/vpn/serviceRoutes";
 import { buildXrayConfig } from "../src/main/vpn/xrayConfig";
@@ -442,6 +446,49 @@ describe("reconcileFavoritesWithCore", () => {
   });
 });
 
+const NOTICE_NOW = Date.parse("2026-11-04T12:00:00.000Z");
+const NOTICE_DAY = 24 * 60 * 60 * 1_000;
+const NOTICE_ID = "0f8fad5b-d9cb-469f-a165-70867728950e";
+const SUBSCRIPTIONS: SubscriptionSummary[] = [-4, -1, -0.5, 0.5, 2, 3, 5].flatMap((days, index) => ["ACTIVE", "expired", "limited"].map((status): SubscriptionSummary => ({
+  uuid: `s${index}-${status}`, title: `Подписка ${index}`, status, expireAt: new Date(NOTICE_NOW + days * NOTICE_DAY).toISOString(),
+  traffic: { usedBytes: 0, limitBytes: 0 }, devices: { used: 0, limit: 3, items: [] },
+  shield: { supported: false, enabled: false }, actions: { renew: true, revokeDevice: true },
+}))).concat([{ uuid: "none", title: "Без даты", status: "active", expireAt: null, traffic: { usedBytes: 0, limitBytes: 0 },
+  devices: { used: 0, limit: 3, items: [] }, shield: { supported: false, enabled: false }, actions: { renew: true, revokeDevice: true } }]);
+const RAW_NOTICES: unknown[] = [undefined, null, {}, [], [
+  { id: NOTICE_ID, title: " Подписка ", body: " Продлите ", target: "/dashboard/plans" },
+  { id: NOTICE_ID, title: "t", body: "b", target: "/unknown" }, { id: NOTICE_ID.toUpperCase(), title: "t", body: "b" },
+  { id: NOTICE_ID, title: "t".repeat(81), body: "b" }, null, [], { id: NOTICE_ID, title: "😀".repeat(40), body: "b" },
+], Array.from({ length: 25 }, (_, index) => ({ id: NOTICE_ID, title: `t${index}`, body: "b" }))];
+
+describe("notices through the core", () => {
+  it("asks nothing in ts mode, nor for a missing list", () => {
+    const bridge = fakeBridge({ "notices.expiryNotices": () => [], "notices.parseAccountNotices": () => [] });
+    const core = new RustCore(bridge, () => {}, "ts");
+    expect(expiryNoticesWithCore(core, SUBSCRIPTIONS, new Set(), NOTICE_NOW)).toEqual(expiryNotices(SUBSCRIPTIONS, new Set(), NOTICE_NOW));
+    expect(parseAccountNoticesWithCore(new RustCore(bridge, () => {}, "shadow"), undefined)).toEqual([]);
+    expect(bridge.calls).toEqual([]);
+  });
+
+  it("uses Rust answers of the right shape in rust mode only", () => {
+    const reminder = { key: "expiry:x:1d:1", milestone: "1d", notice: { title: "t", body: "b", tab: "profile" } };
+    const notice = { id: NOTICE_ID, title: "t", body: "b", cabinet: "/dashboard" };
+    const expiry: unknown[] = [[reminder], [{ ...reminder, milestone: "2d" }], [{ ...reminder, notice: { ...reminder.notice, tab: "home" } }]];
+    const account: unknown[] = [[notice], [{ ...notice, cabinet: "/admin" }], Array.from({ length: 21 }, () => notice)];
+    const core = new RustCore(fakeBridge({
+      "notices.expiryNotices": () => expiry.shift(),
+      "notices.parseAccountNotices": () => account.shift(),
+    }), () => {}, "rust");
+    expect(expiryNoticesWithCore(core, SUBSCRIPTIONS, new Set(), NOTICE_NOW)).toEqual([reminder]);
+    expect(parseAccountNoticesWithCore(core, RAW_NOTICES[4])).toEqual([notice]);
+    for (let index = 0; index < 2; index += 1) {
+      expect(expiryNoticesWithCore(core, SUBSCRIPTIONS, new Set(), NOTICE_NOW)).toEqual(expiryNotices(SUBSCRIPTIONS, new Set(), NOTICE_NOW));
+      expect(parseAccountNoticesWithCore(core, RAW_NOTICES[4])).toEqual(parseAccountNotices(RAW_NOTICES[4]));
+    }
+    expect(core.stats()).toMatchObject({ decided: 2, failed: 4 });
+  });
+});
+
 // The real module, when `npm run download:levik-core` (or a local build) put it into vendor.
 const status = loadLevikCore(levikCorePath({ packaged: false, resourcesPath: "", appPath: join(__dirname, "..") }));
 const bridge = coreBridge(status);
@@ -600,5 +647,20 @@ describe.runIf(bridge !== null)("the Rust core in shadow mode agrees with TypeSc
     expect(lines).toEqual([]);
     expect(core.stats()).toMatchObject({ differed: 0, failed: 0 });
     expect(core.stats().compared - before).toBe(accounts.length * idSets.length ** 2 + accounts.length ** 2);
+  });
+
+  it("subscription reminders and account notices", () => {
+    expect(core.has("notices.expiryNotices")).toBe(true);
+    const before = core.stats().compared;
+    const keys = expiryNotices(SUBSCRIPTIONS, new Set(), NOTICE_NOW).map((item) => item.key);
+    expect(keys.length).toBeGreaterThan(5);
+    const nows = [NOTICE_NOW, NOTICE_NOW + NOTICE_DAY, NOTICE_NOW - 3 * NOTICE_DAY];
+    for (const remembered of [[], keys.slice(0, 2), keys]) {
+      for (const now of nows) expiryNoticesWithCore(core, SUBSCRIPTIONS, new Set(remembered), now);
+    }
+    for (const value of RAW_NOTICES) parseAccountNoticesWithCore(core, value);
+    expect(lines).toEqual([]);
+    expect(core.stats()).toMatchObject({ differed: 0, failed: 0 });
+    expect(core.stats().compared - before).toBe(3 * nows.length + RAW_NOTICES.length - 1);
   });
 });

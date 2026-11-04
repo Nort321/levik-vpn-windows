@@ -89,10 +89,9 @@ import type { DetectedConflict } from "./windows/tunnelConflicts";
 import { XRAY_STATS_ENDPOINT } from "./vpn/xrayStats";
 import { TUNNEL_HEALTH_PORT } from "./vpn/tunnelHealth";
 import { DEFAULT_API_ORIGIN } from "./api/apiEndpoints";
-import { parseAccountNotices } from "./platform/accountNotices";
 import { beaconFresh, HomeSleepPolicy, localAddresses, parseSighting, protects, scanHomes } from "./platform/levikHome";
 import type { HomeAction, HomeBeacon, VerifiedHome } from "./platform/levikHome";
-import { expiryNotices, NoticeState } from "./platform/notices";
+import { NoticeState } from "./platform/notices";
 import type { AppNotice } from "./platform/notices";
 import {
   flagEnabled,
@@ -134,6 +133,7 @@ import {
 } from "./platform/favoriteNodes";
 import { avoidMaintenance, IdleMeter, maintenanceFor, maintenanceMove, type MaintenanceWindow } from "./platform/maintenance";
 import { countryServersWithCore } from "./core/coreServers";
+import { expiryNoticesWithCore, parseAccountNoticesWithCore } from "./core/coreNotices";
 import { reconcileFavoritesWithCore, unionNodeListsWithCore } from "./core/coreFavorites";
 import { captivePortal, checkServices, diagnosisSummary, diagnosisVerdict, parseDiagnoseReport, vpnPhase, type DiagnosisInput } from "./platform/diagnosis";
 import type { LevikCoreStatus } from "./core/levikCore";
@@ -2145,7 +2145,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
   private async takeNotices(): Promise<void> {
     if (!this.accessToken) return;
     const response = await this.withSession((token) => this.api.takeNotifications(token));
-    for (const notice of parseAccountNotices(response.notifications)) {
+    for (const notice of parseAccountNoticesWithCore(this.core, response.notifications)) {
       if (this.shownNotices.has(notice.id)) continue;
       this.shownNotices.add(notice.id);
       if (this.shownNotices.size > MAX_HANDLED_COMMANDS) {
@@ -2372,7 +2372,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
 
   private async checkExpiry(): Promise<void> {
     // Signed in, the account's reminders before the end come from the notification center.
-    const due = expiryNotices(this.state.account?.subscriptions ?? [], this.notices.notified(), Date.now())
+    const due = expiryNoticesWithCore(this.core, this.state.account?.subscriptions ?? [], this.notices.notified(), Date.now())
       .filter((item) => !this.accessToken || item.milestone === "expired");
     if (!due.length) return;
     await this.notices.remember(due.map((item) => item.key));
