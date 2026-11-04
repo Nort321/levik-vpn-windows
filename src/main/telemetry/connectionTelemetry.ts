@@ -1,3 +1,5 @@
+import type { CoreTally } from "../core/rustCore";
+import { coreReport } from "./coreReport";
 import { buildBatches, TelemetryClient, type NetworkToken } from "./telemetryClient";
 import { TelemetryQueue } from "./telemetryQueue";
 import {
@@ -27,6 +29,9 @@ export class ConnectionTelemetry {
   private flushTimer: ReturnType<typeof setInterval> | null = null;
   private flushing: Promise<void> | null = null;
   private networkToken: { value: NetworkToken; fetchedAt: number } | null = null;
+  private coreTally: () => CoreTally | null = () => null;
+  /** The tally at the previous session's final report; each session reports what came after. */
+  private coreBaseline: CoreTally | null = null;
 
   constructor(
     directory: string,
@@ -71,6 +76,12 @@ export class ConnectionTelemetry {
     clearTimeout(timer);
   }
 
+  /** Where the Rust core counters come from (docs/connection-telemetry.md, "Rust core"). */
+  useCore(tally: () => CoreTally | null): void {
+    this.coreTally = tally;
+    this.coreBaseline = null;
+  }
+
   /** Starts a session unless one is already running. */
   begin(trigger: SessionTrigger, settings: SessionSettings): void {
     if (!this.enabled || (this.session && !this.session.finished)) return;
@@ -99,6 +110,9 @@ export class ConnectionTelemetry {
   finish(by: EndBy, code: string | null): Promise<void> {
     const session = this.session;
     if (!this.enabled || !session || session.finished) return Promise.resolve();
+    const tally = this.coreTally();
+    session.setCore(coreReport(tally, this.coreBaseline));
+    this.coreBaseline = tally;
     session.end(by, code);
     if (this.checkpointTimer) clearInterval(this.checkpointTimer);
     this.checkpointTimer = null;
@@ -128,6 +142,7 @@ export class ConnectionTelemetry {
     this.persistTimer = null;
     const session = this.session;
     if (!this.enabled || !session) return;
+    if (!session.finished) session.setCore(coreReport(this.coreTally(), this.coreBaseline));
     await this.queue.put({ startedAt: session.startedAt, savedAt: this.now(), body: session.snapshot() }).catch(() => {});
   }
 

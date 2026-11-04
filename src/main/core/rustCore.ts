@@ -27,6 +27,16 @@ export interface CoreStats {
   differed: number;
   /** Calls where Rust threw or returned something unusable. */
   failed: number;
+  /** Calls where the Rust answer was used ("rust" mode). */
+  decided: number;
+}
+
+/** Counters since the app started, for the anonymous connection report. */
+export interface CoreTally extends CoreStats {
+  version: string;
+  mode: CoreMode;
+  /** Per function, only the ones that had a difference or a failure. */
+  functions: Record<string, { differed: number; failed: number }>;
 }
 
 /** Lines per function and kind of problem per run; the counters keep counting. */
@@ -97,12 +107,15 @@ export class RustCore {
   private modeValue: CoreMode;
   private readonly available: ReadonlySet<string>;
   private readonly reported = new Map<string, number>();
-  private readonly counters: CoreStats = { compared: 0, differed: 0, failed: 0 };
+  private readonly counters: CoreStats = { compared: 0, differed: 0, failed: 0, decided: 0 };
+  private readonly problems = new Map<string, { differed: number; failed: number }>();
 
   constructor(
     private readonly bridge: CoreBridge | null,
     private readonly report: (line: string) => void,
     mode: CoreMode = "shadow",
+    /** The loaded module's version, for the connection report. */
+    private readonly version: string | null = null,
   ) {
     this.modeValue = mode;
     let names: string[] = [];
@@ -128,6 +141,14 @@ export class RustCore {
     return { ...this.counters };
   }
 
+  /** Null when the app runs without the module. */
+  tally(): CoreTally | null {
+    if (!this.bridge || this.version === null) return null;
+    const functions: CoreTally["functions"] = {};
+    for (const [name, counts] of this.problems) functions[name] = { ...counts };
+    return { ...this.counters, version: this.version, mode: this.modeValue, functions };
+  }
+
   /** Whether `name` can run in Rust in this build. */
   has(name: string): boolean {
     return this.bridge !== null && this.available.has(name);
@@ -142,7 +163,10 @@ export class RustCore {
     if (this.modeValue === "ts" || !this.bridge || !this.available.has(name)) return typescript();
     if (this.modeValue === "rust" && accept) {
       const answer = this.ask(name, input);
-      if (answer.ok && accept(answer.value)) return answer.value;
+      if (answer.ok && accept(answer.value)) {
+        this.counters.decided += 1;
+        return answer.value;
+      }
       if (answer.ok) this.problem(name, "failed", "ответ не той формы");
       return typescript();
     }
@@ -167,8 +191,15 @@ export class RustCore {
   }
 
   private problem(name: string, kind: "differs" | "failed", detail: string): void {
-    if (kind === "differs") this.counters.differed += 1;
-    else this.counters.failed += 1;
+    const counts = this.problems.get(name) ?? { differed: 0, failed: 0 };
+    if (kind === "differs") {
+      this.counters.differed += 1;
+      counts.differed += 1;
+    } else {
+      this.counters.failed += 1;
+      counts.failed += 1;
+    }
+    this.problems.set(name, counts);
     const key = `${name}:${kind}`;
     const count = (this.reported.get(key) ?? 0) + 1;
     this.reported.set(key, count);

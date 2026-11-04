@@ -42,7 +42,7 @@ describe("RustCore", () => {
     expect(core.run("f", {}, () => answer)).toBe(answer);
     expect(lines).toEqual(["Rust-ядро: f расходится с TypeScript в $.provider"]);
     expect(lines.join()).not.toContain("провайдер");
-    expect(core.stats()).toEqual({ compared: 1, differed: 1, failed: 0 });
+    expect(core.stats()).toEqual({ compared: 1, differed: 1, failed: 0, decided: 0 });
   });
 
   it("treats undefined fields and number forms as JSON does", () => {
@@ -50,7 +50,7 @@ describe("RustCore", () => {
     const core = new RustCore(fakeBridge({ f: () => ({ a: 1, list: [1.5] }) }), (line) => lines.push(line));
     core.run("f", {}, () => ({ a: 1.0, list: [1.5], gone: undefined }));
     expect(lines).toEqual([]);
-    expect(core.stats()).toEqual({ compared: 1, differed: 0, failed: 0 });
+    expect(core.stats()).toEqual({ compared: 1, differed: 0, failed: 0, decided: 0 });
   });
 
   it("limits repeated reports but keeps counting", () => {
@@ -97,6 +97,34 @@ describe("RustCore", () => {
     const core = new RustCore({ functions: () => { throw new Error("broken"); }, call: () => "null" }, (line) => lines.push(line));
     expect(core.run("f", {}, () => 1)).toBe(1);
     expect(lines).toEqual(["Rust-ядро: список функций недоступен (broken)"]);
+  });
+
+  it("tallies per function for the connection report, and nothing without a module", () => {
+    const core = new RustCore(fakeBridge({
+      "smartAuto.rankSmart": () => [2],
+      "diagnosis.parseDiagnoseReport": () => { throw new Error("x"); },
+      "diagnosis.diagnosisVerdict": () => verdict,
+    }), () => {}, "shadow", "0.3.0");
+    core.run("smartAuto.rankSmart", {}, () => [1]);
+    core.run("smartAuto.rankSmart", {}, () => [1]);
+    core.run("diagnosis.parseDiagnoseReport", {}, () => null);
+    core.run("diagnosis.diagnosisVerdict", {}, () => verdict);
+    core.setMode("rust");
+    core.run("diagnosis.diagnosisVerdict", {}, () => verdict, isDiagnosisVerdict);
+    expect(core.tally()).toEqual({
+      version: "0.3.0",
+      mode: "rust",
+      compared: 3,
+      differed: 2,
+      failed: 1,
+      decided: 1,
+      functions: {
+        "smartAuto.rankSmart": { differed: 2, failed: 0 },
+        "diagnosis.parseDiagnoseReport": { differed: 0, failed: 1 },
+      },
+    });
+    expect(new RustCore(null, () => {}, "shadow", "0.3.0").tally()).toBeNull();
+    expect(new RustCore(fakeBridge({}), () => {}).tally()).toBeNull();
   });
 
   it("logs mode changes once", () => {

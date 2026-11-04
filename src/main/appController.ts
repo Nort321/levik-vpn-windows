@@ -3261,7 +3261,9 @@ export class AppController extends EventEmitter<AppControllerEvents> {
 
   /** Stage 2 of the Rust migration: the loaded module, compared with TypeScript or in charge per remote config. */
   useRustCore(status: LevikCoreStatus): void {
-    this.core = new RustCore(coreBridge(status), (line) => this.recordDiagnostic(line), "ts");
+    const version = status.state === "loaded" ? status.info.version : null;
+    this.core = new RustCore(coreBridge(status), (line) => this.recordDiagnostic(line), "ts", version);
+    this.telemetry.useCore(() => this.core.tally());
     this.applyCoreMode();
   }
 

@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { ProtocolName } from "./codes";
+import type { SessionCore } from "./coreReport";
 
 export type TelemetryPlatform = "android" | "windows" | "macos" | "linux";
 export type NetworkType = "wifi" | "cellular" | "ethernet" | "other" | "unknown";
@@ -52,6 +53,7 @@ export interface TelemetrySessionBody {
   settings: SessionSettings;
   timeline: TimelineEvent[];
   end?: { by: EndBy; code: string | null; durationS: number };
+  core?: SessionCore;
 }
 
 export const MAX_TIMELINE_EVENTS = 200;
@@ -75,6 +77,7 @@ export class SessionRecorder {
   private token: string | null = null;
   private probeFailures = 0;
   private ended: TelemetrySessionBody["end"] | undefined;
+  private core: SessionCore | null = null;
 
   constructor(
     private readonly client: SessionClient,
@@ -165,6 +168,11 @@ export class SessionRecorder {
     this.ended = { by, code: code === null ? null : safeCode(code), durationS: this.elapsedSeconds() };
   }
 
+  /** The Rust core counters for the next checkpoints; frozen once the session ended. */
+  setCore(core: SessionCore | null): void {
+    if (!this.ended) this.core = core;
+  }
+
   /** A checkpoint; every call gets a higher seq so the server keeps the latest. */
   snapshot(): TelemetrySessionBody {
     if (!this.ended) this.flushCoreLogs();
@@ -181,6 +189,7 @@ export class SessionRecorder {
       timeline: this.timeline.map((event) => ({ ...event })),
     };
     if (this.ended) body.end = { ...this.ended };
+    if (this.core) body.core = { ...this.core, fn: { ...this.core.fn } };
     return body;
   }
 
