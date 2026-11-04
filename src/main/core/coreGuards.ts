@@ -193,3 +193,9 @@ export function isXrayConfigAnswer(value: unknown): value is XrayConfigAnswer {
     && isRecord(config.routing) && Array.isArray(config.routing.rules) && isRecord(config.dns)
     && (value.serviceRoutes === null || isCompiledServiceRoutes(value.serviceRoutes));
 }
+
+/** Distinct positions in a list of the given length. */
+export function isListPositions(value: unknown, length: number): value is number[] {
+  return Array.isArray(value) && value.every((position) => isCount(position) && position < length)
+    && new Set(value).size === value.length;
+}

@@ -1,9 +1,10 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { isDiagnosisVerdict, isIndexList, isTunnelProfileOutcome } from "../src/main/core/coreGuards";
+import { isDiagnosisVerdict, isIndexList, isListPositions, isTunnelProfileOutcome } from "../src/main/core/coreGuards";
 import { prepareProfileWithCore } from "../src/main/core/coreProfile";
 import { buildXrayConfigWithCore } from "../src/main/core/coreXray";
+import { countryServersWithCore } from "../src/main/core/coreServers";
 import { compiledServiceRoutes } from "../src/main/vpn/serviceRoutes";
 import { buildXrayConfig } from "../src/main/vpn/xrayConfig";
 import type { AppSettings } from "../src/shared/contracts";
@@ -14,6 +15,7 @@ import { avoidMaintenance, maintenanceFor, maintenanceMove, parseMaintenance } f
 import { flagEnabled, parseAdvice, parseRemoteConfig, visibleAnnouncements, type RemoteConfig } from "../src/main/platform/remoteConfig";
 import * as smart from "../src/main/vpn/smartAuto";
 import { prepareTunnelProfile } from "../src/main/vpn/tunnelProfile";
+import { countryServers } from "../src/shared/serverGroups";
 
 function fakeBridge(answers: Record<string, (input: unknown) => unknown>): CoreBridge & { calls: string[] } {
   const calls: string[] = [];
@@ -346,6 +348,60 @@ describe("buildXrayConfigWithCore", () => {
   });
 });
 
+// The profile's servers, then copies under other countries and names.
+const COUNTRY_SERVERS = [
+  ...XRAY_PROFILES[0]!.servers,
+  ...XRAY_PROFILES[0]!.servers.map((server, index) => ({
+    ...server,
+    id: `${server.id}-copy`,
+    countryCode: ["de", "NL", "XX", "HK", "RU"][index % 5]!,
+    name: ["🇩🇪 Германия · Франкфурт", "Netherlands Amsterdam", "Unknown", "Hong Kong 2", "🏠 Домашний ПК"][index % 5]!,
+  })),
+];
+const COUNTRY_CODES = [...new Set(COUNTRY_SERVERS.map((server) => server.countryCode))].concat(["de", "xx", "", "JP"]);
+
+describe("countryServersWithCore", () => {
+  const code = COUNTRY_SERVERS[0]!.countryCode;
+  const expected = countryServers(COUNTRY_SERVERS, code);
+
+  it("asks nothing in ts mode", () => {
+    const bridge = fakeBridge({ "serverGroups.countryServers": () => [] });
+    expect(countryServersWithCore(new RustCore(bridge, () => {}, "ts"), COUNTRY_SERVERS, code)).toEqual(expected);
+    expect(bridge.calls).toEqual([]);
+  });
+
+  it("compares positions in shadow mode and hands back the caller's own servers", () => {
+    const inputs: unknown[] = [];
+    const core = new RustCore(fakeBridge({ "serverGroups.countryServers": (input) => {
+      inputs.push(input);
+      return [0];
+    } }), () => {}, "shadow");
+    const found = countryServersWithCore(core, COUNTRY_SERVERS, code);
+    expect(found).toEqual(expected);
+    expect(found.every((server) => COUNTRY_SERVERS.includes(server))).toBe(true);
+    expect(inputs[0]).toMatchObject({ countryCode: code, platform: "windows" });
+    expect(core.stats().compared).toBe(1);
+  });
+
+  it("uses the Rust positions in rust mode, and TypeScript for positions outside the list or repeated", () => {
+    const answers: unknown[] = [[1, 0], [0, COUNTRY_SERVERS.length], [0, 0], ["0"]];
+    const core = new RustCore(fakeBridge({ "serverGroups.countryServers": () => answers.shift() }), () => {}, "rust");
+    expect(countryServersWithCore(core, COUNTRY_SERVERS, code)).toEqual([COUNTRY_SERVERS[1], COUNTRY_SERVERS[0]]);
+    for (let index = 0; index < 3; index += 1) expect(countryServersWithCore(core, COUNTRY_SERVERS, code)).toEqual(expected);
+    expect(core.stats()).toMatchObject({ decided: 1, failed: 3 });
+  });
+
+  it("accepts distinct positions within the list only", () => {
+    expect(isListPositions([2, 0, 1], 3)).toBe(true);
+    expect(isListPositions([], 0)).toBe(true);
+    expect(isListPositions([3], 3)).toBe(false);
+    expect(isListPositions([1, 1], 3)).toBe(false);
+    expect(isListPositions([-1], 3)).toBe(false);
+    expect(isListPositions([0.5], 3)).toBe(false);
+    expect(isListPositions({}, 3)).toBe(false);
+  });
+});
+
 // The real module, when `npm run download:levik-core` (or a local build) put it into vendor.
 const status = loadLevikCore(levikCorePath({ packaged: false, resourcesPath: "", appPath: join(__dirname, "..") }));
 const bridge = coreBridge(status);
@@ -474,5 +530,15 @@ describe.runIf(bridge !== null)("the Rust core in shadow mode agrees with TypeSc
     expect(lines).toEqual([]);
     expect(core.stats()).toMatchObject({ differed: 0, failed: 0 });
     expect(core.stats().compared - before).toBeGreaterThan(50);
+  });
+
+  it("servers of a country", () => {
+    expect(core.has("serverGroups.countryServers")).toBe(true);
+    const before = core.stats().compared;
+    for (const code of COUNTRY_CODES) countryServersWithCore(core, COUNTRY_SERVERS, code);
+    expect(lines).toEqual([]);
+    expect(core.stats()).toMatchObject({ differed: 0, failed: 0 });
+    expect(core.stats().compared - before).toBe(COUNTRY_CODES.length);
+    expect(COUNTRY_CODES.filter((code) => countryServers(COUNTRY_SERVERS, code).length > 0).length).toBeGreaterThan(2);
   });
 });

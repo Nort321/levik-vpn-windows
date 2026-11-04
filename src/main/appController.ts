@@ -138,7 +138,7 @@ import {
   unionNodeLists,
 } from "./platform/favoriteNodes";
 import { avoidMaintenance, IdleMeter, maintenanceFor, maintenanceMove, type MaintenanceWindow } from "./platform/maintenance";
-import { countryServers } from "../shared/serverGroups";
+import { countryServersWithCore } from "./core/coreServers";
 import { captivePortal, checkServices, diagnosisSummary, diagnosisVerdict, parseDiagnoseReport, vpnPhase, type DiagnosisInput } from "./platform/diagnosis";
 import type { LevikCoreStatus } from "./core/levikCore";
 import { coreBridge, coreModeFor, RustCore } from "./core/rustCore";
@@ -819,7 +819,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
   /** The user picked a country: its best server, chosen by hand from then on. */
   async chooseCountry(countryCode: string): Promise<void> {
     if (this.guestConnection.active) throw new Error("Сначала завершите гостевой режим.");
-    if (!countryServers(this.state.servers, countryCode).length) throw new Error("Страна не найдена");
+    if (!countryServersWithCore(this.core, this.state.servers, countryCode).length) throw new Error("Страна не найдена");
     const replacing = this.manualSwitchPending !== null;
     const intent = ++this.manualSwitchIntent;
     this.manualSwitchPending = intent;
@@ -827,11 +827,11 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     try {
       if (this.state.settings.automaticServer) await this.updateSettings({ automaticServer: false });
       if (intent !== this.manualSwitchIntent) return;
-      const servers = countryServers(this.state.servers, countryCode);
+      const servers = countryServersWithCore(this.core, this.state.servers, countryCode);
       const selected = servers.find((server) => server.id === this.state.selectedServerId);
       if (!selected && servers.some((server) => this.state.serverLatencies[server.id] === undefined)) await this.pingServers();
       if (intent !== this.manualSwitchIntent) return;
-      const best = selected ?? this.bestServer(countryServers(this.state.servers, countryCode));
+      const best = selected ?? this.bestServer(countryServersWithCore(this.core, this.state.servers, countryCode));
       if (best) await this.chooseManualServer(best.id, intent, replacing);
     } finally {
       if (this.manualSwitchPending === intent) this.manualSwitchPending = null;
@@ -914,11 +914,11 @@ export class AppController extends EventEmitter<AppControllerEvents> {
    */
   async selectCountry(countryCode: string): Promise<void> {
     if (this.guestConnection.active) throw new Error("Сначала завершите гостевой режим.");
-    const servers = countryServers(this.state.servers, countryCode);
+    const servers = countryServersWithCore(this.core, this.state.servers, countryCode);
     if (!servers.length) throw new Error("Страна не найдена");
     if (servers.some((server) => server.id === this.state.selectedServerId)) return;
     if (servers.some((server) => this.state.serverLatencies[server.id] === undefined)) await this.pingServers();
-    const best = this.bestServer(countryServers(this.state.servers, countryCode));
+    const best = this.bestServer(countryServersWithCore(this.core, this.state.servers, countryCode));
     if (best) await this.selectServer(best.id);
   }
 
@@ -3472,7 +3472,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     if ((move === "when-idle" && (!this.idleMeter.idle(now) || this.gamePlaying)) || this.liveMatch()) return;
     // The same country first, docs/app-platform.md "Server list".
     const others = this.state.servers.filter((item) => item.id !== current.id);
-    const neighbours = countryServers(others, current.countryCode);
+    const neighbours = countryServersWithCore(this.core, others, current.countryCode);
     const target = [neighbours, others]
       .map((pool) => this.bestServer(pool))
       .find((item) => item && !this.maintenanceWindowOf(item, now));
