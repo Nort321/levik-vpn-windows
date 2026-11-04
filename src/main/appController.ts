@@ -2524,6 +2524,8 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     if (raw) {
       try {
         return DeviceIdentity.restore(JSON.parse(raw.toString("utf8")) as SerializedIdentity);
+      } catch {
+        throw new Error("Не удалось восстановить вход. Проверьте доступ к системному хранилищу ключей.");
       } finally {
         raw.fill(0);
       }
@@ -3269,6 +3271,8 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     this.applyCoreMode();
     this.identity.useRustCore(this.core, status.state === "loaded" ? status.module.restoreIdentity : undefined);
     this.replyCrypto = status.state === "loaded" ? status.module.replyCrypto ?? null : null;
+    this.secureStore.useRustCore(this.core, status.state === "loaded" ? status.module.openSecureStore : undefined,
+      () => this.recordDiagnostic("Rust-ядро: защищённое хранилище недоступно, используется системное хранилище Electron"));
     this.publicHttp = null;
     try { this.publicHttp = status.state === "loaded" ? status.module.createPublicClient?.() ?? null : null; }
     catch { this.recordDiagnostic("Rust-ядро: служебный HTTP-клиент недоступен"); }

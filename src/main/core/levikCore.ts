@@ -1,3 +1,4 @@
+import { isNativeSecureStore, type OpenNativeStore, type NativeSecureStore } from "./nativeStore";
 import { isNativePublicClient, type NativePublicClient } from "./publicFetch";
 import { isNativeReplyKey, type NativeReplyCrypto, type NativeReplyKey } from "./nativeReply";
 import { isNativeIdentity, type NativeIdentity } from "./nativeIdentity";
@@ -25,6 +26,7 @@ export interface LevikCoreModule {
   restoreIdentity?(serialized: string): NativeIdentity;
   replyCrypto?: NativeReplyCrypto;
   createPublicClient?(): NativePublicClient;
+  openSecureStore?: OpenNativeStore;
   /** Names of the core functions this build offers. */
   functions(): string[];
   /** Runs a core function: JSON in, JSON out; throws on bad input. */
@@ -90,7 +92,7 @@ export function loadLevikCore(path: string, options: {
   if (!isRecord(loaded) || typeof loaded.coreInfo !== "function") {
     return { state: "rejected", reason: "нет coreInfo()" };
   }
-  const { coreInfo, functions, call, restoreIdentity, createReplyKey, sealReply, createPublicClient } = loaded;
+  const { coreInfo, functions, call, restoreIdentity, createReplyKey, sealReply, createPublicClient, openSecureStore } = loaded;
   let info: unknown;
   try {
     info = coreInfo();
@@ -113,6 +115,11 @@ export function loadLevikCore(path: string, options: {
   const described: LevikCoreInfo = info;
   const module: LevikCoreModule = {
     coreInfo: () => described,
+    ...(typeof openSecureStore === "function" ? { openSecureStore: async (directory: string, backend: string): Promise<NativeSecureStore> => {
+      const store: unknown = await openSecureStore(directory, backend);
+      if (!isNativeSecureStore(store)) throw new Error("Invalid native secure store");
+      return store;
+    } } : {}),
     ...(typeof createPublicClient === "function" ? { createPublicClient: (): NativePublicClient => {
       const client: unknown = createPublicClient();
       if (!isNativePublicClient(client)) throw new Error("Invalid native public client");
