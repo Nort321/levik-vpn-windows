@@ -4,6 +4,7 @@ import type { MaintenanceMove, MaintenanceWindow } from "../platform/maintenance
 import type { ProtocolAdvice } from "../platform/remoteConfig";
 import type { ProtocolHistory, RankedServer } from "../vpn/smartAuto";
 import type { TunnelProfileOutcome } from "../vpn/tunnelProfile";
+import type { CompiledServiceRoutes } from "../vpn/serviceRoutes";
 
 /**
  * Shape checks for answers from the Rust core. In "rust" mode an answer is
@@ -162,4 +163,33 @@ export function isTunnelProfileOutcome(value: unknown): value is TunnelProfileOu
     && (profile.serviceRoutes === undefined || isRecord(profile.serviceRoutes))
     && isRecord(game) && typeof game.enabled === "boolean" && Array.isArray(game.servers) && game.servers.every(isTunnelServer)
     && (game.nodes === undefined || Array.isArray(game.nodes)) && isOptionalString(game.relayToken);
+}
+
+/** buildXrayConfig and the service routes it compiled. */
+export interface XrayConfigAnswer {
+  config: Record<string, unknown>;
+  serviceRoutes: CompiledServiceRoutes | null;
+}
+
+function isCompiledServiceRoutes(value: unknown): value is CompiledServiceRoutes {
+  return isRecord(value) && isRecord(value.policy) && Array.isArray(value.policy.rules) && Array.isArray(value.policy.exits)
+    && isRecord(value.status) && isString(value.status.state) && Array.isArray(value.status.routes)
+    && Array.isArray(value.plans) && value.plans.every((plan) => isRecord(plan) && isString(plan.id) && isString(plan.balancerTag)
+      && isStringList(plan.primary) && isStringList(plan.fallback) && isString(plan.finalTag) && isRecord(plan.exits))
+    && Array.isArray(value.probes) && value.probes.every((probe) => isRecord(probe) && isString(probe.tag) && isCount(probe.port))
+    && (value.auth === undefined || (isRecord(value.auth) && isCount(value.auth.port) && isString(value.auth.user) && isString(value.auth.password)))
+    && (value.resolvers === undefined || isStringList(value.resolvers))
+    && (value.policyActive === undefined || typeof value.policyActive === "boolean")
+    && (value.automatic === undefined || (isRecord(value.automatic) && isString(value.automatic.selectedId)
+      && typeof value.automatic.enabled === "boolean" && Array.isArray(value.automatic.candidates)
+      && value.automatic.candidates.every((candidate) => isRecord(candidate) && isString(candidate.id) && isString(candidate.tag)
+        && isCount(candidate.port) && isString(candidate.routeKey) && isString(candidate.exitId))));
+}
+
+export function isXrayConfigAnswer(value: unknown): value is XrayConfigAnswer {
+  if (!isRecord(value) || !isRecord(value.config)) return false;
+  const { config } = value;
+  return Array.isArray(config.inbounds) && config.inbounds.length > 0 && Array.isArray(config.outbounds) && config.outbounds.length > 0
+    && isRecord(config.routing) && Array.isArray(config.routing.rules) && isRecord(config.dns)
+    && (value.serviceRoutes === null || isCompiledServiceRoutes(value.serviceRoutes));
 }

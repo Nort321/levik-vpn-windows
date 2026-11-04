@@ -38,7 +38,7 @@ import { SecureStore } from "./security/secureStore";
 import { decryptTunnelProfile, ruleRoutingKey } from "./vpn/tunnelProfile";
 import type { PreparedTunnelProfile } from "./vpn/tunnelProfile";
 import { prepareProfileWithCore } from "./core/coreProfile";
-import { buildXrayConfig } from "./vpn/xrayConfig";
+import { buildXrayConfigWithCore } from "./core/coreXray";
 import { GuestConnection } from "./vpn/guestConnection";
 import { guestInterface, parseGuestInvitation } from "./vpn/guestSession";
 import { CoreStartError, XrayManager } from "./vpn/xrayManager";
@@ -1020,7 +1020,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
       progress.reach("profile", "config_invalid");
       this.gamePassword = randomBytes(24).toString("hex");
       await this.refreshServiceRoutePolicy(server);
-      const config = buildXrayConfig(this.serviceProfileFor(server), server, this.state.settings, this.gamePassword);
+      const config = buildXrayConfigWithCore(this.core, this.serviceProfileFor(server), server, this.state.settings, this.gamePassword);
       this.lastConfig = config;
       this.lastTuic = server.tuic;
       progress.reach("core", "core_start_failed");
@@ -1993,7 +1993,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
       this.holdRestartForGame("serviceRoutes", "Новые сервисные маршруты");
       return;
     }
-    const candidate = buildXrayConfig(candidateProfile, server, this.state.settings, this.gamePassword);
+    const candidate = buildXrayConfigWithCore(this.core, candidateProfile, server, this.state.settings, this.gamePassword);
     const compiled = compiledServiceRoutes(candidate);
     if (compiled && ["unsupported", "error", "suspended"].includes(compiled.status.state)) {
       this.serviceRouteStatusChanged(compiled.status); this.serviceRouteState.discard(profile.subscriptionId);
@@ -2724,7 +2724,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
             if (server) {
               this.patch({ selectedServerId: server.id });
               await this.persistSelectedServer(server.id);
-              this.lastConfig = buildXrayConfig(this.profile, server, this.state.settings, this.gamePassword);
+              this.lastConfig = buildXrayConfigWithCore(this.core, this.profile, server, this.state.settings, this.gamePassword);
               this.lastTuic = server.tuic;
             }
           }
@@ -3587,7 +3587,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
 
   private routeProbeSource(server: TunnelServer): Record<string, unknown> {
     const profile = { ...this.serviceProfileFor(server) }; delete profile.serviceRoutes;
-    return buildXrayConfig(profile, server, { ...this.state.settings, automaticServer: false }, this.gamePassword);
+    return buildXrayConfigWithCore(this.core, profile, server, { ...this.state.settings, automaticServer: false }, this.gamePassword);
   }
 
   private smartAutoLiveChanged(update: LiveAutoUpdate): void {

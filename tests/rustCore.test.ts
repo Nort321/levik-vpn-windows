@@ -3,6 +3,10 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { isDiagnosisVerdict, isIndexList, isTunnelProfileOutcome } from "../src/main/core/coreGuards";
 import { prepareProfileWithCore } from "../src/main/core/coreProfile";
+import { buildXrayConfigWithCore } from "../src/main/core/coreXray";
+import { compiledServiceRoutes } from "../src/main/vpn/serviceRoutes";
+import { buildXrayConfig } from "../src/main/vpn/xrayConfig";
+import type { AppSettings } from "../src/shared/contracts";
 import { levikCorePath, loadLevikCore } from "../src/main/core/levikCore";
 import { coreBridge, coreModeFor, jsonDifference, RustCore, type CoreBridge } from "../src/main/core/rustCore";
 import { diagnosisSummary, diagnosisVerdict, parseDiagnoseReport, type DiagnosisInput, type DiagnosisVerdict } from "../src/main/platform/diagnosis";
@@ -267,6 +271,81 @@ describe("prepareProfileWithCore", () => {
   });
 });
 
+const XRAY_SETTINGS: AppSettings = { routingMode: "bypassRu", automaticServer: true, autoReconnect: true, killSwitch: true,
+  useDoh: true, dnsServer: "1.1.1.1", theme: "system", launchAtLogin: false, autoConnectOnLaunch: false,
+  closeToTray: true, preventDnsLeaks: true, favoriteServerIds: [], favoriteNodes: null, antiDpiEnabled: false,
+  antiDpiPackets: "tlshello", antiDpiLength: "100-200", antiDpiInterval: "10-20", splitTunnelMode: "off",
+  splitTunnelProcesses: [], connectionTelemetry: false, telemetryNoticeShown: false, syncSettings: false,
+  sharePresence: true, sleepAtHome: true };
+
+const XRAY_POLICY = { version: 1, revision: 4, fingerprint: "a".repeat(64), rules: [
+  { id: "de", label: "Страна", source: "domain", domains: ["full:work.example"], route: { kind: "country", countryCode: "DE" }, fallback: { kind: "block" } },
+  { id: "nl", label: "Выход", source: "service", domains: ["domain:video.example"], route: { kind: "exit", exitId: "nl" }, fallback: { kind: "main" } },
+  { id: "ru", label: "Напрямую", source: "preset", domains: ["regexp:^.+\\.ru$"], route: { kind: "direct" }, fallback: { kind: "block" } },
+  { id: "all", label: "Как везде", source: "domain", domains: ["full:default.example"], route: { kind: "default" }, fallback: { kind: "block" } },
+], exits: [
+  { exitId: "de", name: "Германия", countryCode: "DE", role: "ordinary", state: "enabled", endpoints: [{ address: "example.com", port: 443, protocol: "vless" }] },
+  { exitId: "nl", name: "Нидерланды", countryCode: "NL", role: "ordinary", state: "enabled", endpoints: [{ address: "trojan.example.com", port: 8443, protocol: "trojan" }] },
+  { exitId: "lv", name: "Латвия", countryCode: "LV", role: "ordinary", state: "draining", endpoints: [{ address: "example.com", port: 443, protocol: "hy2" }] },
+] };
+
+const XRAY_PROFILES = [
+  prepareTunnelProfile(profileBytes(PROFILE_LINKS.join("\n")), "sub"),
+  prepareTunnelProfile(profileBytes(PROFILE_LINKS.join("\n"), { serviceRoutes: XRAY_POLICY }), "sub"),
+];
+
+const GAME_PROFILE = prepareTunnelProfile(profileBytes(PROFILE_LINKS.join("\n"), { game: { enabled: true,
+  endpoints: [{ address: "example.com", port: 443, protocol: "hysteria2", nodeId: "n1aaaaaaaaaaaaaaaaaaaa" }],
+  nodes: [{ nodeId: "n1aaaaaaaaaaaaaaaaaaaa", name: "NL", countryCode: "NL", state: "enabled" }] } }), "sub");
+
+const XRAY_VARIANTS: Partial<AppSettings>[] = [
+  {}, { routingMode: "global", automaticServer: false }, { routingMode: "blockedOnly", antiDpiEnabled: true },
+  { splitTunnelMode: "only", splitTunnelProcesses: ["Telegram.exe", "VALORANT.exe"] }, { splitTunnelMode: "bypass", splitTunnelProcesses: ["Telegram.exe", "VALORANT.exe"] },
+  { useDoh: false, dnsServer: "9.9.9.9" }, { useDoh: false, dnsServer: "dns.example.com" },
+];
+
+describe("buildXrayConfigWithCore", () => {
+  const profile = XRAY_PROFILES[1]!;
+  const server = profile.servers[0]!;
+
+  it("asks nothing in ts mode", () => {
+    const bridge = fakeBridge({ "xrayConfig.buildXrayConfig": () => ({}) });
+    const config = buildXrayConfigWithCore(new RustCore(bridge, () => {}, "ts"), profile, server, XRAY_SETTINGS, "probe-password");
+    expect(bridge.calls).toEqual([]);
+    expect(compiledServiceRoutes(config)?.status.state).toBe("pending");
+  });
+
+  it("gives both implementations the same fresh control password and compares their answers", () => {
+    const inputs: Record<string, unknown>[] = [];
+    const lines: string[] = [];
+    const core = new RustCore(fakeBridge({ "xrayConfig.buildXrayConfig": (input) => {
+      inputs.push(input as Record<string, unknown>);
+      return { config: {}, serviceRoutes: null };
+    } }), (line) => lines.push(line), "shadow");
+    const first = buildXrayConfigWithCore(core, profile, server, XRAY_SETTINGS, "probe-password");
+    const second = buildXrayConfigWithCore(core, profile, server, XRAY_SETTINGS, "probe-password");
+    expect(inputs[0]).toMatchObject({ platform: "windows", settings: XRAY_SETTINGS, gameProbePassword: "probe-password" });
+    expect(compiledServiceRoutes(first)?.auth?.password).toBe(inputs[0]?.servicePassword);
+    expect(compiledServiceRoutes(second)?.auth?.password).toBe(inputs[1]?.servicePassword);
+    expect(inputs[0]?.servicePassword).not.toBe(inputs[1]?.servicePassword);
+    expect(core.stats()).toMatchObject({ compared: 2, differed: 2 });
+    expect(lines[0]).toMatch(/^Rust-ядро: xrayConfig\.buildXrayConfig расходится с TypeScript в \$\./);
+  });
+
+  it("uses the Rust configuration and its routes in rust mode, and TypeScript for a malformed answer", () => {
+    const expected = buildXrayConfig(profile, server, XRAY_SETTINGS, "probe-password");
+    const routes = compiledServiceRoutes(expected);
+    const answers: unknown[] = [{ config: expected, serviceRoutes: routes }, { config: { inbounds: [] }, serviceRoutes: null }];
+    const core = new RustCore(fakeBridge({ "xrayConfig.buildXrayConfig": () => answers.shift() }), () => {}, "rust");
+    const decided = buildXrayConfigWithCore(core, profile, server, XRAY_SETTINGS, "probe-password");
+    expect(decided).toEqual(JSON.parse(JSON.stringify(expected)));
+    expect(compiledServiceRoutes(decided)).toEqual(JSON.parse(JSON.stringify(routes)));
+    const fallback = buildXrayConfigWithCore(core, profile, server, XRAY_SETTINGS, "probe-password");
+    expect(compiledServiceRoutes(fallback)?.status.state).toBe("pending");
+    expect(core.stats()).toMatchObject({ decided: 1, failed: 1 });
+  });
+});
+
 // The real module, when `npm run download:levik-core` (or a local build) put it into vendor.
 const status = loadLevikCore(levikCorePath({ packaged: false, resourcesPath: "", appPath: join(__dirname, "..") }));
 const bridge = coreBridge(status);
@@ -377,5 +456,23 @@ describe.runIf(bridge !== null)("the Rust core in shadow mode agrees with TypeSc
     expect(prepareTunnelProfile(PROFILE_VARIANTS[0]?.bytes ?? new Uint8Array(), "sub").servers).toHaveLength(PROFILE_LINKS.length);
     expect(PROFILE_VARIANTS.map(({ bytes, subscription }) => outcomeOf(() => prepareTunnelProfile(bytes, subscription ?? "sub")).split(":")[0]))
       .toEqual(["profile", "profile", "profile", "profile", "Error", "Error", "Error", "Error", "Error", "SyntaxError", "Error"]);
+  });
+
+  it("Xray configurations with service routes", () => {
+    expect(core.has("xrayConfig.buildXrayConfig")).toBe(true);
+    const before = core.stats().compared;
+    for (const profile of XRAY_PROFILES) {
+      for (const server of profile.servers) {
+        for (const patch of XRAY_VARIANTS) buildXrayConfigWithCore(core, profile, server, { ...XRAY_SETTINGS, ...patch }, "probe-password");
+      }
+    }
+    for (const server of GAME_PROFILE.servers) {
+      for (const patch of [{ gameEnabled: true }, { gameEnabled: true, gameIds: ["valorant", "cs2"], gameProcesses: ["custom.exe"] }]) {
+        buildXrayConfigWithCore(core, GAME_PROFILE, server, { ...XRAY_SETTINGS, ...patch }, "probe-password");
+      }
+    }
+    expect(lines).toEqual([]);
+    expect(core.stats()).toMatchObject({ differed: 0, failed: 0 });
+    expect(core.stats().compared - before).toBeGreaterThan(50);
   });
 });
