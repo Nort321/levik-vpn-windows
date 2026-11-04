@@ -263,3 +263,9 @@ export function isIssuedCommandList(value: unknown): value is IssuedCommand[] {
       || item.state === "unsupported" || item.state === "expired")
     && isStringOrNullUpTo(item.detail, 1000));
 }
+
+/** A configuration Xray can start with: inbounds and outbounds. */
+export function isBoundXrayConfig(value: unknown): value is Record<string, unknown> {
+  return isRecord(value) && Array.isArray(value.inbounds) && value.inbounds.length > 0
+    && Array.isArray(value.outbounds) && value.outbounds.length > 0;
+}

@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { isDiagnosisVerdict, isFavoritesAnswer, isIndexList, isListPositions, isTunnelProfileOutcome } from "../src/main/core/coreGuards";
 import { prepareProfileWithCore } from "../src/main/core/coreProfile";
-import { buildXrayConfigWithCore } from "../src/main/core/coreXray";
+import { bindXrayOutboundInterfaceWithCore, buildXrayConfigWithCore } from "../src/main/core/coreXray";
 import { countryServersWithCore } from "../src/main/core/coreServers";
 import { reconcileFavoritesWithCore, unionNodeListsWithCore } from "../src/main/core/coreFavorites";
 import { expiryNoticesWithCore, parseAccountNoticesWithCore } from "../src/main/core/coreNotices";
@@ -14,7 +14,7 @@ import { expiryNotices } from "../src/main/platform/notices";
 import type { SubscriptionSummary } from "../src/shared/contracts";
 import { nodeIdForHost } from "../src/main/platform/favoriteNodes";
 import { compiledServiceRoutes } from "../src/main/vpn/serviceRoutes";
-import { buildXrayConfig } from "../src/main/vpn/xrayConfig";
+import { bindXrayOutboundInterface, buildXrayConfig } from "../src/main/vpn/xrayConfig";
 import type { AppSettings } from "../src/shared/contracts";
 import { levikCorePath, loadLevikCore } from "../src/main/core/levikCore";
 import { coreBridge, coreModeFor, jsonDifference, RustCore, type CoreBridge } from "../src/main/core/rustCore";
@@ -535,6 +535,28 @@ describe("the remote through the core", () => {
   });
 });
 
+const BINDINGS = [["Ethernet", true, "Loopback Pseudo-Interface 1"], ["Wi-Fi", false, undefined], ["Ethernet", false, "Loopback Pseudo-Interface 1"]] as const;
+
+describe("bindXrayOutboundInterfaceWithCore", () => {
+  const config = buildXrayConfig(XRAY_PROFILES[0]!, XRAY_PROFILES[0]!.servers[0]!, XRAY_SETTINGS);
+
+  it("asks nothing in ts mode", () => {
+    const bridge = fakeBridge({ "xrayConfig.bindOutboundInterface": () => ({}) });
+    const core = new RustCore(bridge, () => {}, "ts");
+    expect(bindXrayOutboundInterfaceWithCore(core, config, "Ethernet", false)).toEqual(bindXrayOutboundInterface(config, "Ethernet", false));
+    expect(bridge.calls).toEqual([]);
+  });
+
+  it("uses a Rust configuration with inbounds and outbounds in rust mode only", () => {
+    const rust = { inbounds: [{ tag: "rust" }], outbounds: [{ tag: "direct" }] };
+    const answers: unknown[] = [rust, { inbounds: [], outbounds: [] }];
+    const core = new RustCore(fakeBridge({ "xrayConfig.bindOutboundInterface": () => answers.shift() }), () => {}, "rust");
+    expect(bindXrayOutboundInterfaceWithCore(core, config, "Ethernet", false)).toEqual(rust);
+    expect(bindXrayOutboundInterfaceWithCore(core, config, "Ethernet", false)).toEqual(bindXrayOutboundInterface(config, "Ethernet", false));
+    expect(core.stats()).toMatchObject({ decided: 1, failed: 1 });
+  });
+});
+
 // The real module, when `npm run download:levik-core` (or a local build) put it into vendor.
 const status = loadLevikCore(levikCorePath({ packaged: false, resourcesPath: "", appPath: join(__dirname, "..") }));
 const bridge = coreBridge(status);
@@ -719,5 +741,25 @@ describe.runIf(bridge !== null)("the Rust core in shadow mode agrees with TypeSc
     expect(lines).toEqual([]);
     expect(core.stats()).toMatchObject({ differed: 0, failed: 0 });
     expect(core.stats().compared - before).toBe(RAW_DELIVERED.length + RAW_DEVICES.length + RAW_ISSUED.length - 3);
+  });
+
+  it("configurations bound to the adapter", () => {
+    expect(core.has("xrayConfig.bindOutboundInterface")).toBe(true);
+    const before = core.stats().compared;
+    let count = 0;
+    for (const profile of XRAY_PROFILES) {
+      for (const server of profile.servers) {
+        for (const patch of XRAY_VARIANTS) {
+          const config = buildXrayConfig(profile, server, { ...XRAY_SETTINGS, ...patch });
+          for (const [name, ipv6, loopback] of BINDINGS) {
+            bindXrayOutboundInterfaceWithCore(core, config, name, ipv6, loopback);
+            count += 1;
+          }
+        }
+      }
+    }
+    expect(lines).toEqual([]);
+    expect(core.stats()).toMatchObject({ differed: 0, failed: 0 });
+    expect(core.stats().compared - before).toBe(count);
   });
 });

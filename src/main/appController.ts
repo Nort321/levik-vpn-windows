@@ -38,7 +38,7 @@ import { SecureStore } from "./security/secureStore";
 import { decryptTunnelProfile, ruleRoutingKey } from "./vpn/tunnelProfile";
 import type { PreparedTunnelProfile } from "./vpn/tunnelProfile";
 import { prepareProfileWithCore } from "./core/coreProfile";
-import { buildXrayConfigWithCore } from "./core/coreXray";
+import { bindXrayOutboundInterfaceWithCore, buildXrayConfigWithCore } from "./core/coreXray";
 import { GuestConnection } from "./vpn/guestConnection";
 import { guestInterface, parseGuestInvitation } from "./vpn/guestSession";
 import { CoreStartError, XrayManager } from "./vpn/xrayManager";
@@ -288,7 +288,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
   private enforcingGameExpiry = false;
   private readonly secureStore = new SecureStore();
   private readonly serviceRouteState = new ServiceRouteState(this.secureStore);
-  private readonly xray = new XrayManager();
+  private readonly xray = new XrayManager((config, interfaceName, ipv6, loopback) => bindXrayOutboundInterfaceWithCore(this.core, config, interfaceName, ipv6, loopback));
   private readonly dnsLeakProtection = new DnsLeakProtection(this.secureStore);
   private readonly killSwitch = new WindowsKillSwitch(() => this.xray.executablePath(), {
     tuicExecutablePath: () => this.xray.tuicExecutablePath(),

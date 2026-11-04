@@ -139,7 +139,8 @@ export class XrayManager extends EventEmitter<XrayEvents> {
     await this.multipath?.connect(candidates, password, options);
   }
 
-  constructor() {
+  /** Binds the configuration to the physical adapter; the controller passes the core's. */
+  constructor(private readonly bind: typeof bindXrayOutboundInterface = bindXrayOutboundInterface) {
     super();
     this.tuic.on("log", (line) => this.emit("log", line));
     this.gameTuic.on("log", (line) => this.emit("log", `Game ${line}`));
@@ -207,7 +208,7 @@ export class XrayManager extends EventEmitter<XrayEvents> {
     }
     this.tunnelTag = ordinaryTunnelTag(launchConfig);
     const loopback = Object.entries(networkInterfaces()).find(([, addresses]) => addresses?.some((address) => address.address === "127.0.0.1"))?.[0];
-    const configInput = Buffer.from(JSON.stringify(bindXrayOutboundInterface(launchConfig, interfaceName, outbound.ipv6, loopback)), "utf8");
+    const configInput = Buffer.from(JSON.stringify(this.bind(launchConfig, interfaceName, outbound.ipv6, loopback)), "utf8");
     this.emit("log", `Xray: outbound interface [${interfaceName}] (TCP/UDP, direct, IPv6 ${outbound.ipv6 ? "on" : "off"})`);
     try {
       await this.validate(configInput);
