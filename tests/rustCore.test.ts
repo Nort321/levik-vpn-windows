@@ -7,6 +7,8 @@ import { bindXrayOutboundInterfaceWithCore, buildXrayConfigWithCore } from "../s
 import { countryServersWithCore } from "../src/main/core/coreServers";
 import { reconcileFavoritesWithCore, unionNodeListsWithCore } from "../src/main/core/coreFavorites";
 import { expiryNoticesWithCore, parseAccountNoticesWithCore } from "../src/main/core/coreNotices";
+import { classifyCoreLogLineWithCore, networkTypeOfInterfaceWithCore } from "../src/main/core/coreTelemetry";
+import { classifyCoreLogLine, networkTypeOfInterface } from "../src/main/telemetry/codes";
 import { parseDeliveredCommandsWithCore, parseIssuedCommandsWithCore, parseRemoteDevicesWithCore } from "../src/main/core/coreRemote";
 import { parseIssuedCommands } from "../src/main/platform/remoteCommands";
 import { parseAccountNotices } from "../src/main/platform/accountNotices";
@@ -557,6 +559,31 @@ describe("bindXrayOutboundInterfaceWithCore", () => {
   });
 });
 
+const LOG_LINES = ["Xray started", "[Warning] app/dns: failed to lookup x", "[Error] connection refused", "panic: x", "Failed to start: y",
+  "[Error] status 401", "[eRRor] ſomething failed", "[Error] tls\u212A failed", "[Warning] lookup \u2028 failed", "WARN wintun failed"];
+const ADAPTERS = [null, "", "Wi-Fi", "Беспроводная сеть", "Ethernet 2", "Мобильная", "Wİ-Fİ", "vEthernet (WSL)"];
+
+describe("telemetry codes through the core", () => {
+  it("asks nothing in ts mode", () => {
+    const bridge = fakeBridge({ "telemetryCodes.classifyCoreLogLine": () => "other" });
+    expect(classifyCoreLogLineWithCore(new RustCore(bridge, () => {}, "ts"), LOG_LINES[0]!)).toBeNull();
+    expect(bridge.calls).toEqual([]);
+  });
+
+  it("uses known codes from Rust in rust mode only", () => {
+    const answers: unknown[] = ["dial_refused", "made_up", "wifi", "wireless"];
+    const core = new RustCore(fakeBridge({
+      "telemetryCodes.classifyCoreLogLine": () => answers.shift(),
+      "telemetryCodes.networkTypeOfInterface": () => answers.shift(),
+    }), () => {}, "rust");
+    expect(classifyCoreLogLineWithCore(core, "x")).toBe("dial_refused");
+    expect(classifyCoreLogLineWithCore(core, "x")).toBeNull();
+    expect(networkTypeOfInterfaceWithCore(core, "x")).toBe("wifi");
+    expect(networkTypeOfInterfaceWithCore(core, "x")).toBe("unknown");
+    expect(core.stats()).toMatchObject({ decided: 2, failed: 2 });
+  });
+});
+
 // The real module, when `npm run download:levik-core` (or a local build) put it into vendor.
 const status = loadLevikCore(levikCorePath({ packaged: false, resourcesPath: "", appPath: join(__dirname, "..") }));
 const bridge = coreBridge(status);
@@ -741,6 +768,16 @@ describe.runIf(bridge !== null)("the Rust core in shadow mode agrees with TypeSc
     expect(lines).toEqual([]);
     expect(core.stats()).toMatchObject({ differed: 0, failed: 0 });
     expect(core.stats().compared - before).toBe(RAW_DELIVERED.length + RAW_DEVICES.length + RAW_ISSUED.length - 3);
+  });
+
+  it("telemetry codes", () => {
+    expect(core.has("telemetryCodes.classifyCoreLogLine")).toBe(true);
+    const before = core.stats().compared;
+    for (const line of LOG_LINES) expect(classifyCoreLogLineWithCore(core, line)).toBe(classifyCoreLogLine(line));
+    for (const name of ADAPTERS) expect(networkTypeOfInterfaceWithCore(core, name)).toBe(networkTypeOfInterface(name));
+    expect(lines).toEqual([]);
+    expect(core.stats()).toMatchObject({ differed: 0, failed: 0 });
+    expect(core.stats().compared - before).toBe(LOG_LINES.length + ADAPTERS.length);
   });
 
   it("configurations bound to the adapter", () => {

@@ -269,3 +269,17 @@ export function isBoundXrayConfig(value: unknown): value is Record<string, unkno
   return isRecord(value) && Array.isArray(value.inbounds) && value.inbounds.length > 0
     && Array.isArray(value.outbounds) && value.outbounds.length > 0;
 }
+
+/** Codes classifyCoreLogLine gives, docs/connection-telemetry.md. */
+const CORE_LOG_CODES: ReadonlySet<string> = new Set([
+  "core_panic", "core_start", "other", "port_unavailable", "tun_failed", "reality_verify_failed", "quic_idle_timeout", "quic_handshake",
+  "tls_handshake", "auth_failed", "dial_refused", "conn_reset", "closed_pipe", "dns_empty", "dns_failed", "dial_timeout",
+]);
+
+export function isCoreLogCode(value: unknown): value is string | null {
+  return value === null || (isString(value) && CORE_LOG_CODES.has(value));
+}
+
+export function isNetworkType(value: unknown): value is "wifi" | "cellular" | "ethernet" | "unknown" {
+  return value === "wifi" || value === "cellular" || value === "ethernet" || value === "unknown";
+}

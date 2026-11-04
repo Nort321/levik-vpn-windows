@@ -72,7 +72,8 @@ import { DnsLeakProtection } from "./windows/dnsLeakProtection";
 import { KillSwitchError, WindowsKillSwitch } from "./windows/killSwitch";
 import { AppUpdater } from "./update/appUpdater";
 import { normalizeProcessSelection } from "../shared/processes";
-import { classifyCoreLogLine, networkTypeOfInterface, protocolOf } from "./telemetry/codes";
+import { protocolOf } from "./telemetry/codes";
+import { classifyCoreLogLineWithCore, networkTypeOfInterfaceWithCore } from "./core/coreTelemetry";
 import { ConnectionTelemetry } from "./telemetry/connectionTelemetry";
 import { DiskLog } from "./diagnostics/diskLog";
 import { createSupportNote, MAX_SUPPORT_NOTE_BYTES, supportNoteText } from "./diagnostics/supportNote";
@@ -2642,7 +2643,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     // Guest core diagnostics can contain local endpoints; never persist them or invitation credentials.
     if (this.guestConnection.active) return;
     this.addLog(line);
-    const code = classifyCoreLogLine(line);
+    const code = classifyCoreLogLineWithCore(this.core, line);
     if (!code) return;
     if (CORE_FAILURE_CODES.has(code)) this.coreFailure = code;
     this.telemetry.record((session) => session.coreLog(code));
@@ -3853,7 +3854,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
   }
 
   private recordNetwork(): void {
-    const type = networkTypeOfInterface(this.xray.outboundInterfaceName ?? null);
+    const type = networkTypeOfInterfaceWithCore(this.core, this.xray.outboundInterfaceName ?? null);
     this.telemetry.record((session) => session.setNetwork(type));
   }
 
