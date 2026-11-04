@@ -126,8 +126,8 @@ jobs:
         shell: pwsh
         run: |
           $env:ELECTRON_RUN_AS_NODE = "1"
-          & "./release/win-unpacked/Levik VPN.exe" "./scripts/smoke-bundled-core.cjs" "./release/win-unpacked/resources/levik-core/levik_core.node" "0.6.0"
-          if ($LASTEXITCODE -ne 0) { throw "Bundled Rust core did not load in Electron" }
+          $smoke = Start-Process -FilePath "./release/win-unpacked/Levik VPN.exe" -ArgumentList '"./scripts/smoke-bundled-core.cjs" "./release/win-unpacked/resources/levik-core/levik_core.node" "0.6.0"' -NoNewWindow -Wait -PassThru
+          if ($smoke.ExitCode -ne 0) { throw "Bundled Rust core did not load in Electron (exit $($smoke.ExitCode))" }
 
       - name: Prepare release files
         shell: pwsh
