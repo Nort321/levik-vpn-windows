@@ -22,4 +22,16 @@ const spki = pair.publicKey.export({ type: "spki", format: "der" });
 assert.equal(identity.deviceId(), createHash("sha256").update(spki).digest("hex"));
 const payload = Buffer.from("Levik bundled module check: TEST ONLY");
 assert.equal(identity.sign(payload), sign("RSA-SHA256", payload, pair.privateKey).toString("base64url"));
-console.log(`Bundled Rust core ${info.version} verified in Electron ${process.versions.electron} (${info.os}/${info.arch})`);
+async function checkAsyncHandles() {
+  const events = identity.openEventStream(JSON.stringify({ origin: "https://unused.invalid", method: "GET",
+    path: "/api/mobile/v1/events", accessToken: "TEST token", body: "", platform: info.os, version: "1.0.0", road: false, game: false }));
+  events.close(); events.close();
+  assert.deepEqual(JSON.parse(await events.read()), { ok: true, value: { events: [], done: true } });
+  const publicRequest = core.createPublicClient().start(JSON.stringify({ url: "https://unused.invalid/api/health", method: "GET" }));
+  publicRequest.close();
+  assert.deepEqual(JSON.parse(await publicRequest.read()), { ok: false });
+  console.log(`Bundled Rust core ${info.version} verified in Electron ${process.versions.electron} (${info.os}/${info.arch}); async handles verified`);
+}
+const deadline = setTimeout(() => { console.error("Bundled Rust async check timed out"); process.exit(1); }, 10_000);
+checkAsyncHandles().catch(() => { console.error("Bundled Rust async check failed"); process.exitCode = 1; })
+  .finally(() => clearTimeout(deadline));
