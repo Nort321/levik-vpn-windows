@@ -61,6 +61,17 @@ export function ruleRoutingKey(profile: Pick<PreparedTunnelProfile, "directDomai
   return profile ? JSON.stringify([profile.directDomains, profile.proxyDomains, ...(profile.serviceRoutes ? [profile.serviceRoutes.fingerprint] : [])]) : null;
 }
 
+/**
+ * prepareTunnelProfile as an answer the Rust core gives too: the profile, or
+ * the refusal the user sees. "" stands for an error JavaScript raises itself
+ * (malformed JSON or link), whose wording only the engine knows.
+ */
+export type TunnelProfileOutcome = { profile: PreparedTunnelProfile } | { refused: string };
+
+export function refusalOf(error: unknown): string {
+  return error instanceof Error && Object.getPrototypeOf(error) === Error.prototype ? error.message : "";
+}
+
 export function prepareTunnelProfile(plaintext: Uint8Array, expectedSubscriptionId: string): PreparedTunnelProfile {
   if (plaintext.byteLength < 2 || plaintext.byteLength > 4 * 1024 * 1024) throw new Error("Некорректный размер профиля");
   const raw = JSON.parse(Buffer.from(plaintext).toString("utf8")) as RawTunnelProfile;

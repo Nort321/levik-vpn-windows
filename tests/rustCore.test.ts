@@ -1,12 +1,15 @@
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { isDiagnosisVerdict, isIndexList } from "../src/main/core/coreGuards";
+import { isDiagnosisVerdict, isIndexList, isTunnelProfileOutcome } from "../src/main/core/coreGuards";
+import { prepareProfileWithCore } from "../src/main/core/coreProfile";
 import { levikCorePath, loadLevikCore } from "../src/main/core/levikCore";
 import { coreBridge, coreModeFor, jsonDifference, RustCore, type CoreBridge } from "../src/main/core/rustCore";
 import { diagnosisSummary, diagnosisVerdict, parseDiagnoseReport, type DiagnosisInput, type DiagnosisVerdict } from "../src/main/platform/diagnosis";
 import { avoidMaintenance, maintenanceFor, maintenanceMove, parseMaintenance } from "../src/main/platform/maintenance";
 import { flagEnabled, parseAdvice, parseRemoteConfig, visibleAnnouncements, type RemoteConfig } from "../src/main/platform/remoteConfig";
 import * as smart from "../src/main/vpn/smartAuto";
+import { prepareTunnelProfile } from "../src/main/vpn/tunnelProfile";
 
 function fakeBridge(answers: Record<string, (input: unknown) => unknown>): CoreBridge & { calls: string[] } {
   const calls: string[] = [];
@@ -172,6 +175,98 @@ describe("isIndexList", () => {
   });
 });
 
+/** A test-only CA (its key was discarded), as the profile service pins one in TUIC links. */
+const TEST_CA = readFileSync(join(__dirname, "fixtures", "tuic-test-ca.txt"), "utf8").trim();
+
+const PROFILE_LINKS = [
+  "vless://11111111-1111-4111-8111-111111111111@example.com:443?encryption=none&flow=xtls-rprx-vision&security=reality&sni=www.microsoft.com&fp=chrome&pbk=public-key&sid=0123&type=tcp#%F0%9F%87%A9%F0%9F%87%AA%20Frankfurt",
+  "trojan://secret@trojan.example.com:8443?security=tls&sni=cdn.example.com&type=ws&path=%2Fws#NL%20Amsterdam",
+  "hysteria2://secret@example.com:443?sni=cdn.example.com&obfs=salamander&obfs-password=obfs-pass-1234#%F0%9F%87%B3%F0%9F%87%B1%20Amsterdam",
+  `tuic://11111111-1111-4111-8111-111111111111:tuic-password-0123456789@203.0.113.10:443?sni=tuic.example.com&alpn=h3&congestion_control=bbr&levik_ca=${TEST_CA}#FI`,
+  "vless://11111111-1111-4111-8111-111111111111@[2001:db8::1]:2053?security=tls&type=xhttp&path=%2Fapi&mode=packet-up#IPv6",
+];
+
+/** A profile as the server sends it, encoded; `patch` changes or removes fields. */
+function profileBytes(content: string, patch: Record<string, unknown> = {}): Uint8Array {
+  return Buffer.from(JSON.stringify({ version: 1, profileId: "p-1", subscriptionId: "sub", issuedAt: "2026-01-01T00:00:00Z",
+    subscriptionExpiresAt: "2027-01-01T00:00:00Z", source: { mediaType: "text/plain", content },
+    routing: { directCidrs: ["10.0.0.0/8"], directDomains: ["domain:example.ru"], proxyDomains: [] }, ...patch }));
+}
+
+const PROFILE_VARIANTS: { label: string; bytes: Uint8Array; subscription?: string }[] = [
+  { label: "all links", bytes: profileBytes(PROFILE_LINKS.join("\n")) },
+  { label: "base64", bytes: profileBytes(Buffer.from(PROFILE_LINKS.join("\n")).toString("base64")) },
+  { label: "xray json", bytes: profileBytes(JSON.stringify({ outbounds: [{ protocol: "vless", tag: "x",
+    settings: { vnext: [{ address: "json.example.com", port: 443, users: [{ id: "11111111-1111-4111-8111-111111111111", encryption: "none" }] }] },
+    streamSettings: { network: "tcp", security: "tls" } }] })) },
+  { label: "game", bytes: profileBytes(PROFILE_LINKS.join("\n"), { game: { enabled: true, only: false,
+    endpoints: [{ address: "example.com", port: 443, protocol: "hysteria2", nodeId: "n1aaaaaaaaaaaaaaaaaaaa" }],
+    nodes: [{ nodeId: "n1aaaaaaaaaaaaaaaaaaaa", name: "NL", countryCode: "NL", state: "enabled" }] } }) },
+  { label: "another subscription", bytes: profileBytes(PROFILE_LINKS[0] ?? ""), subscription: "other" },
+  { label: "stub", bytes: profileBytes("vless://00000000-0000-0000-0000-000000000000@0.0.0.0:1?encryption=none&type=tcp#%D0%9F%D0%BE%D0%B4%D0%BF%D0%B8%D1%81%D0%BA%D0%B0%20%D0%B7%D0%B0%D0%BA%D0%BE%D0%BD%D1%87%D0%B8%D0%BB%D0%B0%D1%81%D1%8C") },
+  { label: "no servers", bytes: profileBytes("") },
+  { label: "bad routing", bytes: profileBytes(PROFILE_LINKS[0] ?? "", { routing: { directCidrs: ["not a cidr"] } }) },
+  { label: "bad policy", bytes: profileBytes(PROFILE_LINKS[0] ?? "", { serviceRoutes: { version: 2 } }) },
+  { label: "broken json", bytes: Buffer.from("{\"version\": 1,") },
+  { label: "too small", bytes: Buffer.from("{") },
+];
+
+function outcomeOf(run: () => unknown): string {
+  try {
+    run();
+    return "profile";
+  } catch (error) {
+    return `${error instanceof Error ? error.constructor.name : "?"}: ${error instanceof Error ? error.message : String(error)}`;
+  }
+}
+
+describe("prepareProfileWithCore", () => {
+  const bytes = profileBytes(PROFILE_LINKS[0] ?? "");
+  const expected = prepareTunnelProfile(bytes, "sub");
+
+  it("asks nothing in ts mode or without the function", () => {
+    const bridge = fakeBridge({});
+    expect(prepareProfileWithCore(new RustCore(bridge, () => {}, "shadow"), bytes, "sub")).toEqual(expected);
+    expect(prepareProfileWithCore(new RustCore(fakeBridge({ "tunnelProfile.prepareTunnelProfile": () => ({ refused: "x" }) }), () => {}, "ts"), bytes, "sub"))
+      .toEqual(expected);
+    expect(bridge.calls).toEqual([]);
+  });
+
+  it("compares refusals in shadow mode and keeps the TypeScript error object", () => {
+    const lines: string[] = [];
+    const inputs: unknown[] = [];
+    const core = new RustCore(fakeBridge({ "tunnelProfile.prepareTunnelProfile": (input) => {
+      inputs.push(input);
+      return { refused: "Профиль не соответствует подписке" };
+    } }), (line) => lines.push(line), "shadow");
+    expect(() => prepareProfileWithCore(core, bytes, "other")).toThrow("Профиль не соответствует подписке");
+    expect(inputs[0]).toMatchObject({ bytes: bytes.byteLength, subscriptionId: "other", platform: "windows" });
+    const broken = Buffer.from("{\"version\":");
+    expect(() => prepareProfileWithCore(core, broken, "sub")).toThrow(SyntaxError);
+    expect(core.stats()).toMatchObject({ compared: 2, differed: 1 });
+    expect(lines).toEqual(["Rust-ядро: tunnelProfile.prepareTunnelProfile расходится с TypeScript в $.refused"]);
+  });
+
+  it("lets Rust decide in rust mode and asks TypeScript for the wording of engine errors", () => {
+    const answers: unknown[] = [{ profile: expected }, { refused: "Профиль не соответствует подписке" }, { refused: "" }, { profile: { servers: [] } }];
+    const core = new RustCore(fakeBridge({ "tunnelProfile.prepareTunnelProfile": () => answers.shift() }), () => {}, "rust");
+    expect(prepareProfileWithCore(core, bytes, "sub")).toEqual(expected);
+    expect(() => prepareProfileWithCore(core, bytes, "sub")).toThrow("Профиль не соответствует подписке");
+    expect(() => prepareProfileWithCore(core, Buffer.from("{\"version\":"), "sub")).toThrow(SyntaxError);
+    expect(prepareProfileWithCore(core, bytes, "sub")).toEqual(expected);
+    expect(core.stats()).toMatchObject({ decided: 3, failed: 1 });
+  });
+
+  it("accepts only the two answer shapes", () => {
+    expect(isTunnelProfileOutcome({ refused: "" })).toBe(true);
+    expect(isTunnelProfileOutcome({ profile: expected })).toBe(true);
+    expect(isTunnelProfileOutcome({ refused: "", profile: expected })).toBe(false);
+    expect(isTunnelProfileOutcome({ refused: 1 })).toBe(false);
+    expect(isTunnelProfileOutcome({ profile: { ...expected, servers: [] } })).toBe(false);
+    expect(isTunnelProfileOutcome({ profile: { ...expected, game: undefined } })).toBe(false);
+  });
+});
+
 // The real module, when `npm run download:levik-core` (or a local build) put it into vendor.
 const status = loadLevikCore(levikCorePath({ packaged: false, resourcesPath: "", appPath: join(__dirname, "..") }));
 const bridge = coreBridge(status);
@@ -269,5 +364,18 @@ describe.runIf(bridge !== null)("the Rust core in shadow mode agrees with TypeSc
     core.run("smartAuto.relayHosts", servers, () => [...smart.relayHosts(servers)]);
     expect(lines).toEqual([]);
     expect(core.stats()).toMatchObject({ differed: 0, failed: 0 });
+  });
+
+  it("tunnel profiles, refusals included", () => {
+    expect(core.has("tunnelProfile.prepareTunnelProfile")).toBe(true);
+    for (const { label, bytes, subscription } of PROFILE_VARIANTS) {
+      const ts = outcomeOf(() => prepareTunnelProfile(bytes, subscription ?? "sub"));
+      expect(outcomeOf(() => prepareProfileWithCore(core, bytes, subscription ?? "sub")), label).toBe(ts);
+    }
+    expect(lines).toEqual([]);
+    expect(core.stats()).toMatchObject({ differed: 0, failed: 0 });
+    expect(prepareTunnelProfile(PROFILE_VARIANTS[0]?.bytes ?? new Uint8Array(), "sub").servers).toHaveLength(PROFILE_LINKS.length);
+    expect(PROFILE_VARIANTS.map(({ bytes, subscription }) => outcomeOf(() => prepareTunnelProfile(bytes, subscription ?? "sub")).split(":")[0]))
+      .toEqual(["profile", "profile", "profile", "profile", "Error", "Error", "Error", "Error", "Error", "SyntaxError", "Error"]);
   });
 });

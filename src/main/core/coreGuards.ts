@@ -3,6 +3,7 @@ import type { DiagnoseReport, DiagnosisVerdict, Verdict } from "../platform/diag
 import type { MaintenanceMove, MaintenanceWindow } from "../platform/maintenance";
 import type { ProtocolAdvice } from "../platform/remoteConfig";
 import type { ProtocolHistory, RankedServer } from "../vpn/smartAuto";
+import type { TunnelProfileOutcome } from "../vpn/tunnelProfile";
 
 /**
  * Shape checks for answers from the Rust core. In "rust" mode an answer is
@@ -141,4 +142,24 @@ export function isProtocolHistory(value: unknown): value is ProtocolHistory {
     && Object.values(network.protocols).every((record) => isRecord(record) && isStringList(record.failedNodes)
       && isTime(record.lastFailureAt) && isTime(record.lastSuccessAt)))
     && Object.values(value.winners).every(isString);
+}
+
+function isTunnelServer(value: unknown): boolean {
+  return isRecord(value) && isString(value.id) && isString(value.tag) && isString(value.name) && isString(value.countryCode)
+    && isRecord(value.outbound) && (value.tuic === undefined || isRecord(value.tuic)) && isOptionalString(value.nodeId);
+}
+
+export function isTunnelProfileOutcome(value: unknown): value is TunnelProfileOutcome {
+  if (!isRecord(value)) return false;
+  if ("refused" in value) return isString(value.refused) && Object.keys(value).length === 1;
+  const profile = value.profile;
+  if (!isRecord(profile) || Object.keys(value).length !== 1) return false;
+  const game = profile.game;
+  return isString(profile.profileId) && isString(profile.subscriptionId) && isStringOrNull(profile.subscriptionExpiresAt)
+    && Array.isArray(profile.servers) && profile.servers.length > 0 && profile.servers.every(isTunnelServer)
+    && isStringList(profile.directCidrs) && isStringList(profile.directDomains) && isStringList(profile.proxyDomains)
+    && (profile.gameOnly === undefined || profile.gameOnly === true)
+    && (profile.serviceRoutes === undefined || isRecord(profile.serviceRoutes))
+    && isRecord(game) && typeof game.enabled === "boolean" && Array.isArray(game.servers) && game.servers.every(isTunnelServer)
+    && (game.nodes === undefined || Array.isArray(game.nodes)) && isOptionalString(game.relayToken);
 }

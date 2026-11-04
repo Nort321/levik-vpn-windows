@@ -35,8 +35,9 @@ import { DeviceIdentity } from "./security/deviceIdentity";
 import type { SerializedIdentity } from "./security/deviceIdentity";
 import { RequestSigner } from "./security/requestSigner";
 import { SecureStore } from "./security/secureStore";
-import { decryptTunnelProfile, prepareTunnelProfile, ruleRoutingKey } from "./vpn/tunnelProfile";
+import { decryptTunnelProfile, ruleRoutingKey } from "./vpn/tunnelProfile";
 import type { PreparedTunnelProfile } from "./vpn/tunnelProfile";
+import { prepareProfileWithCore } from "./core/coreProfile";
 import { buildXrayConfig } from "./vpn/xrayConfig";
 import { GuestConnection } from "./vpn/guestConnection";
 import { guestInterface, parseGuestInvitation } from "./vpn/guestSession";
@@ -1518,7 +1519,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     if (this.guestConnection.active) return;
     const plaintext = decryptTunnelProfile(this.identity, response.profile);
     try {
-      const profile = prepareTunnelProfile(plaintext, subscriptionId);
+      const profile = prepareProfileWithCore(this.core, plaintext, subscriptionId);
       if (this.profile?.subscriptionId === profile.subscriptionId && this.profile.serviceRoutes) profile.serviceRoutes = this.profile.serviceRoutes;
       await this.applyTunnelProfile(profile);
     } finally {
@@ -3270,6 +3271,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
   private applyCoreMode(): void {
     this.core.setMode(coreModeFor(this.remoteStored?.config ?? null, this.identity.deviceId()));
   }
+
 
   /** The salted key of the network this computer is on, see ProtocolHistoryStore.networkKey. */
   private currentNetworkKey(): string | null {
