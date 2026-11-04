@@ -6,6 +6,7 @@ vendor/singbox/windows-x64/
 vendor/xray/*.zip
 vendor/xray/*.dgst
 vendor/kill-switch/windows-x64/
+vendor/levik-core/
 *.log
 .DS_Store
 

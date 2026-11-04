@@ -59,6 +59,9 @@ jobs:
 
       - run: npm run download:xray
       - run: npm run download:singbox
+      - run: npm run download:levik-core
+        env:
+          LEVIK_CORE_TOKEN: ${{ secrets.LEVIK_CORE_TOKEN }}
       - run: npm run lint
       - run: npm run build
       - run: npm test
