@@ -52,7 +52,16 @@ export type SessionOutcome =
   | { kind: "failed"; by: "self" | "peer"; reason: FailReason };
 
 /** The protocol functions a session reads the peer's handshake and messages with. */
+export interface DropAgreement {
+  publicKey(): Buffer;
+  signTranscript(role: "sender" | "receiver", th: Buffer): Buffer;
+  sessionKeys(peer: Buffer, th: Buffer): SessionKeys;
+  /** Final, idempotent and non-throwing. */
+  close(): void;
+}
+
 export interface DropProtocol {
+  createAgreement?(identity: Identity): DropAgreement | null;
   createRecords?(role: "sender" | "receiver", keys: SessionKeys): DropRecords | null;
   decodeSenderHello: typeof decodeSenderHello;
   decodeReceiverHello: typeof decodeReceiverHello;
@@ -170,11 +179,23 @@ export class Inbox {
   }
 }
 
+/** Construct Node ECDH only when no native owner was selected before the hello. */
+function nodeAgreement(identity: Identity): DropAgreement {
+  const key = ephemeralKey();
+  return {
+    publicKey: () => key.getPublicKey(),
+    signTranscript: (role, th) => signTranscript(role, identity.privateKey, th),
+    sessionKeys: (peer, th) => sessionKeys(key, peer, th),
+    close: () => {},
+  };
+}
+
 class Ended extends Error {}
 
 export class Session {
   readonly inbox = new Inbox();
   private keys: SessionKeys | null = null;
+  private agreement: DropAgreement | null = null;
   private sealer: Pick<RecordSealer, "seal"> | null = null;
   private records: DropRecords | null = null;
   private opener: Pick<RecordOpener, "open"> | null = null;
@@ -259,11 +280,17 @@ export class Session {
     this.lanListener?.close();
     // Records already written still leave before the direct connection closes.
     this.lan?.closeGracefully();
+    this.clearAgreement();
     this.clearRecords();
     this.ackWaiter?.();
     if (this.work.role === "receiver") void this.work.targets?.closeWriting();
     this.settle?.(outcome);
     this.settle = null;
+  }
+
+  private clearAgreement(): void {
+    const agreement = this.agreement; this.agreement = null;
+    agreement?.close();
   }
 
   private clearRecords(): void {
@@ -290,30 +317,38 @@ export class Session {
   private async handshake(): Promise<{ keys: SessionKeys; peerKey: Buffer }> {
     const own = this.work.identity;
     const protocol = this.protocol;
-    const ecdh = ephemeralKey();
-    const ephemeral = ecdh.getPublicKey();
-    if (this.work.role === "sender") {
-      const nonce = randomBytes(32);
-      const hello: SenderHello = { transfer: this.transfer, identity: own.spki, ephemeral, commit: protocol.commitment(own.spki, ephemeral, nonce) };
-      await this.relay.send(encodeSenderHello(hello));
-      const reply = protocol.decodeReceiverHello(await this.inbox.next(STEP_TIMEOUT_MS));
-      if (!sameBytes(reply.transfer, this.transfer)) throw new ProtocolError("another transfer");
-      const th = protocol.transcript(hello, reply, nonce);
-      await this.relay.send(encodeSenderProof(nonce, signTranscript("sender", own.privateKey, th)));
-      const signature = protocol.decodeReceiverProof(await this.inbox.next(STEP_TIMEOUT_MS));
-      if (!protocol.verifyTranscript("receiver", reply.identity, th, signature)) throw new ProtocolError("receiver signature");
-      return { keys: sessionKeys(ecdh, reply.ephemeral, th), peerKey: reply.identity };
+    if (this.outcome) throw new Ended();
+    const offered = protocol.createAgreement?.(own) ?? null;
+    if (this.outcome) { offered?.close(); throw new Ended(); }
+    const agreement = offered ?? nodeAgreement(own);
+    this.agreement = agreement;
+    try {
+      const ephemeral = agreement.publicKey();
+      if (this.work.role === "sender") {
+        const nonce = randomBytes(32);
+        const hello: SenderHello = { transfer: this.transfer, identity: own.spki, ephemeral, commit: protocol.commitment(own.spki, ephemeral, nonce) };
+        await this.relay.send(encodeSenderHello(hello));
+        const reply = protocol.decodeReceiverHello(await this.inbox.next(STEP_TIMEOUT_MS));
+        if (!sameBytes(reply.transfer, this.transfer)) throw new ProtocolError("another transfer");
+        const th = protocol.transcript(hello, reply, nonce);
+        await this.relay.send(encodeSenderProof(nonce, agreement.signTranscript("sender", th)));
+        const signature = protocol.decodeReceiverProof(await this.inbox.next(STEP_TIMEOUT_MS));
+        if (!protocol.verifyTranscript("receiver", reply.identity, th, signature)) throw new ProtocolError("receiver signature");
+        return { keys: agreement.sessionKeys(reply.ephemeral, th), peerKey: reply.identity };
+      }
+      const hello = protocol.decodeSenderHello(await this.inbox.next(STEP_TIMEOUT_MS));
+      if (!sameBytes(hello.transfer, this.transfer)) throw new ProtocolError("another transfer");
+      const reply: ReceiverHello = { transfer: this.transfer, identity: own.spki, ephemeral, nonce: randomBytes(32) };
+      await this.relay.send(encodeReceiverHello(reply));
+      const proof = protocol.decodeSenderProof(await this.inbox.next(STEP_TIMEOUT_MS));
+      if (!sameBytes(protocol.commitment(hello.identity, hello.ephemeral, proof.nonce), hello.commit)) throw new ProtocolError("commitment");
+      const th = protocol.transcript(hello, reply, proof.nonce);
+      if (!protocol.verifyTranscript("sender", hello.identity, th, proof.signature)) throw new ProtocolError("sender signature");
+      await this.relay.send(encodeReceiverProof(agreement.signTranscript("receiver", th)));
+      return { keys: agreement.sessionKeys(hello.ephemeral, th), peerKey: hello.identity };
+    } finally {
+      if (this.agreement === agreement) this.clearAgreement();
     }
-    const hello = protocol.decodeSenderHello(await this.inbox.next(STEP_TIMEOUT_MS));
-    if (!sameBytes(hello.transfer, this.transfer)) throw new ProtocolError("another transfer");
-    const reply: ReceiverHello = { transfer: this.transfer, identity: own.spki, ephemeral, nonce: randomBytes(32) };
-    await this.relay.send(encodeReceiverHello(reply));
-    const proof = protocol.decodeSenderProof(await this.inbox.next(STEP_TIMEOUT_MS));
-    if (!sameBytes(protocol.commitment(hello.identity, hello.ephemeral, proof.nonce), hello.commit)) throw new ProtocolError("commitment");
-    const th = protocol.transcript(hello, reply, proof.nonce);
-    if (!protocol.verifyTranscript("sender", hello.identity, th, proof.signature)) throw new ProtocolError("sender signature");
-    await this.relay.send(encodeReceiverProof(signTranscript("receiver", own.privateKey, th)));
-    return { keys: sessionKeys(ecdh, hello.ephemeral, th), peerKey: hello.identity };
   }
 
   private async main(): Promise<void> {

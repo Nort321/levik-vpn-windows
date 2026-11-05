@@ -2,7 +2,7 @@
 // Run with ELECTRON_RUN_AS_NODE=1 on the packaged executable. Uses a fresh TEST
 // identity in memory and uses only disposable TEST queue/cache directories; never initializes the app, OS key store, network or VPN.
 const assert = require("node:assert/strict");
-const { createHash, generateKeyPairSync, sign } = require("node:crypto");
+const { createHash, createECDH, generateKeyPairSync, hkdfSync, sign, verify } = require("node:crypto");
 const { resolve, join } = require("node:path");
 const { mkdtemp, readFile, readdir, rm, writeFile } = require("node:fs/promises");
 const { tmpdir } = require("node:os");
@@ -43,6 +43,24 @@ async function checkAsyncHandles() {
   const rpc = core.startXrayRequest('{"request":{"kind":"statistics"}}');
   rpc.close(); rpc.close();
   assert.deepEqual(JSON.parse(await rpc.read()), { ok: false });
+  const dropIdentity = generateKeyPairSync("ec", { namedCurve: "prime256v1" });
+  const privateDer = dropIdentity.privateKey.export({ type: "pkcs8", format: "der" });
+  let agreement;
+  try { agreement = core.openDropAgreement(privateDer, dropIdentity.publicKey.export({ type: "spki", format: "der" })); }
+  finally { privateDer.fill(0); }
+  try {
+    const th = Buffer.alloc(32, 0x5a), peer = createECDH("prime256v1"); peer.generateKeys();
+    const point = agreement.publicKey();
+    const proof = agreement.signTranscript("sender", th);
+    assert.ok(verify("sha256", Buffer.concat([Buffer.from("levik-drop/v1 sender\0"), th]), dropIdentity.publicKey, proof));
+    const shared = peer.computeSecret(point);
+    const expected = Buffer.from(hkdfSync("sha256", shared, th, Buffer.from("levik-drop/v1 keys"), 96));
+    shared.fill(0);
+    const keys = agreement.derive(peer.getPublicKey(), th);
+    try { assert.deepEqual(keys.sr, expected.subarray(0,32)); assert.deepEqual(keys.rs, expected.subarray(32,64)); assert.deepEqual(keys.lan, expected.subarray(64,96)); }
+    finally { expected.fill(0); keys.sr.fill(0); keys.rs.fill(0); keys.lan.fill(0); }
+    assert.throws(() => agreement.derive(peer.getPublicKey(), th), /no keys/);
+  } finally { agreement.close(); }
   const send = Buffer.alloc(32, 0x41), receive = Buffer.alloc(32, 0x42);
   const drop = core.openDropRecords(send, receive), peer = core.openDropRecords(receive, send);
   try {

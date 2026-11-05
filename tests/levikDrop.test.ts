@@ -425,24 +425,46 @@ const nativeModulePath = process.env.LEVIK_TEST_CORE;
 function nativeProtocol() {
   if (!nativeModulePath) throw new Error("LEVIK_TEST_CORE missing");
   const loaded = loadLevikCore(nativeModulePath);
-  if (loaded.state !== "loaded" || !loaded.module.openDropRecords) throw new Error("Native Drop records missing");
+  if (loaded.state !== "loaded" || !loaded.module.openDropRecords || !loaded.module.openDropAgreement) throw new Error("Native Drop records missing");
   const core = new RustCore(null, () => {}, "rust");
-  const base = dropProtocolWithCore(() => core, () => loaded.module.openDropRecords);
+  const base = dropProtocolWithCore(() => core, () => loaded.module.openDropRecords, () => {}, () => loaded.module.openDropAgreement);
   const retained: protocol.SessionKeys[] = [];
-  let closed = 0;
-  const native: DropProtocol = { ...base, createRecords: (role, keys) => {
+  let closed = 0; let agreements = 0; let agreementsClosed = 0;
+  const native: DropProtocol = { ...base, createAgreement: (identity) => {
+    const agreement = base.createAgreement?.(identity);
+    if (!agreement) throw new Error("TEST native agreement was not selected");
+    agreements++;
+    return { publicKey: agreement.publicKey, signTranscript: agreement.signTranscript, sessionKeys: agreement.sessionKeys,
+      close: () => { agreementsClosed++; agreement.close(); } };
+  }, createRecords: (role, keys) => {
     retained.push(keys);
     const records = base.createRecords?.(role, keys);
     if (!records) throw new Error("TEST native codec was not selected");
     return { seal: records.seal, open: records.open, close: () => { closed++; records.close(); } };
   } };
-  return { protocol: native, created: () => retained.length, verifyRetired: (count: number) => {
+  return { protocol: native, created: () => retained.length, agreementsCreated: () => agreements, verifyRetired: (count: number) => {
     expect(closed).toBe(count); expect(retained).toHaveLength(count);
+    expect(agreements).toBeGreaterThanOrEqual(count); expect(agreementsClosed).toBe(agreements);
     for (const keys of retained) for (const bytes of [keys.sr, keys.rs, keys.lan]) expect(bytes.every((byte) => byte === 0)).toBe(true);
   } };
 }
 
 describe.skipIf(!nativeModulePath)("real Rust/Node Drop transfer", () => {
+  it("retires private agreement state immediately when abort interrupts the handshake", async () => {
+    const context = await setup([["unused.bin", Buffer.from("TEST")]]); const native = nativeProtocol();
+    const [socket, peer] = await socketPair();
+    const sender = new Session(socket, { role: "sender", transferId: TRANSFER, identity: context.senderIdentity,
+      peerDeviceId: "TEST peer", ownPlatform: "macos", peerPlatform: "windows", allowLan: false, trust: () => "new",
+      events: { keyed: () => { throw new Error("Unexpected keyed event"); }, path: () => {}, progress: () => {} },
+      files: context.sources, confirm: async () => true, protocol: native.protocol });
+    try {
+      const result = sender.run(); const hello = await peer.next(2000);
+      expect(hello[0]).toBe(0x01); expect(native.agreementsCreated()).toBe(1);
+      sender.abort("TEST interrupted handshake"); native.verifyRetired(0);
+      expect((await result).kind).toBe("lost"); native.verifyRetired(0);
+    } finally { sender.abort("TEST cleanup"); socket.close(); peer.close(); }
+  });
+
   it.each(["sender", "receiver", "both"] as const)("delivers unchanged files with native %s and retires session secrets", async (side) => {
     const content = randomBytes(1024 * 1024 + 123);
     const context = await setup([["native.bin", content], ["empty.txt", Buffer.alloc(0)]]);
