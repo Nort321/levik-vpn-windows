@@ -266,6 +266,21 @@ export interface LoginChallenge {
   approvalRequested: boolean;
 }
 
+/** A QR this signed-in computer shows; a new device scans it or types the code. */
+export interface DevicePairing {
+  id: string;
+  /** Drawn as the QR. */
+  uri: string;
+  /** XXXX-XXXX-XXXX, for a device without a camera. */
+  code: string;
+  expiresAt: string;
+}
+
+export type DevicePairingStatus =
+  | { state: "pending" }
+  | { state: "expired" }
+  | { state: "connected"; deviceName: string | null };
+
 export interface PendingApproval {
   id: string;
   deviceName: string;
@@ -305,6 +320,12 @@ export interface LevikDesktopApi {
   revokeDevice(subscriptionId: string, deviceId: string): Promise<void>;
   setSubscriptionShield(subscriptionId: string, enabled: boolean): Promise<void>;
   authorizeActivation(code: string): Promise<void>;
+  /** Signs this computer in with the code a signed-in device shows. */
+  signInWithPairingCode(code: string): Promise<void>;
+  /** A QR (and code) that signs a new device in to this account. */
+  createDevicePairing(): Promise<DevicePairing>;
+  devicePairingStatus(id: string): Promise<DevicePairingStatus>;
+  cancelDevicePairing(id: string): Promise<void>;
   checkForUpdates(): Promise<void>;
   downloadUpdate(): Promise<void>;
   installUpdate(): Promise<void>;
@@ -372,6 +393,10 @@ export const IPC = {
   revokeDevice: "levik:revoke-device",
   setSubscriptionShield: "levik:set-subscription-shield",
   authorizeActivation: "levik:authorize-activation",
+  signInWithPairingCode: "levik:sign-in-with-pairing-code",
+  createDevicePairing: "levik:create-device-pairing",
+  devicePairingStatus: "levik:device-pairing-status",
+  cancelDevicePairing: "levik:cancel-device-pairing",
   checkForUpdates: "levik:check-for-updates",
   downloadUpdate: "levik:download-update",
   installUpdate: "levik:install-update",

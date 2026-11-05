@@ -10,6 +10,7 @@ import type { IssuedCommand, RemoteCommand, RemoteDevice } from "../shared/remot
 import { dropStatusText, formatDropBytes, isOpenDropState } from "../shared/drop";
 import type { DropControl, DropDevice, DropTransfer } from "../shared/drop";
 import { dropAmountText, dropDeviceStatus, dropFilesText, dropPercent, mountDropUi } from "./dropUi";
+import { mountPairingUi } from "./pairingUi";
 import { countrySwitchLabel, serverSwitchLabel } from "./serverSwitchUi";
 import { renderGuestScreen } from "./guest";
 
@@ -22,6 +23,8 @@ let loginWaiting = false;
 /** The main process reported this sign-in as pending; when it stops, the attempt is over. */
 let loginSeenPending = false;
 let loginMode: "browser" | "qr" = "browser";
+/** «Вход по QR-коду»: this computer shows a QR, or takes the code a signed-in device shows. */
+let qrPanel: "show" | "enter" | null = null;
 let authorizationUri: string | null = null;
 let authorizationCode: string | null = null;
 let authorizationQrSvg: string | null = null;
@@ -51,8 +54,6 @@ let relaunchingAsAdmin = false;
 /** "It's not the VPN": checked each time the support dialog opens. */
 let diagnosis: { running: boolean; result: DiagnosisSummary | null } = { running: false, result: null };
 let toastTimer: ReturnType<typeof setTimeout> | null = null;
-let activationCodeInput = "";
-let activationSubmitting = false;
 let renderedSnapshotKey: string | null = null;
 /** The device whose remote is open. */
 let remoteDeviceId: string | null = null;
@@ -82,6 +83,16 @@ const dropUi = mountDropUi({
   toast: (message) => showToast(message),
   fileManagerHint: "Перетащите файлы из Проводника",
 });
+const pairingUi = mountPairingUi({
+  api: window.levik,
+  icon,
+  escapeHtml,
+  escapeAttribute,
+  render: () => render(),
+  toast: (message, tone) => showToast(message, tone),
+  pairingVisible: () => Boolean(state && !shouldShowLogin(state) && !state.guest && !guestScreen && activeTab === "profile"),
+  listen: (element, type, handler) => element?.addEventListener(type, handler),
+});
 
 void window.levik.snapshot().then((snapshot) => {
   state = snapshot;
@@ -98,6 +109,7 @@ window.levik.onSnapshot((snapshot) => {
   state = snapshot;
   if (loginWaiting && snapshot.loginPending) loginSeenPending = true;
   if (snapshot.sessionAvailable || (loginWaiting && loginSeenPending && !snapshot.loginPending)) clearLoginWaiting();
+  if (snapshot.sessionAvailable) qrPanel = null;
   const nextSnapshotKey = snapshotRenderKey(snapshot);
   if (renderedSnapshotKey === nextSnapshotKey) {
     updateLiveData();
@@ -130,7 +142,9 @@ function render(preserveScroll = true): void {
     return;
   }
   if (shouldShowLogin(state)) {
+    pairingUi.stop();
     renderLogin();
+    pairingUi.bind();
     return;
   }
   root.innerHTML = `
@@ -181,8 +195,20 @@ function render(preserveScroll = true): void {
   if (processListElement) processListElement.scrollTop = processScrollTop;
 }
 
+/** «Показать QR-код»: a signed-in device scans it, or types the code under it. */
+function renderLoginQr(): string {
+  if (!(loginWaiting && loginMode === "qr")) {
+    return `<p class="login-qr-caption">Срок QR-кода истёк.</p>
+      <button class="button primary login-primary" id="qr-restart-button" ${state?.busy ? "disabled" : ""}>${icon("refresh")} Показать новый QR-код</button>`;
+  }
+  return `<div class="login-qr" role="img" aria-label="QR-код для входа">${authorizationQrSvg ?? `<span class="spinner"></span>`}</div>
+    ${authorizationCode ? `<div class="login-code" aria-label="Код ${escapeAttribute(authorizationCode.split("").join(" "))}">${escapeHtml(authorizationCode)}</div>` : ""}
+    <p class="login-qr-caption">На устройстве, где вы уже вошли, откройте Levik VPN → «Подключить устройство» и отсканируйте этот QR-код. Без камеры выберите там «Ввести код» и введите код выше.</p>
+    ${renderLoginMatch()}`;
+}
+
 function renderLogin(): void {
-  const qrActive = loginWaiting && loginMode === "qr";
+  const qrActive = qrPanel !== null;
   root.innerHTML = `
     <main class="login">
       <section class="login-card card">
@@ -190,10 +216,11 @@ function renderLogin(): void {
         <h1>Добро пожаловать в Levik VPN</h1>
         <p>Войдите в Levik Account, чтобы синхронизировать подписку и получить защищённый профиль для этого компьютера.</p>
         ${qrActive ? `
-          <div class="login-qr" role="img" aria-label="QR-код для входа">${authorizationQrSvg ?? `<span class="spinner"></span>`}</div>
-          ${authorizationCode ? `<div class="login-code">${escapeHtml(authorizationCode)}</div>` : ""}
-          <p class="login-qr-caption">Если у вас уже выполнен вход на другом устройстве, отсканируйте этот QR-код приложением Levik VPN для быстрого входа</p>
-          ${renderLoginMatch()}
+          <div class="pairing-switch login-switch" role="group" aria-label="Вход по QR-коду">
+            <button class="${qrPanel === "show" ? "active" : ""}" data-login-qr="show" aria-pressed="${qrPanel === "show"}">Показать QR-код</button>
+            <button class="${qrPanel === "enter" ? "active" : ""}" data-login-qr="enter" aria-pressed="${qrPanel === "enter"}">Ввести код</button>
+          </div>
+          ${qrPanel === "show" ? renderLoginQr() : pairingUi.renderCodeSignIn()}
           <button class="button login-secondary" id="cancel-login-button">${icon("close")} Отмена</button>
         ` : `<button class="button primary login-primary" id="login-button" ${state?.busy || loginWaiting ? "disabled" : ""}>
           ${state?.busy ? `<span class="spinner"></span>` : icon("login")} ${loginWaiting ? "Ожидание подтверждения…" : "Войти через Levik Account"}
@@ -210,9 +237,27 @@ function renderLogin(): void {
   });
   document.getElementById("login-button")?.addEventListener("click", () => void beginLogin("browser"));
   document.getElementById("guest-open")?.addEventListener("click", () => { guestScreen = true; render(); });
-  document.getElementById("qr-login-button")?.addEventListener("click", () => void beginLogin("qr"));
+  document.getElementById("qr-login-button")?.addEventListener("click", () => {
+    qrPanel = "show";
+    void beginLogin("qr");
+  });
+  document.getElementById("qr-restart-button")?.addEventListener("click", () => void beginLogin("qr"));
+  document.querySelectorAll<HTMLButtonElement>("[data-login-qr]").forEach((button) => button.addEventListener("click", () => {
+    const next = button.dataset.loginQr === "enter" ? "enter" : "show";
+    if (next === qrPanel) return;
+    qrPanel = next;
+    if (next === "show") {
+      void beginLogin("qr");
+      return;
+    }
+    // The QR of this computer stops working once the user types a code instead.
+    if (loginWaiting) void run(() => window.levik.cancelLogin());
+    clearLoginWaiting();
+    render();
+  }));
   document.getElementById("cancel-login-button")?.addEventListener("click", () => {
-    void run(() => window.levik.cancelLogin());
+    if (loginWaiting) void run(() => window.levik.cancelLogin());
+    qrPanel = null;
     clearLoginWaiting();
     render();
   });
@@ -656,7 +701,7 @@ function renderProfile(): string {
       ${renderGuestEntry()}
       ${renderServiceRoutes()}
       ${renderHomeRoad()}
-      <section class="section card"><h2 class="card-title">Авторизовать устройство</h2><div class="card-caption">Введите код, показанный на экране другого устройства.</div><form class="activation-form" id="activation-form"><label for="activation-code">Код активации</label><div class="activation-controls"><input id="activation-code" type="text" inputmode="text" autocomplete="one-time-code" maxlength="19" placeholder="XXXX-XXXX-XXXX-XXXX" value="${escapeAttribute(activationCodeInput)}" ${activationSubmitting ? "disabled" : ""} /><button class="button primary" type="submit" ${activationSubmitting ? "disabled" : ""}>${activationSubmitting ? `<span class="spinner"></span>` : icon("link")} Авторизовать</button></div></form></section>
+      ${pairingUi.renderConnectDevice()}
       <section class="section card"><h2 class="card-title">Настройки</h2><div class="settings-list">
         ${selectSetting("Маршрутизация", "Как направлять системный трафик", "routing-mode", state.settings.routingMode, [["global","Весь трафик"],["bypassRu","Обход ресурсов РФ"],["blockedOnly","Только заблокированное"]])}
         ${switchSetting("Автовосстановление", "Перезапускать туннель после сбоя", "autoReconnect", state.settings.autoReconnect)}
@@ -1449,13 +1494,7 @@ function bindPageEvents(): void {
   document.getElementById("logout-button")?.addEventListener("click", () => {
     if (confirm("Выйти из Levik Account на этом компьютере? Текущий VPN-туннель будет остановлен.")) void run(() => window.levik.logout());
   });
-  document.getElementById("activation-code")?.addEventListener("input", (event) => {
-    activationCodeInput = (event.target as HTMLInputElement).value.toUpperCase().replace(/[^A-Z0-9-]/g, "").slice(0, 19);
-  });
-  document.getElementById("activation-form")?.addEventListener("submit", (event) => {
-    event.preventDefault();
-    void authorizeActivation();
-  });
+  pairingUi.bind();
 }
 
 async function beginLogin(mode: "browser" | "qr"): Promise<void> {
@@ -1501,22 +1540,6 @@ function clearLoginWaiting(): void {
   loginSeenPending = false;
   if (authorizationRetryTimer) clearTimeout(authorizationRetryTimer);
   authorizationRetryTimer = null;
-}
-
-async function authorizeActivation(): Promise<void> {
-  if (activationSubmitting) return;
-  activationSubmitting = true;
-  render();
-  try {
-    await window.levik.authorizeActivation(activationCodeInput);
-    activationCodeInput = "";
-    showToast("Устройство авторизовано", "notice");
-  } catch (error) {
-    showToast(error instanceof Error ? error.message : String(error));
-  } finally {
-    activationSubmitting = false;
-    render();
-  }
 }
 
 async function openProcessDialog(): Promise<void> {

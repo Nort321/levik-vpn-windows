@@ -12,6 +12,21 @@ export interface AuthChallengeResponse {
   telegramUriComplete?: string;
 }
 
+/** POST /api/mobile/v1/devices/pair: a device signs in with another device's QR or code. */
+export interface DevicePairingClaimResponse {
+  ok: boolean;
+  state?: unknown;
+  accessToken?: unknown;
+}
+
+/** POST /api/mobile/v1/devices/pairings; checked by platform/devicePairing.ts. */
+export interface DevicePairingsResponse {
+  ok: boolean;
+  pairing?: unknown;
+  state?: unknown;
+  deviceName?: unknown;
+}
+
 export interface AuthStatusResponse {
   ok: boolean;
   /** "declined": someone picked a wrong number or said it was not them. */

@@ -18,6 +18,8 @@ import type {
   DiagnosisAction,
   HomeRoadSnapshot,
   DiagnosisSummary,
+  DevicePairing,
+  DevicePairingStatus,
   LoginChallenge,
   PendingApproval,
   TunnelServer,
@@ -78,6 +80,7 @@ import { createSupportNote, MAX_SUPPORT_NOTE_BYTES, supportNoteText } from "./di
 import { supportReportText } from "./diagnostics/supportReport";
 import type { AttemptCause, AttemptStage, EndBy, PowerState, SessionSettings, SessionTrigger } from "./telemetry/sessionRecorder";
 import { cabinetFallbackUrl, isAllowedExternalUrl, isHandoffUrl } from "./platform/links";
+import { normalizeActivationCode, normalizePairingCode, parseDevicePairing, parseDevicePairingStatus } from "./platform/devicePairing";
 import { serviceEndpoints, ServiceEndpointsStore, websiteHosts } from "./platform/serviceEndpoints";
 import { createRoadKey, HomeRoadExit, isHomeRoadServer, parseRoadExit, roadKeyFrom, type RoadKey } from "./platform/homeRoad";
 import { findWindowsOutboundInterface } from "./windows/outboundInterface";
@@ -667,13 +670,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
         accountActivationSupported: true,
         numberMatchSupported: true,
         ...(isAccountHint(accountHint) ? { accountHint } : {}),
-        publicKeySpki: this.identity.publicKeySpkiBase64Url(),
-        deviceLabel: "Levik VPN for Windows",
-        deviceModel: `${platform()} ${process.arch}`.slice(0, 128),
-        deviceOs: `Windows ${release()}`.slice(0, 128),
-        appVersion: app.getVersion(),
-        requestSigningAlgorithm: "RS256",
-        profileEncryptionAlgorithm: "RSA-OAEP+A256GCM",
+        ...this.deviceRegistration(),
       });
       if (generation !== this.loginGeneration) throw new Error("Вход отменён");
       generation = ++this.loginGeneration;
@@ -692,6 +689,55 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     } finally {
       if (generation === this.loginGeneration) this.patch({ busy: false });
     }
+  }
+
+  /** This computer's key and description, sent when it signs in. */
+  private deviceRegistration() {
+    return {
+      publicKeySpki: this.identity.publicKeySpkiBase64Url(),
+      deviceLabel: "Levik VPN for Windows",
+      deviceModel: `${platform()} ${process.arch}`.slice(0, 128),
+      deviceOs: `Windows ${release()}`.slice(0, 128),
+      appVersion: app.getVersion(),
+      requestSigningAlgorithm: "RS256",
+      profileEncryptionAlgorithm: "RSA-OAEP+A256GCM",
+    };
+  }
+
+  /** Signs in with the code a signed-in device shows next to its QR; a computer has no camera to scan it. */
+  async signInWithPairingCode(code: string): Promise<void> {
+    if (this.guestConnection.active) throw new Error("Завершите гостевой режим перед входом в аккаунт.");
+    if (this.accessToken) throw new Error("Этот компьютер уже вошёл в аккаунт");
+    if (this.state.busy) throw new Error("Дождитесь завершения текущей операции");
+    const pairingCode = normalizePairingCode(code);
+    // A QR sign-in waiting on screen is replaced by this one.
+    const generation = ++this.loginGeneration;
+    this.patch({ busy: true, statusDetail: null, loginPending: false });
+    try {
+      const response = await this.api.claimDevicePairing({ pairingCode, ...this.deviceRegistration() });
+      if (response.state !== "authenticated" || typeof response.accessToken !== "string") {
+        throw new Error("Сервер не подтвердил вход");
+      }
+      if (generation !== this.loginGeneration) throw new Error("Вход отменён");
+      await this.completeSignIn(response.accessToken, null, generation);
+    } finally {
+      if (generation === this.loginGeneration) this.patch({ busy: false });
+    }
+  }
+
+  async createDevicePairing(): Promise<DevicePairing> {
+    const response = await this.withSession((token) => this.api.devicePairings(token, { op: "create" }));
+    return parseDevicePairing(response.pairing);
+  }
+
+  async devicePairingStatus(id: string): Promise<DevicePairingStatus> {
+    const status = parseDevicePairingStatus(await this.withSession((token) => this.api.devicePairings(token, { op: "status", id })));
+    if (status.state === "connected") this.refreshRemoteIfWatched();
+    return status;
+  }
+
+  async cancelDevicePairing(id: string): Promise<void> {
+    await this.withSession((token) => this.api.devicePairings(token, { op: "cancel", id }));
   }
 
   cancelLogin(): void {
@@ -1463,33 +1509,38 @@ export class AppController extends EventEmitter<AppControllerEvents> {
           this.patch({ statusDetail: status.state === "denied" ? "Вход отклонён" : "Срок входа истёк" });
           return;
         }
-        if (status.accessToken.length < 32 || status.accessToken.length > 4_096) throw new Error("Некорректная сессия");
-        await this.drop?.signedOut();
-        await this.serviceRouteState.clear();
-        this.xray.serviceRoutes?.stop();
-        if (this.profile) delete this.profile.serviceRoutes;
-        this.lastServiceRouteReport = null; this.lastServiceRouteReportAt = 0;
-        this.patch({ serviceRoutes: null, serviceRouteDetails: [], serviceRouteNotice: null });
-        if (generation !== this.loginGeneration) return;
-        this.accessToken = status.accessToken;
-        await this.secureStore.put("access_token", Buffer.from(status.accessToken));
-        if (isAccountHint(status.accountHint)) await this.secureStore.put("account_hint", Buffer.from(status.accountHint));
-        this.patch({ sessionAvailable: true });
-        this.startLiveEvents();
-        try {
-          await this.refreshAccount();
-        } catch (error) {
-          if (!this.accessToken) throw error;
-          this.addLog(`Синхронизация аккаунта: ${messageOf(error)}`);
-        }
-        this.refreshHomeRoadSoon();
-        this.patch({ statusDetail: "Вход выполнен" });
+        await this.completeSignIn(status.accessToken, status.accountHint, generation);
         return;
       } catch (error) {
         this.addLog(`Ожидание входа: ${messageOf(error)}`);
       }
     }
     if (generation === this.loginGeneration) this.patch({ statusDetail: "Срок входа истёк" });
+  }
+
+  /** Stores the new session and loads the account, whichever way the sign-in came. */
+  private async completeSignIn(accessToken: string, accountHint: unknown, generation: number): Promise<void> {
+    if (accessToken.length < 32 || accessToken.length > 4_096) throw new Error("Некорректная сессия");
+    await this.drop?.signedOut();
+    await this.serviceRouteState.clear();
+    this.xray.serviceRoutes?.stop();
+    if (this.profile) delete this.profile.serviceRoutes;
+    this.lastServiceRouteReport = null; this.lastServiceRouteReportAt = 0;
+    this.patch({ serviceRoutes: null, serviceRouteDetails: [], serviceRouteNotice: null });
+    if (generation !== this.loginGeneration) return;
+    this.accessToken = accessToken;
+    await this.secureStore.put("access_token", Buffer.from(accessToken));
+    if (isAccountHint(accountHint)) await this.secureStore.put("account_hint", Buffer.from(accountHint));
+    this.patch({ sessionAvailable: true });
+    this.startLiveEvents();
+    try {
+      await this.refreshAccount();
+    } catch (error) {
+      if (!this.accessToken) throw error;
+      this.addLog(`Синхронизация аккаунта: ${messageOf(error)}`);
+    }
+    this.refreshHomeRoadSoon();
+    this.patch({ statusDetail: "Вход выполнен" });
   }
 
   private async loadTunnelProfile(subscriptionId: string): Promise<void> {
@@ -3960,14 +4011,6 @@ function windowsMajorVersion(version: string): string {
   const [major, , build] = version.split(".").map(Number);
   if (major === 10 && (build ?? 0) >= 22_000) return "11";
   return Number.isInteger(major) ? String(major) : "unknown";
-}
-
-function normalizeActivationCode(value: string): string {
-  const normalized = value.normalize("NFKC").trim().toUpperCase();
-  if (!/^[A-HJ-NP-Z2-9]{4}(?:-[A-HJ-NP-Z2-9]{4}){3}$/.test(normalized)) {
-    throw new Error("Введите код в формате XXXX-XXXX-XXXX-XXXX");
-  }
-  return normalized;
 }
 
 function serializeSettings(settings: AppSettings): AppSettings & { settingsSchemaVersion: number } {

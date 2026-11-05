@@ -3,6 +3,8 @@ import type {
   ApprovalDecisionResponse,
   ApprovalsResponse,
   AuthChallengeResponse,
+  DevicePairingClaimResponse,
+  DevicePairingsResponse,
   AuthStatusResponse,
   IssueCommandResponse,
   MobileAccountResponse,
@@ -52,6 +54,19 @@ export class MobileApiClient {
 
   pollStatus(loginToken: string): Promise<AuthStatusResponse> {
     return this.request("POST", "/api/mobile/v1/auth/status", { loginToken }, null);
+  }
+
+  /** Signs in with the QR or code shown by a signed-in device. */
+  claimDevicePairing(payload: Record<string, unknown>): Promise<DevicePairingClaimResponse> {
+    return this.request("POST", "/api/mobile/v1/devices/pair", payload, null);
+  }
+
+  /** Shows a QR for a new device, follows it, or takes it back. */
+  devicePairings(
+    accessToken: string,
+    operation: { op: "create" } | { op: "status" | "cancel"; id: string },
+  ): Promise<DevicePairingsResponse> {
+    return this.request("POST", "/api/mobile/v1/devices/pairings", operation, accessToken);
   }
 
   approvals(accessToken: string): Promise<ApprovalsResponse> {
@@ -307,6 +322,10 @@ function apiErrorMessage(code: string): string {
     unauthorized: "Сессия истекла. Войдите снова.",
     invalid_activation_code: "Проверьте код активации",
     activation_not_found: "Код активации не найден или срок его действия истёк",
+    pairing_expired: "Код не найден или устарел. Обновите QR-код на устройстве, где вы уже вошли.",
+    pairing_used: "Этот код уже использован. Создайте новый на устройстве, где вы уже вошли.",
+    pairing_not_found: "QR-код больше не действует. Создайте новый.",
+    pairing_unavailable: "Вход по QR-коду сейчас недоступен. Попробуйте позже.",
     rate_limited: "Слишком много попыток. Попробуйте позже.",
     app_update_required: "Обновите Levik VPN: эта версия приложения не поддерживает Levik Game.",
     drop_unavailable: "Передача файлов сейчас недоступна. Попробуйте позже.",

@@ -377,6 +377,36 @@ select option { color: var(--text); background-color: var(--select-bg); }
 .login-qr svg { width: 232px; height: 232px; display: block; }
 .login-code { margin-top: 10px; color: var(--text); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 18px; font-weight: 700; letter-spacing: .08em; }
 .login .login-qr-caption { margin: 12px 0 0; font-size: 12px; line-height: 1.45; }
+/* Device pairing, pairingUi.ts: a two-way switch, the QR with its code, and code entry. */
+.pairing-switch { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; margin-top: 14px; padding: 4px; border: 1px solid var(--border); border-radius: 12px; background: var(--select-bg); }
+.pairing-switch button { min-height: 34px; padding: 0 10px; border: 0; border-radius: 9px; color: var(--muted); background: transparent; font: inherit; font-size: 12.5px; font-weight: 650; cursor: pointer; }
+.pairing-switch button:hover { color: var(--text); }
+.pairing-switch button.active { color: var(--text); background: var(--surface-strong); box-shadow: 0 1px 4px rgba(0,0,0,.18); }
+.pairing-switch button:focus-visible { outline: 2px solid var(--blue); outline-offset: 1px; }
+.login .pairing-switch { margin-top: 18px; }
+.pairing-card .pairing-action { margin-top: 14px; }
+.pairing-show { display: flex; gap: 18px; align-items: flex-start; margin-top: 16px; }
+.pairing-qr { flex: none; width: 232px; padding: 8px; border-radius: 14px; background: white; color: #07101f; }
+.pairing-qr svg { width: 216px; height: 216px; display: block; }
+.pairing-qr.expired { opacity: .25; }
+.pairing-details { min-width: 0; display: grid; gap: 8px; }
+.pairing-label { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .08em; }
+.pairing-code { color: var(--text); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 22px; font-weight: 800; letter-spacing: .08em; user-select: all; }
+.pairing-steps { margin: 4px 0 0; padding-left: 18px; color: var(--muted); font-size: 12.5px; line-height: 1.55; text-align: left; }
+.pairing-status { color: var(--muted); font-size: 12.5px; font-variant-numeric: tabular-nums; }
+.pairing-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.pairing-warning { margin: 0; color: var(--muted); font-size: 11.5px; line-height: 1.45; }
+.pairing-result { display: flex; gap: 12px; align-items: center; margin: 16px 0 12px; color: var(--green); }
+.pairing-result svg { flex: none; width: 28px; height: 28px; }
+.pairing-result div { display: grid; gap: 2px; }
+.pairing-result strong { color: var(--text); }
+.pairing-result span { color: var(--muted); font-size: 12.5px; }
+.pairing-code-form { display: grid; gap: 9px; margin-top: 16px; text-align: left; }
+.pairing-code-form label { color: var(--muted); font-size: 11px; }
+.pairing-code-input { height: 46px; padding: 0 12px; border: 1px solid var(--border); border-radius: 10px; color: var(--text); background: var(--select-bg); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 18px; letter-spacing: .1em; text-align: center; text-transform: uppercase; }
+.pairing-code-input:focus-visible { outline: 2px solid var(--blue); outline-offset: 1px; }
+.login .pairing-code-form .button { margin-top: 4px; }
+@media (max-width: 760px) { .pairing-show { flex-direction: column; align-items: center; } }
 .activation-form { display: grid; gap: 9px; margin-top: 16px; }
 .activation-form label { color: var(--muted); font-size: 11px; }
 .activation-controls { display: flex; gap: 10px; }
