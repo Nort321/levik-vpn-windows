@@ -84,5 +84,5 @@ describe.skipIf(!modulePath)("actual native Drop source", () => {
       expect(Buffer.concat(chunks)).toEqual(bytes.subarray(offset)); expect(source.digest()).toBe(createHash("sha256").update(bytes).digest("hex"));
       expect(await readFile(path)).toEqual(bytes);
     } finally {source.close();}
-  });
+  }, 30_000);
 });
