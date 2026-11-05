@@ -13,14 +13,14 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const REPOSITORY = "Nort321/levik-desktop";
-const VERSION = "v0.15.0";
+const VERSION = "v0.16.0";
 // Drafts are addressed by immutable release ID; the tag endpoint is published-only.
-const RELEASE_ID = 434965920;
+const RELEASE_ID = 435010407;
 const SHA256 = {
-  "darwin-arm64": "7999d929f74c95883b727f8515907f055a994be87863c96cdd28c77b68002cf1",
-  "darwin-x64": "f40086aba4ec9374ae4c8949977e8e4c92edff11cc8db978daa428fb3f704584",
-  "windows-x64": "dbe65407da423dc99cee0c42f37199a4223b80b117ad5a34094b97881af33adf",
-  "linux-x64": "3c1a5bb02460cdbf74a36a58707c3a2b128e3f689d2c56b2dceb9c429583cd39",
+  "darwin-arm64": "6745a53dcb1ee00434ec79e891e06ad803362ec3dddb303aa28fe278dc89ab2c",
+  "darwin-x64": "31ef2a56032468a75a133bf7d6be4e9af1c5cab75246983302052e5d0b26d90c",
+  "windows-x64": "812d5752e56a109e54dfea81f3a50628ac8c00f075b2d544d50055a32d44758b",
+  "linux-x64": "708c9f506cf1c65f81271ccb2d0eb640437c66480f47e6c4a425e48fb041e00c",
 };
 
 const os = { darwin: "darwin", win32: "windows", linux: "linux" }[process.platform];
