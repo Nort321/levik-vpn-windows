@@ -280,6 +280,14 @@ function headerFor(seq: bigint): Buffer {
   return header;
 }
 
+/** One transfer attempt owns both record directions. */
+export interface DropRecords {
+  seal(plaintext: Buffer, dataRecord?: boolean): Buffer;
+  open(record: Buffer): Buffer;
+  /** Releases cipher state and never throws. */
+  close(): void;
+}
+
 /** One direction of a session: counters start at 0 and grow by one. */
 export class RecordSealer {
   private seq = 0n;

@@ -9,6 +9,7 @@ import {
   ProtocolError,
   RecordOpener,
   RecordSealer,
+  type DropRecords,
   WINDOW,
   commitment,
   decodePlaintext,
@@ -52,6 +53,7 @@ export type SessionOutcome =
 
 /** The protocol functions a session reads the peer's handshake and messages with. */
 export interface DropProtocol {
+  createRecords?(role: "sender" | "receiver", keys: SessionKeys): DropRecords | null;
   decodeSenderHello: typeof decodeSenderHello;
   decodeReceiverHello: typeof decodeReceiverHello;
   decodeSenderProof: typeof decodeSenderProof;
@@ -173,8 +175,9 @@ class Ended extends Error {}
 export class Session {
   readonly inbox = new Inbox();
   private keys: SessionKeys | null = null;
-  private sealer: RecordSealer | null = null;
-  private opener: RecordOpener | null = null;
+  private sealer: Pick<RecordSealer, "seal"> | null = null;
+  private records: DropRecords | null = null;
+  private opener: Pick<RecordOpener, "open"> | null = null;
   private readonly transfer: Buffer;
   private input: SessionPath = "relay";
   private output: SessionPath = "relay";
@@ -256,10 +259,18 @@ export class Session {
     this.lanListener?.close();
     // Records already written still leave before the direct connection closes.
     this.lan?.closeGracefully();
+    this.clearRecords();
     this.ackWaiter?.();
     if (this.work.role === "receiver") void this.work.targets?.closeWriting();
     this.settle?.(outcome);
     this.settle = null;
+  }
+
+  private clearRecords(): void {
+    this.records?.close(); this.records = null;
+    this.sealer = null; this.opener = null;
+    const keys = this.keys; this.keys = null;
+    if (keys) { keys.sr.fill(0); keys.rs.fill(0); keys.lan.fill(0); }
   }
 
   private fromError(error: unknown): void {
@@ -307,13 +318,17 @@ export class Session {
 
   private async main(): Promise<void> {
     const { keys, peerKey } = await this.handshake();
+    if (this.outcome) { keys.sr.fill(0); keys.rs.fill(0); keys.lan.fill(0); return; }
     this.keys = keys;
     const role = this.work.role;
-    this.sealer = new RecordSealer(role === "sender" ? keys.sr : keys.rs);
-    this.opener = new RecordOpener(role === "sender" ? keys.rs : keys.sr);
+    this.records = this.protocol.createRecords?.(role, keys) ?? null;
+    this.sealer = this.records ?? new RecordSealer(role === "sender" ? keys.sr : keys.rs);
+    this.opener = this.records ?? new RecordOpener(role === "sender" ? keys.rs : keys.sr);
     const trust = this.work.trust(peerKey);
     this.work.events.keyed(keys.code, trust, peerKey);
+    if (this.outcome) return;
     if (!this.work.route) this.work.events.path("relay");
+    if (this.outcome) return;
 
     const reading = this.readLoop(trust);
     if (this.work.route && this.listensOnLan() && this.work.route !== "relay") void this.openLan();

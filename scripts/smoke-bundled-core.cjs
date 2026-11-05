@@ -43,6 +43,15 @@ async function checkAsyncHandles() {
   const rpc = core.startXrayRequest('{"request":{"kind":"statistics"}}');
   rpc.close(); rpc.close();
   assert.deepEqual(JSON.parse(await rpc.read()), { ok: false });
+  const send = Buffer.alloc(32, 0x41), receive = Buffer.alloc(32, 0x42);
+  const drop = core.openDropRecords(send, receive), peer = core.openDropRecords(receive, send);
+  try {
+    const payload = Buffer.alloc(262144, 0x5a);
+    assert.deepEqual(peer.open(drop.seal(payload, true)), payload);
+    assert.deepEqual(drop.open(peer.seal(Buffer.from("TEST reply"), false)), Buffer.from("TEST reply"));
+    drop.close(); drop.close();
+    assert.throws(() => drop.seal(Buffer.from("TEST"), false), /no keys/);
+  } finally { drop.close(); peer.close(); send.fill(0); receive.fill(0); }
   const route = core.openRouteProbe(JSON.stringify({ port: 47200,
     auth: { port: 47200, user: "probe", password: "a".repeat(48) } }));
   route.close(); route.close();

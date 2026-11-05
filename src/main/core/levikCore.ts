@@ -1,3 +1,4 @@
+import { isNativeDropRecords, type NativeDropRecords, type OpenDropRecords } from "./nativeDropRecords";
 import { isNativeRouteProbe, type NativeRouteProbe, type OpenRouteProbe } from "./nativeRouteProbes";
 import { isNativeServiceProbe, type NativeServiceProbe, type StartServiceProbe } from "./nativeServiceProbes";
 import { isNativeXrayRequest, type NativeXrayRequest, type StartXrayRequest } from "./nativeXrayApi";
@@ -43,6 +44,7 @@ export interface LevikCoreModule {
   startXrayRequest?: StartXrayRequest;
   startServiceProbe?: StartServiceProbe;
   openRouteProbe?: OpenRouteProbe;
+  openDropRecords?: OpenDropRecords;
   /** Names of the core functions this build offers. */
   functions(): string[];
   /** Runs a core function: JSON in, JSON out; throws on bad input. */
@@ -108,7 +110,7 @@ export function loadLevikCore(path: string, options: {
   if (!isRecord(loaded) || typeof loaded.coreInfo !== "function") {
     return { state: "rejected", reason: "нет coreInfo()" };
   }
-  const { coreInfo, functions, call, restoreIdentity, createReplyKey, sealReply, createPublicClient, openSecureStore, openTelemetryQueue, openConfigCache, createApiDiscovery, startServerPings, startTunnelProbe, startXrayRequest, startServiceProbe, openRouteProbe } = loaded;
+  const { coreInfo, functions, call, restoreIdentity, createReplyKey, sealReply, createPublicClient, openSecureStore, openTelemetryQueue, openConfigCache, createApiDiscovery, startServerPings, startTunnelProbe, startXrayRequest, startServiceProbe, openRouteProbe, openDropRecords } = loaded;
   let info: unknown;
   try {
     info = coreInfo();
@@ -131,6 +133,11 @@ export function loadLevikCore(path: string, options: {
   const described: LevikCoreInfo = info;
   const module: LevikCoreModule = {
     coreInfo: () => described,
+    ...(typeof openDropRecords === "function" ? { openDropRecords: (send: Buffer, receive: Buffer): NativeDropRecords => {
+      const records: unknown = openDropRecords(send, receive);
+      if (!isNativeDropRecords(records)) throw new Error("Invalid native Drop record owner");
+      return records;
+    } } : {}),
     ...(typeof openRouteProbe === "function" ? { openRouteProbe: (input: string): NativeRouteProbe => {
       const probe: unknown = openRouteProbe(input);
       if (!isNativeRouteProbe(probe)) throw new Error("Invalid native route probe");

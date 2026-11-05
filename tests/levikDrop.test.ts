@@ -1,3 +1,7 @@
+import { dropProtocolWithCore } from "../src/main/core/coreDrop";
+import { loadLevikCore } from "../src/main/core/levikCore";
+import { RustCore } from "../src/main/core/rustCore";
+import type { DropProtocol } from "../src/main/platform/levikDrop/session";
 import { createECDH, createHash, createPrivateKey, createPublicKey, generateKeyPairSync, randomBytes } from "node:crypto";
 import { mkdir, mkdtemp, open, readFile, readdir, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { createServer, connect } from "node:net";
@@ -191,7 +195,7 @@ type Setup = Awaited<ReturnType<typeof setup>>;
 async function run(
   context: Setup,
   receiverState: { manifest: protocol.ManifestFile[] | null; targets: TargetFiles | null },
-  options: { allowLan?: boolean; stopAfter?: number; senderPlatform?: "windows" | "macos"; route?: "auto" | "lan" | "relay"; decline?: boolean } = {},
+  options: { allowLan?: boolean; stopAfter?: number; senderPlatform?: "windows" | "macos"; route?: "auto" | "lan" | "relay"; decline?: boolean; senderProtocol?: DropProtocol; receiverProtocol?: DropProtocol; abortSenderOnKeyed?: boolean } = {},
 ): Promise<Run> {
   const [senderSocket, receiverSocket] = await socketPair();
   let relayPayloadBytes = 0;
@@ -212,6 +216,7 @@ async function run(
   const senderWork: SenderWork = {
     ...common,
     role: "sender",
+    ...(options.senderProtocol ? { protocol: options.senderProtocol } : {}),
     identity: context.senderIdentity,
     peerDeviceId: "receiver",
     ownPlatform: options.senderPlatform ?? "macos",
@@ -221,11 +226,12 @@ async function run(
       codes.push(code);
       return true;
     },
-    events: { keyed: () => {}, path: (path) => paths.push(path), progress: () => {} },
+    events: { keyed: () => { if (options.abortSenderOnKeyed) sender.abort("TEST keyed abort"); }, path: (path) => paths.push(path), progress: () => {} },
   };
   const receiverWork: ReceiverWork = {
     ...common,
     role: "receiver",
+    ...(options.receiverProtocol ? { protocol: options.receiverProtocol } : {}),
     identity: context.receiverIdentity,
     peerDeviceId: "sender",
     ownPlatform: "windows",
@@ -413,3 +419,69 @@ it.runIf(process.env.LEVIK_DROP_LARGE_TEST === "1" && privateAddresses().length 
   expect(result.relayPayloadBytes).toBe(0);
   expect((await stat(join(context.target, "large.bin"))).size).toBe(size);
 }, 180_000);
+
+
+const nativeModulePath = process.env.LEVIK_TEST_CORE;
+function nativeProtocol() {
+  if (!nativeModulePath) throw new Error("LEVIK_TEST_CORE missing");
+  const loaded = loadLevikCore(nativeModulePath);
+  if (loaded.state !== "loaded" || !loaded.module.openDropRecords) throw new Error("Native Drop records missing");
+  const core = new RustCore(null, () => {}, "rust");
+  const base = dropProtocolWithCore(() => core, () => loaded.module.openDropRecords);
+  const retained: protocol.SessionKeys[] = [];
+  let closed = 0;
+  const native: DropProtocol = { ...base, createRecords: (role, keys) => {
+    retained.push(keys);
+    const records = base.createRecords?.(role, keys);
+    if (!records) throw new Error("TEST native codec was not selected");
+    return { seal: records.seal, open: records.open, close: () => { closed++; records.close(); } };
+  } };
+  return { protocol: native, created: () => retained.length, verifyRetired: (count: number) => {
+    expect(closed).toBe(count); expect(retained).toHaveLength(count);
+    for (const keys of retained) for (const bytes of [keys.sr, keys.rs, keys.lan]) expect(bytes.every((byte) => byte === 0)).toBe(true);
+  } };
+}
+
+describe.skipIf(!nativeModulePath)("real Rust/Node Drop transfer", () => {
+  it.each(["sender", "receiver", "both"] as const)("delivers unchanged files with native %s and retires session secrets", async (side) => {
+    const content = randomBytes(1024 * 1024 + 123);
+    const context = await setup([["native.bin", content], ["empty.txt", Buffer.alloc(0)]]);
+    const native = nativeProtocol();
+    const result = await run(context, { manifest: null, targets: null }, {
+      ...(side !== "receiver" ? { senderProtocol: native.protocol } : {}),
+      ...(side !== "sender" ? { receiverProtocol: native.protocol } : {}),
+    });
+    expect(result.sender).toEqual({ kind: "done" }); expect(result.receiver).toEqual({ kind: "done" });
+    expect(result.codes[0]).toBe(result.codes[1]); expect((await readFile(join(context.target, "native.bin"))).equals(content)).toBe(true);
+    expect((await readFile(join(context.target, "empty.txt"))).length).toBe(0); native.verifyRetired(side === "both" ? 2 : 1);
+  });
+  it("keeps the v2 relay data markers and survives interrupted transfer with fresh owners", async () => {
+    const content = randomBytes(3 * 1024 * 1024 + 123);
+    const context = await setup([["resume.bin", content]]);
+    const state: { manifest: protocol.ManifestFile[] | null; targets: TargetFiles | null } = { manifest: null, targets: null };
+    const native = nativeProtocol();
+    const options = { route: "relay" as const, senderProtocol: native.protocol, receiverProtocol: native.protocol };
+    const first = await run(context, state, { ...options, stopAfter: 1024 * 1024 });
+    expect(first.sender.kind).toBe("lost"); expect(first.receiver.kind).toBe("lost"); native.verifyRetired(2);
+    const second = await run(context, state, options);
+    expect(second.sender).toEqual({ kind: "done" }); expect(second.receiver).toEqual({ kind: "done" });
+    expect(second.relayPayloadBytes).toBeGreaterThan(0);
+    expect((await readFile(join(context.target, "resume.bin"))).equals(content)).toBe(true); native.verifyRetired(4);
+  });
+  it("sends a native decline before closing and erases both attempts", async () => {
+    const context = await setup([["declined.bin", Buffer.from("TEST")]]); const native = nativeProtocol();
+    const result = await run(context, { manifest: null, targets: null }, { decline: true, senderProtocol: native.protocol, receiverProtocol: native.protocol });
+    expect(result.sender).toEqual({ kind: "declined", by: "peer" }); expect(result.receiver).toEqual({ kind: "declined", by: "self" });
+    expect(await readdir(context.target)).toEqual([]); native.verifyRetired(2);
+  });
+  it("does not prompt or send after a synchronous abort from the keyed event", async () => {
+    const context = await setup([["aborted.bin", Buffer.from("TEST")]]); const native = nativeProtocol();
+    const result = await run(context, { manifest: null, targets: null }, {
+      abortSenderOnKeyed: true, senderProtocol: native.protocol, receiverProtocol: native.protocol,
+    });
+    expect(result.sender).toMatchObject({ kind: "lost", detail: "TEST keyed abort" });
+    expect(result.receiver.kind).toBe("lost"); expect(result.codes).toEqual([]); expect(native.created()).toBeGreaterThan(0);
+    native.verifyRetired(native.created());
+  });
+
+});
