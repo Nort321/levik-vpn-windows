@@ -10,6 +10,8 @@ interface SecureEnvelope {
 export class SecureStore {
   private readonly root = join(app.getPath("userData"), "secure-v1");
 
+  constructor(private readonly onDamaged: (name: string) => void = () => {}) {}
+
   async put(name: string, plaintext: Uint8Array): Promise<void> {
     const destination = this.pathFor(name);
     await mkdir(dirname(destination), { recursive: true });
@@ -19,7 +21,8 @@ export class SecureStore {
     const encrypted = safeStorage.encryptString(Buffer.from(plaintext).toString("base64"));
     const envelope: SecureEnvelope = { version: 1, ciphertext: encrypted.toString("base64") };
     const temporary = `${destination}.${process.pid}.tmp`;
-    await writeFile(temporary, JSON.stringify(envelope), { mode: 0o600 });
+    // Without the flush, a power loss after the rename can leave a file of zero bytes.
+    await writeFile(temporary, JSON.stringify(envelope), { mode: 0o600, flush: true });
     await rename(temporary, destination);
   }
 
@@ -32,11 +35,14 @@ export class SecureStore {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
       throw error;
     }
-    const envelope = JSON.parse(raw) as Partial<SecureEnvelope>;
-    if (envelope.version !== 1 || typeof envelope.ciphertext !== "string") {
-      throw new Error("Invalid secure storage envelope");
+    const ciphertext = envelopeCiphertext(raw);
+    if (ciphertext === null) {
+      // Nothing can be read from it again, and throwing would stop every later launch.
+      await this.remove(name);
+      this.onDamaged(name);
+      return null;
     }
-    const decrypted = safeStorage.decryptString(Buffer.from(envelope.ciphertext, "base64"));
+    const decrypted = safeStorage.decryptString(Buffer.from(ciphertext, "base64"));
     return Buffer.from(decrypted, "base64");
   }
 
@@ -50,3 +56,11 @@ export class SecureStore {
   }
 }
 
+function envelopeCiphertext(raw: string): string | null {
+  try {
+    const envelope = JSON.parse(raw) as Partial<SecureEnvelope> | null;
+    return envelope?.version === 1 && typeof envelope.ciphertext === "string" ? envelope.ciphertext : null;
+  } catch {
+    return null;
+  }
+}

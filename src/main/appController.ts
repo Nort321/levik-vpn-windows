@@ -277,7 +277,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
   private pendingGameProfile: PreparedTunnelProfile | null = null;
   private applyingPendingGameProfile = false;
   private enforcingGameExpiry = false;
-  private readonly secureStore = new SecureStore();
+  private readonly secureStore = new SecureStore((name) => this.addLog(`Защищённое хранилище: файл ${name} повреждён и сброшен`));
   private readonly serviceRouteState = new ServiceRouteState(this.secureStore);
   private readonly xray = new XrayManager();
   private readonly dnsLeakProtection = new DnsLeakProtection(this.secureStore);

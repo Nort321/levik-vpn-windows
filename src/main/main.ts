@@ -2,6 +2,7 @@ import { app, BrowserWindow, dialog, Menu, nativeImage, Notification, powerMonit
 import { join } from "node:path";
 import type { AppSnapshot, AppTab, ConnectionStatus } from "../shared/contracts";
 import { AppController } from "./appController";
+import { DiskLog, redactLogLine } from "./diagnostics/diskLog";
 import { openCabinet, registerIpc } from "./ipc";
 import { startElevated } from "./windows/elevation";
 import { DEEP_LINK_SCHEME, deepLinkFromArgv } from "./platform/links";
@@ -53,9 +54,13 @@ app.whenReady().then(async () => {
     if (mainWindow.webContents.isLoading()) mainWindow.webContents.once("did-finish-load", () => openLink(tab));
     else openLink(tab);
   }
-}).catch((error: unknown) => {
-  const message = error instanceof Error ? error.message : String(error);
+}).catch(async (error: unknown) => {
+  // A NUL in the text would cut the dialog short, and the flush must precede its modal loop.
+  const message = redactLogLine(error instanceof Error ? error.message : String(error));
   console.error("Levik VPN startup failed", message);
+  const log = new DiskLog(join(app.getPath("userData"), "logs"));
+  log.write(`Запуск не удался: ${message}`);
+  await log.flush();
   dialog.showErrorBox("Levik VPN не удалось запустить", message);
   app.quit();
 });
