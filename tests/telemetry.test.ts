@@ -4,9 +4,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DiskLog, redactLogLine } from "../src/main/diagnostics/diskLog";
 import { classifyCoreLogLine, networkTypeOfInterface, probeErrorCode, protocolOf } from "../src/main/telemetry/codes";
-import type { CoreTally } from "../src/main/core/rustCore";
 import { ConnectionTelemetry } from "../src/main/telemetry/connectionTelemetry";
-import { coreReport, MAX_CORE_FUNCTIONS } from "../src/main/telemetry/coreReport";
 import { MAX_TIMELINE_EVENTS, SessionRecorder, type TelemetrySessionBody } from "../src/main/telemetry/sessionRecorder";
 import { buildBatches, MAX_BATCH_BYTES, TelemetryClient } from "../src/main/telemetry/telemetryClient";
 import { TelemetryQueue } from "../src/main/telemetry/telemetryQueue";
@@ -263,44 +261,6 @@ describe("ConnectionTelemetry", () => {
     telemetry.dispose();
   });
 
-  it("reports the Rust core counters since the previous session's final report", async () => {
-    const { http, sent } = fakeHttp();
-    const telemetry = new ConnectionTelemetry(directory, CLIENT, http);
-    let tally: CoreTally = {
-      version: "0.3.0", mode: "shadow", compared: 10, differed: 1, failed: 0, decided: 0,
-      functions: { "smartAuto.rankSmart": { differed: 1, failed: 0 } },
-    };
-    telemetry.useCore(() => tally);
-    await telemetry.setEnabled(true);
-    telemetry.begin("user", SETTINGS);
-    await telemetry.finish("user", "user");
-    await telemetry.flush();
-    const first = (JSON.parse(sent.at(-1)!) as { sessions: TelemetrySessionBody[] }).sessions[0];
-    expect(first?.core).toEqual({
-      ver: "0.3.0", mode: "shadow", compared: 10, differed: 1, failed: 0, decided: 0,
-      fn: { "smartAuto.rankSmart": { differed: 1, failed: 0 } },
-    });
-    tally = { ...tally, compared: 25, functions: { ...tally.functions } };
-    telemetry.begin("user", SETTINGS);
-    await telemetry.finish("user", "user");
-    await telemetry.flush();
-    const second = (JSON.parse(sent.at(-1)!) as { sessions: TelemetrySessionBody[] }).sessions[0];
-    expect(second?.core).toEqual({ ver: "0.3.0", mode: "shadow", compared: 15, differed: 0, failed: 0, decided: 0, fn: {} });
-    telemetry.dispose();
-  });
-
-  it("sends no core field without the module", async () => {
-    const { http, sent } = fakeHttp();
-    const telemetry = new ConnectionTelemetry(directory, CLIENT, http);
-    telemetry.useCore(() => null);
-    await telemetry.setEnabled(true);
-    telemetry.begin("user", SETTINGS);
-    await telemetry.finish("user", "user");
-    await telemetry.flush();
-    expect(JSON.parse(sent.at(-1)!).sessions[0]).not.toHaveProperty("core");
-    telemetry.dispose();
-  });
-
   it("closes sessions left open by an app that stopped unexpectedly", async () => {
     const time = clock();
     const crashed = new ConnectionTelemetry(directory, CLIENT, fakeHttp().http, time.now);
@@ -318,30 +278,6 @@ describe("ConnectionTelemetry", () => {
     const body = JSON.parse(sent[0]!) as { sessions: TelemetrySessionBody[] };
     expect(body.sessions[0]).toMatchObject({ seq: 1, final: true, end: { by: "unknown", code: null, durationS: 42 } });
     restarted.dispose();
-  });
-});
-
-describe("coreReport", () => {
-  const tally = (overrides: Partial<CoreTally> = {}): CoreTally => ({
-    version: "0.3.0", mode: "shadow", compared: 0, differed: 0, failed: 0, decided: 0, functions: {}, ...overrides,
-  });
-
-  it("counts whole after a restart and drops unsafe names and versions", () => {
-    const before = tally({ compared: 100, differed: 5, functions: { "smartAuto.rankSmart": { differed: 5, failed: 0 } } });
-    const after = tally({ compared: 3, differed: 1, functions: { "smartAuto.rankSmart": { differed: 1, failed: 0 } } });
-    expect(coreReport(after, before)).toMatchObject({ compared: 3, differed: 1, fn: { "smartAuto.rankSmart": { differed: 1, failed: 0 } } });
-    expect(coreReport(tally({ version: "0.3.0-dev" }), null)).toBeNull();
-    expect(coreReport(null, null)).toBeNull();
-    const unsafe = coreReport(tally({ differed: 2, functions: { "C:\\Users\\me": { differed: 1, failed: 0 }, f: { differed: 1, failed: 0 } } }), null);
-    expect(unsafe?.fn).toEqual({});
-  });
-
-  it("keeps the functions with the most problems, at most 16", () => {
-    const functions = Object.fromEntries(Array.from({ length: 20 }, (_, index) => [`module.fn${index}`, { differed: index, failed: 1 }]));
-    const report = coreReport(tally({ functions }), null);
-    expect(Object.keys(report?.fn ?? {})).toHaveLength(MAX_CORE_FUNCTIONS);
-    expect(Object.keys(report?.fn ?? {})[0]).toBe("module.fn19");
-    expect(report?.fn).not.toHaveProperty("module.fn0");
   });
 });
 

@@ -1,5 +1,3 @@
-import { isNativeTelemetryQueue, type NativeTelemetryQueue, type OpenTelemetryQueue } from "../core/nativeTelemetry";
-import type { CoreMode, RustCore } from "../core/rustCore";
 import { randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -32,17 +30,13 @@ function utcDay(now: number): string {
  * Anonymous reports waiting to be sent. The file holds no account or device
  * data, so it is plain JSON; writes are serialized and atomic.
  */
-class TypeScriptTelemetryQueue implements QueueBackend {
+export class TelemetryQueue {
   private state: QueueFile | null = null;
   private writing: Promise<void> = Promise.resolve();
   // Bumped by clear(): operations that started earlier must not write again.
   private epoch = 0;
 
-  constructor(private readonly directory: string, private readonly now: () => number = Date.now, initial?: QueueFile) {
-    if (initial) this.state = structuredClone(initial);
-  }
-
-  async snapshot(): Promise<string> { return JSON.stringify(await this.load()); }
+  constructor(private readonly directory: string, private readonly now: () => number = Date.now) {}
 
   /** A random identifier replaced every UTC day; see "Identifiers" in the contract. */
   async installId(): Promise<string> {
@@ -169,123 +163,9 @@ function isQueueFile(value: unknown): value is QueueFile {
     && typeof candidate.install?.id === "string" && UUID.test(candidate.install.id)
     && typeof candidate.install.day === "string"
     && Array.isArray(candidate.sessions)
-    && candidate.sessions.every(isQueuedSession);
+    && candidate.sessions.every((entry) => typeof entry === "object" && entry !== null
+      && typeof entry.startedAt === "number" && typeof entry.savedAt === "number"
+      && typeof entry.body === "object" && entry.body !== null && typeof entry.body.sid === "string"
+      && typeof entry.body.seq === "number"
+      && (entry.sentSeq === undefined || typeof entry.sentSeq === "number"));
 }
-
-
-function isQueuedSession(value: unknown): value is QueuedSession {
-  if (typeof value !== "object" || value === null) return false;
-  // The persisted queue is a JSON interoperability boundary. Keep the same
-  // minimum fields as the existing format; additive report fields survive.
-  const entry = value as Partial<QueuedSession>;
-  return typeof entry.startedAt === "number" && typeof entry.savedAt === "number"
-    && typeof entry.body === "object" && entry.body !== null && typeof entry.body.sid === "string"
-    && typeof entry.body.seq === "number" && (entry.sentSeq === undefined || typeof entry.sentSeq === "number");
-}
-
-interface QueueBackend {
-  installId(): Promise<string>;
-  put(entry: QueuedSession): Promise<void>;
-  pending(): Promise<QueuedSession[]>;
-  unfinished(): Promise<QueuedSession[]>;
-  acknowledge(sent: ReadonlyArray<{ sid: string; seq: number }>): Promise<void>;
-  clear(): Promise<void>;
-  snapshot(): Promise<string>;
-}
-
-class RustQueueBackend implements QueueBackend {
-  constructor(private readonly native: NativeTelemetryQueue, private readonly now: () => number) {}
-  snapshot(): Promise<string> { return this.native.snapshot(this.now()); }
-  async installId(): Promise<string> {
-    const id: unknown = await this.native.installId(this.now());
-    if (typeof id !== "string" || !UUID.test(id)) throw queueFailure();
-    return id;
-  }
-  put(entry: QueuedSession): Promise<void> { return this.native.put(JSON.stringify(entry), this.now()); }
-  acknowledge(sent: ReadonlyArray<{ sid: string; seq: number }>): Promise<void> {
-    return this.native.acknowledge(JSON.stringify(sent), this.now());
-  }
-  clear(): Promise<void> { return this.native.clear(); }
-  async pending(): Promise<QueuedSession[]> { return this.entries(await this.native.pending(this.now())); }
-  async unfinished(): Promise<QueuedSession[]> { return this.entries(await this.native.unfinished(this.now())); }
-  private entries(text: string): QueuedSession[] {
-    if (typeof text !== "string" || text.length > 64 * 1024 * 1024) throw queueFailure();
-    let value: unknown;
-    try { value = JSON.parse(text); } catch { throw queueFailure(); }
-    if (!Array.isArray(value) || value.length > MAX_QUEUED_SESSIONS || !value.every(isQueuedSession)) throw queueFailure();
-    return value;
-  }
-}
-
-/** One owner at a time. A mode change transfers the *current in-memory state*,
- * including an unsaved daily id, after older writes finish. The other backend
- * never resumes an obsolete cached checkpoint. */
-export class TelemetryQueue {
-  private implementation: QueueBackend;
-  private kind: "ts" | "rust" = "ts";
-  private mode: () => CoreMode = () => "ts";
-  private open: OpenTelemetryQueue | undefined;
-  private unavailable = false;
-  private report: () => void = () => {};
-  private operation: Promise<unknown> = Promise.resolve();
-
-  constructor(private readonly directory: string, private readonly now: () => number = Date.now) {
-    this.implementation = new TypeScriptTelemetryQueue(directory, now);
-  }
-
-  useRustCore(core: RustCore, open: OpenTelemetryQueue | undefined, report: () => void): void {
-    this.mode = () => core.mode; this.open = open; this.report = report; this.unavailable = false;
-  }
-
-  private async backend(): Promise<QueueBackend> {
-    const desired = this.mode() === "rust" && this.open && !this.unavailable ? "rust" : "ts";
-    if (desired === this.kind) return this.implementation;
-    let initial: unknown;
-    try { initial = JSON.parse(await this.implementation.snapshot()); if (!isQueueFile(initial)) throw queueFailure(); }
-    catch {
-      this.unavailable = true; this.report();
-      if (this.kind === "rust") { this.implementation = new TypeScriptTelemetryQueue(this.directory, this.now); this.kind = "ts"; }
-      return this.implementation;
-    }
-    if (desired === "ts") {
-      if (this.mode() !== "rust" || !this.open || this.unavailable) { this.implementation = new TypeScriptTelemetryQueue(this.directory, this.now, initial); this.kind = "ts"; }
-    } else {
-      try {
-        const native: unknown = await this.open?.(this.directory, JSON.stringify(initial));
-        if (!isNativeTelemetryQueue(native)) throw queueFailure();
-        if (this.mode() === "rust" && this.open && !this.unavailable) { this.implementation = new RustQueueBackend(native, this.now); this.kind = "rust"; }
-      } catch { this.unavailable = true; this.report(); }
-    }
-    return this.implementation;
-  }
-
-  installId(): Promise<string> { return this.enqueue(async () => (await this.backend()).installId()); }
-  async put(entry: QueuedSession): Promise<void> {
-    const copy = structuredClone(entry);
-    return this.enqueue(async () => (await this.backend()).put(copy));
-  }
-  pending(): Promise<QueuedSession[]> { return this.enqueue(async () => (await this.backend()).pending()); }
-  unfinished(): Promise<QueuedSession[]> { return this.enqueue(async () => (await this.backend()).unfinished()); }
-  async acknowledge(sent: ReadonlyArray<{ sid: string; seq: number }>): Promise<void> {
-    const copy = sent.map((entry) => ({ ...entry }));
-    return this.enqueue(async () => (await this.backend()).acknowledge(copy));
-  }
-  clear(): Promise<void> {
-    return this.enqueue(async () => {
-      try { await this.implementation.clear(); }
-      catch (error) {
-        if (this.kind === "ts") throw error;
-        // Local deletion is idempotent. Consent withdrawal must remain usable
-        // even when the optional bridge fails; all earlier writes are finished.
-        const node = new TypeScriptTelemetryQueue(this.directory, this.now);
-        await node.clear(); this.implementation = node; this.kind = "ts";
-        this.unavailable = true; this.report();
-      }
-    });
-  }
-  private enqueue<Result>(operation: () => Promise<Result>): Promise<Result> {
-    const next = this.operation.then(operation); this.operation = next.catch(() => {}); return next;
-  }
-}
-
-function queueFailure(): Error { return new Error("Не удалось обработать очередь анонимных отчётов"); }

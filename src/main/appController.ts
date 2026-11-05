@@ -1,25 +1,10 @@
-import type { NativeLanConstructors } from "./core/nativeDropLan";
-import { joinRelayWithCore, type StartDropRelay } from "./core/nativeDropRelay";
-import type { OpenDropTargets } from "./core/nativeDropTargets";
-import type { OpenDropSource } from "./core/nativeDropSource";
-import type { OpenDropAgreement } from "./core/nativeDropAgreement";
-import type { OpenDropRecords } from "./core/nativeDropRecords";
-import { CoreRouteProbes } from "./core/nativeRouteProbes";
-import { CoreTunnelHealth, type TunnelHealthOptions } from "./core/nativeTunnelHealth";
-import { CoreServerPinger } from "./core/nativeServerPinger";
-import type { CreateApiDiscovery } from "./core/nativeApiDiscovery";
-import { corePublicFetch, type NativePublicClient } from "./core/publicFetch";
-import { CoreApprovals } from "./core/coreApprovals";
-import { CoreEndpoints } from "./core/coreEndpoints";
-import { CoreSettings } from "./core/coreSettings";
-import { CoreLiveLoad } from "./core/coreLiveLoad";
 import { ServiceRouteState } from "./vpn/serviceRouteState";
 import { validateServiceRouteConfig } from "./vpn/serviceRouteTransport";
 import { parseServiceRoutePolicy, serviceExitForServer, serviceServerKey, compiledServiceRoutes, rememberAutomaticMain, type ServiceRouteStatus } from "./vpn/serviceRoutes";
 import { app, net } from "electron";
 import { createHash, randomBytes } from "node:crypto";
 import { EventEmitter } from "node:events";
-import { networkInterfaces, platform, release } from "node:os";
+import { platform, release } from "node:os";
 import { isIPv4 } from "node:net";
 import { join } from "node:path";
 import type {
@@ -42,7 +27,6 @@ import type {
 } from "../shared/contracts";
 import { isAuthenticationRejected, MobileApiClient, MobileApiError } from "./api/mobileApiClient";
 import { DropEngine } from "./platform/levikDrop/engine";
-import { dropProtocolWithCore } from "./core/coreDrop";
 import type { DropApi } from "./platform/levikDrop/engine";
 import { markDownloaded } from "./windows/downloadMark";
 import type { DropAnswer, DropControl } from "../shared/drop";
@@ -51,10 +35,9 @@ import { DeviceIdentity } from "./security/deviceIdentity";
 import type { SerializedIdentity } from "./security/deviceIdentity";
 import { RequestSigner } from "./security/requestSigner";
 import { SecureStore } from "./security/secureStore";
-import { decryptTunnelProfile, ruleRoutingKey } from "./vpn/tunnelProfile";
+import { decryptTunnelProfile, prepareTunnelProfile, ruleRoutingKey } from "./vpn/tunnelProfile";
 import type { PreparedTunnelProfile } from "./vpn/tunnelProfile";
-import { prepareProfileWithCore } from "./core/coreProfile";
-import { bindXrayOutboundInterfaceWithCore, buildXrayConfigWithCore } from "./core/coreXray";
+import { buildXrayConfig } from "./vpn/xrayConfig";
 import { GuestConnection } from "./vpn/guestConnection";
 import { guestInterface, parseGuestInvitation } from "./vpn/guestSession";
 import { CoreStartError, XrayManager } from "./vpn/xrayManager";
@@ -88,8 +71,7 @@ import { DnsLeakProtection } from "./windows/dnsLeakProtection";
 import { KillSwitchError, WindowsKillSwitch } from "./windows/killSwitch";
 import { AppUpdater } from "./update/appUpdater";
 import { normalizeProcessSelection } from "../shared/processes";
-import { protocolOf } from "./telemetry/codes";
-import { classifyCoreLogLineWithCore, networkTypeOfInterfaceWithCore } from "./core/coreTelemetry";
+import { classifyCoreLogLine, networkTypeOfInterface, protocolOf } from "./telemetry/codes";
 import { ConnectionTelemetry } from "./telemetry/connectionTelemetry";
 import { DiskLog } from "./diagnostics/diskLog";
 import { createSupportNote, MAX_SUPPORT_NOTE_BYTES, supportNoteText } from "./diagnostics/supportNote";
@@ -106,9 +88,10 @@ import type { DetectedConflict } from "./windows/tunnelConflicts";
 import { XRAY_STATS_ENDPOINT } from "./vpn/xrayStats";
 import { TUNNEL_HEALTH_PORT } from "./vpn/tunnelHealth";
 import { DEFAULT_API_ORIGIN } from "./api/apiEndpoints";
+import { parseAccountNotices } from "./platform/accountNotices";
 import { beaconFresh, HomeSleepPolicy, localAddresses, parseSighting, protects, scanHomes } from "./platform/levikHome";
 import type { HomeAction, HomeBeacon, VerifiedHome } from "./platform/levikHome";
-import { NoticeState } from "./platform/notices";
+import { expiryNotices, NoticeState } from "./platform/notices";
 import type { AppNotice } from "./platform/notices";
 import {
   flagEnabled,
@@ -120,45 +103,42 @@ import {
 } from "./platform/remoteConfig";
 import type { StoredRemoteConfig } from "./platform/remoteConfig";
 import {
+  currentQuality,
+  currentRouteResource,
   LIVE_LOAD_CONNECTED_EVERY_MS,
   LIVE_LOAD_MAX_AGE_MS,
   LiveLoadClient,
+  mergeLiveLoad,
   type LiveLoad,
 } from "./platform/liveLoad";
-import type { SyncedSettings } from "./platform/settingsSync";
-import { LiveEvents, samePresence } from "./platform/liveEvents";
-import type { LiveEvent, PresenceReport } from "./platform/liveEvents";
 import {
+  parsePending,
+  parseSettingsDocument,
+  portableSettings,
+  remotePatch,
+  syncedChanges,
+  withoutConfirmed,
+} from "./platform/settingsSync";
+import type { SyncedSettings } from "./platform/settingsSync";
+import { LiveEvents, presenceReport, samePresence } from "./platform/liveEvents";
+import type { LiveEvent, PresenceReport } from "./platform/liveEvents";
+import { isAccountHint, isApprovalAnswer, isTelegramLink, matchNumber, parseApprovals } from "./platform/loginApproval";
+import {
+  canonicalNodeList,
   isCanonicalNodeList,
   nodeIdForServer,
   nodeIdForEndpoint,
   nodeIdForHost,
   serverSyncEndpoint,
   nodeLoadForServer,
+  parseNodeList,
+  reconcileFavorites,
+  serversByNode,
+  unionNodeLists,
 } from "./platform/favoriteNodes";
-import { avoidMaintenance, IdleMeter, maintenanceFor, maintenanceMove, type MaintenanceWindow } from "./platform/maintenance";
-import { countryServersWithCore } from "./core/coreServers";
-import { parseDeliveredCommandsWithCore, parseIssuedCommandsWithCore, parseRemoteDevicesWithCore } from "./core/coreRemote";
-import { expiryNoticesWithCore, parseAccountNoticesWithCore } from "./core/coreNotices";
-import { reconcileFavoritesWithCore, unionNodeListsWithCore } from "./core/coreFavorites";
-import { captivePortal, checkServices, diagnosisSummary, diagnosisVerdict, parseDiagnoseReport, vpnPhase, type DiagnosisInput } from "./platform/diagnosis";
-import type { LevikCoreStatus } from "./core/levikCore";
-import { coreBridge, coreModeFor, RustCore } from "./core/rustCore";
-import {
-  isAnnouncementList,
-  isBoolean,
-  isDiagnoseReportOrNull,
-  isDiagnosisSummary,
-  isDiagnosisVerdict,
-  isIndexList,
-  isMaintenanceMove,
-  isMaintenanceWindowOrNull,
-  isProtocolHistory,
-  isRankedList,
-  isRankedServerOrNull,
-  isStringList,
-  isStringOrNull,
-} from "./core/coreGuards";
+import { avoidMaintenance, IdleMeter, maintenanceFor, maintenanceMove } from "./platform/maintenance";
+import { countryServers } from "../shared/serverGroups";
+import { captivePortal, checkServices, diagnosisSummary, diagnosisVerdict, parseDiagnoseReport, vpnPhase } from "./platform/diagnosis";
 import { gameExitScope, gameProcesses, GAMES, normalizeGameIds } from "../shared/games";
 import { discoverInstalledGames } from "./windows/installedGames";
 import { listWindowsProcesses } from "./windows/processes";
@@ -173,13 +153,15 @@ import {
   createReplyKey,
   FAMILY_HELP_TEXT,
   openReply,
+  parseDeliveredCommands,
+  parseIssuedCommands,
+  parseRemoteDevices,
   sealForReply,
 } from "./platform/remoteCommands";
 import type { DeliveredCommand } from "./platform/remoteCommands";
 import { isFinalState, isRemoteCommand, REMOTE_COMMAND_LABELS } from "../shared/remote";
 import type { RemoteCommand, RemoteSnapshot } from "../shared/remote";
-import type { ReplyPrivateKey } from "./platform/remoteCommands";
-import type { NativeReplyCrypto } from "./core/nativeReply";
+import type { KeyObject } from "node:crypto";
 
 interface AppControllerEvents {
   changed: [snapshot: AppSnapshot];
@@ -294,7 +276,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
   private enforcingGameExpiry = false;
   private readonly secureStore = new SecureStore();
   private readonly serviceRouteState = new ServiceRouteState(this.secureStore);
-  private readonly xray = new XrayManager((config, interfaceName, ipv6, loopback) => bindXrayOutboundInterfaceWithCore(this.core, config, interfaceName, ipv6, loopback));
+  private readonly xray = new XrayManager();
   private readonly dnsLeakProtection = new DnsLeakProtection(this.secureStore);
   private readonly killSwitch = new WindowsKillSwitch(() => this.xray.executablePath(), {
     tuicExecutablePath: () => this.xray.tuicExecutablePath(),
@@ -309,8 +291,8 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     // Capture IPv6 in TUN and block it explicitly; the phone endpoint itself is IPv4.
     start: (config, name, current) => this.xray.start(config, undefined, [], current, { name, ipv6: true }),
     allowTunnel: () => this.killSwitch.allowTunnel(),
-    healthy: () => this.checkTunnelHealth(),
-    stop: () => { this.tunnelProbe.cancel(); return this.xray.stop(); },
+    healthy: () => isTunnelHealthy(),
+    stop: () => this.xray.stop(),
     releaseProtection: () => this.releaseProtection(),
     changed: (guest, statusDetail) => this.patch({ guest, statusDetail,
       status: !guest ? "disconnected" : guest.phase === "connected" ? "connected" : guest.phase === "connecting" ? "connecting" : "error",
@@ -333,12 +315,6 @@ export class AppController extends EventEmitter<AppControllerEvents> {
   private readonly updater: AppUpdater | null;
   private identity!: DeviceIdentity;
   private api!: MobileApiClient;
-  private createApiDiscovery: CreateApiDiscovery | undefined;
-  private readonly tunnelProbe = new CoreTunnelHealth(() => this.core, "windows",
-    () => this.recordDiagnostic("Rust-ядро: проверка трафика через туннель не завершена"));
-  private pingGeneration = 0;
-  private readonly serverPinger = new CoreServerPinger(() => this.core,
-    () => this.recordDiagnostic("Rust-ядро: замер доступности серверов не завершён"));
   private accessToken: string | null = null;
   private profile: PreparedTunnelProfile | null = null;
   private lastServiceRouteReport: string | null = null;
@@ -375,7 +351,6 @@ export class AppController extends EventEmitter<AppControllerEvents> {
   private routeMeasurementKeys: Record<string, string> = {};
   private routeMeasurementNetwork: string | null = null;
   private routeProbeAbort: AbortController | null = null;
-  private readonly routeProbes = new CoreRouteProbes();
   private connectionIntent = 0;
   /** Smart Auto, docs/app-platform.md: which protocols carried traffic on which network. */
   private readonly protocolHistory = new ProtocolHistoryStore(join(app.getPath("userData"), "smart-auto.json"));
@@ -394,33 +369,18 @@ export class AppController extends EventEmitter<AppControllerEvents> {
   private lastDiagnosis: { at: number; summary: DiagnosisSummary } | null = null;
   private killSwitchHealthTimer: ReturnType<typeof setInterval> | null = null;
   private killSwitchHealthCheckRunning = false;
-  private publicHttp: NativePublicClient | null = null;
-  private readonly publicFetch = corePublicFetch(() => this.publicHttp, () => this.core.mode);
   private readonly telemetry = new ConnectionTelemetry(join(app.getPath("userData"), "telemetry"), {
     platform: "windows",
     app: app.getVersion(),
     os: windowsMajorVersion(release()),
-  }, new TelemetryClient(this.publicFetch));
+  });
   private diskLog: DiskLog | null = null;
-  private readonly remoteConfig = new RemoteConfigClient("windows", app.getVersion(), this.publicFetch);
+  private readonly remoteConfig = new RemoteConfigClient("windows", app.getVersion());
   private readonly remoteConfigStore = new RemoteConfigStore(join(app.getPath("userData"), "remote-config.json"));
-  private readonly endpointsStore = new ServiceEndpointsStore(join(app.getPath("userData"), "service-endpoints.json"), this.publicFetch, (body, signature) => this.endpointsCore.verify(body, signature));
+  private readonly endpointsStore = new ServiceEndpointsStore(join(app.getPath("userData"), "service-endpoints.json"));
   private remoteStored: StoredRemoteConfig | null = null;
-  /** Stage 2 of the Rust migration: TypeScript alone until main.ts hands over the loaded module. */
-  private core = new RustCore(null, () => {}, "ts");
-  private replyCrypto: NativeReplyCrypto | null = null;
-  private openDropRecords: OpenDropRecords | undefined;
-  private openDropAgreement: OpenDropAgreement | undefined;
-  private openDropSource: OpenDropSource | undefined;
-  private openDropTargets: OpenDropTargets | undefined;
-  private startDropRelay: StartDropRelay | undefined;
-  private nativeDropLan: NativeLanConstructors | undefined;
-  private readonly approvalsCore = new CoreApprovals(() => this.core);
-  private readonly endpointsCore = new CoreEndpoints(() => this.core);
-  private readonly settingsCore = new CoreSettings(() => this.core);
-  private readonly loadCore = new CoreLiveLoad(() => this.core);
   /** Node load, full nodes and quality, docs/app-platform.md "Node load". */
-  private readonly liveLoadClient = new LiveLoadClient("windows", app.getVersion(), this.publicFetch, (value) => this.loadCore.parse(value));
+  private readonly liveLoadClient = new LiveLoadClient("windows", app.getVersion());
   private liveLoad: LiveLoad | null = null;
   private liveLoadRefresh: Promise<void> | null = null;
   private nextConnectedLoadAt = 0;
@@ -454,7 +414,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
   private noticeChain: Promise<void> = Promise.resolve();
   private readonly shownNotices = new Set<string>();
   /** Private keys of diagnostics requests sent from here, by command id. */
-  private readonly replyKeys = new Map<string, ReplyPrivateKey>();
+  private readonly replyKeys = new Map<string, KeyObject>();
   private remoteWatchedUntil = 0;
   private readonly idleMeter = new IdleMeter();
   private liveEvents: LiveEvents | null = null;
@@ -513,12 +473,12 @@ export class AppController extends EventEmitter<AppControllerEvents> {
         const now = Date.now(), resource = this.routeResource(server, now);
         const exit = this.profile?.serviceRoutes ? serviceExitForServer(this.profile.serviceRoutes, server) : null;
         return [server.id, { eligible: !isHomeRoadServer(server.name) && (!exit || exit.state === "enabled")
-          && !this.maintenanceWindowOf(server, now),
+          && !maintenanceFor(this.maintenanceWindows(), nodeIdForServer(server), now),
           state: resource?.state ?? "unknown", resourceHeadroom: resource?.resourceHeadroom ?? null,
           ...(resource?.id ? { routeId: resource.id } : {}) }];
       })),
       canTransfer: () => !this.guestConnection.active && this.state.settings.automaticServer && this.state.status === "connected" && !this.gamePlaying && !this.liveMatch(),
-      networkKey: () => this.currentNetworkKey(),
+      networkKey: () => this.protocolHistory.networkKey(),
       report: (update) => this.smartAutoLiveChanged(update),
     });
     this.homeRoad.on("status", (status, detail) => {
@@ -549,10 +509,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
       new RequestSigner(this.identity),
       app.getVersion(),
       () => this.endpointsStore.refresh(ENDPOINTS_RETRY_MS),
-      this.publicFetch,
     );
-    this.api.useRustCore(this.core, this.createApiDiscovery,
-      () => this.recordDiagnostic("Rust-ядро: выбор API использует резервную реализацию"));
     this.xray.on("log", (line) => this.handleCoreLog(line));
     this.xray.on("exit", (code, expected) => this.handleXrayExit(code, expected));
     this.xray.on("serviceRoutes", (status) => this.serviceRouteStatusChanged(status));
@@ -569,7 +526,6 @@ export class AppController extends EventEmitter<AppControllerEvents> {
       (signal) => this.api.openEvents(this.requireToken(), signal),
       isAuthenticationRejected,
     );
-    this.liveEvents.useRustCore(this.core);
     this.liveEvents.on("event", (event) => this.handleLiveEvent(event));
     this.drop = new DropEngine({
       api: this.dropApi(),
@@ -580,10 +536,6 @@ export class AppController extends EventEmitter<AppControllerEvents> {
       markDownloaded,
       errorCode: (error) => error instanceof MobileApiError ? error.code ?? (error.status ? `http_${error.status}` : null) : null,
       log: (line) => this.addLog(line),
-      join: joinRelayWithCore(() => this.core, () => this.startDropRelay,
-        () => this.recordDiagnostic("Rust-ядро: не удалось освободить соединение LevikDrop")),
-      protocol: dropProtocolWithCore(() => this.core, () => this.openDropRecords,
-        () => this.recordDiagnostic("Rust-ядро: не удалось освободить состояние LevikDrop"), () => this.openDropAgreement, () => this.openDropSource, () => this.openDropTargets, () => this.nativeDropLan),
     });
     this.drop.on("changed", () => {
       if (this.drop) this.patch({ drop: this.drop.snapshot() });
@@ -601,7 +553,6 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     await this.loadSyncState();
     await this.notices.load();
     this.remoteStored = await this.remoteConfigStore.load();
-    this.applyCoreMode();
     await this.protocolHistory.load();
     this.state.announcements = this.announcements();
     await this.telemetry.setEnabled(telemetryAllowed(this.state.settings)).catch((error: unknown) => {
@@ -715,7 +666,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
       const challenge = await this.api.createChallenge({
         accountActivationSupported: true,
         numberMatchSupported: true,
-        ...(this.approvalsCore.isAccountHint(accountHint) ? { accountHint } : {}),
+        ...(isAccountHint(accountHint) ? { accountHint } : {}),
         publicKeySpki: this.identity.publicKeySpkiBase64Url(),
         deviceLabel: "Levik VPN for Windows",
         deviceModel: `${platform()} ${process.arch}`.slice(0, 128),
@@ -734,8 +685,8 @@ export class AppController extends EventEmitter<AppControllerEvents> {
         verificationUri,
         verificationCode: challenge.activationCode ?? challenge.verificationCode ?? null,
         expiresAt: challenge.expiresAt,
-        matchNumber: this.approvalsCore.matchNumber(challenge.matchNumber),
-        telegramUri: typeof telegramUri === "string" && this.approvalsCore.isTelegramLink(telegramUri) ? telegramUri : null,
+        matchNumber: matchNumber(challenge.matchNumber),
+        telegramUri: typeof telegramUri === "string" && isTelegramLink(telegramUri) ? telegramUri : null,
         approvalRequested: challenge.approvalRequested === true,
       };
     } finally {
@@ -847,7 +798,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
   /** The user picked a country: its best server, chosen by hand from then on. */
   async chooseCountry(countryCode: string): Promise<void> {
     if (this.guestConnection.active) throw new Error("Сначала завершите гостевой режим.");
-    if (!countryServersWithCore(this.core, this.state.servers, countryCode).length) throw new Error("Страна не найдена");
+    if (!countryServers(this.state.servers, countryCode).length) throw new Error("Страна не найдена");
     const replacing = this.manualSwitchPending !== null;
     const intent = ++this.manualSwitchIntent;
     this.manualSwitchPending = intent;
@@ -855,11 +806,11 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     try {
       if (this.state.settings.automaticServer) await this.updateSettings({ automaticServer: false });
       if (intent !== this.manualSwitchIntent) return;
-      const servers = countryServersWithCore(this.core, this.state.servers, countryCode);
+      const servers = countryServers(this.state.servers, countryCode);
       const selected = servers.find((server) => server.id === this.state.selectedServerId);
       if (!selected && servers.some((server) => this.state.serverLatencies[server.id] === undefined)) await this.pingServers();
       if (intent !== this.manualSwitchIntent) return;
-      const best = selected ?? this.bestServer(countryServersWithCore(this.core, this.state.servers, countryCode));
+      const best = selected ?? this.bestServer(countryServers(this.state.servers, countryCode));
       if (best) await this.chooseManualServer(best.id, intent, replacing);
     } finally {
       if (this.manualSwitchPending === intent) this.manualSwitchPending = null;
@@ -942,11 +893,11 @@ export class AppController extends EventEmitter<AppControllerEvents> {
    */
   async selectCountry(countryCode: string): Promise<void> {
     if (this.guestConnection.active) throw new Error("Сначала завершите гостевой режим.");
-    const servers = countryServersWithCore(this.core, this.state.servers, countryCode);
+    const servers = countryServers(this.state.servers, countryCode);
     if (!servers.length) throw new Error("Страна не найдена");
     if (servers.some((server) => server.id === this.state.selectedServerId)) return;
     if (servers.some((server) => this.state.serverLatencies[server.id] === undefined)) await this.pingServers();
-    const best = this.bestServer(countryServersWithCore(this.core, this.state.servers, countryCode));
+    const best = this.bestServer(countryServers(this.state.servers, countryCode));
     if (best) await this.selectServer(best.id);
   }
 
@@ -1048,7 +999,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
       progress.reach("profile", "config_invalid");
       this.gamePassword = randomBytes(24).toString("hex");
       await this.refreshServiceRoutePolicy(server);
-      const config = buildXrayConfigWithCore(this.core, this.serviceProfileFor(server), server, this.state.settings, this.gamePassword);
+      const config = buildXrayConfig(this.serviceProfileFor(server), server, this.state.settings, this.gamePassword);
       this.lastConfig = config;
       this.lastTuic = server.tuic;
       progress.reach("core", "core_start_failed");
@@ -1116,10 +1067,10 @@ export class AppController extends EventEmitter<AppControllerEvents> {
    */
   private async automaticConnectFallback(server: TunnelServer, failed: ReadonlySet<string>): Promise<TunnelServer | null> {
     if (!this.state.settings.automaticServer || failed.size >= MAX_AUTOMATIC_CONNECT_SERVERS) return null;
-    const network = this.currentNetworkKey();
+    const network = this.protocolHistory.networkKey();
     if (!network) return null;
     const node = nodeIdForServer(server) ?? server.id;
-    await this.protocolHistory.update((history) => this.recordProtocolFailure(history, network, protocolOf(server), node, server.id));
+    await this.protocolHistory.update((history) => recordFailure(history, network, protocolOf(server), node, Date.now(), server.id));
     const next = this.bestServer(this.state.servers.filter((item) => !failed.has(item.id)));
     if (!next) return null;
     this.state.selectedServerId = next.id;
@@ -1139,7 +1090,6 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     // Account expiry and background Home decisions never release a guest's boundary.
     if (this.guestConnection.active) return (by === "user" && code === "user") || (by === "system" && code === null)
       ? this.disconnectGuest() : Promise.resolve();
-    this.tunnelProbe.cancel();
     this.cancelRouteProbes();
     void this.telemetry.finish(by, code);
     this.cancelTunnelRecovery();
@@ -1234,9 +1184,6 @@ export class AppController extends EventEmitter<AppControllerEvents> {
   }
 
   async shutdown(reason: "quit" | "app_update" = "quit"): Promise<void> {
-    this.pingGeneration++;
-    this.serverPinger.cancel();
-    this.tunnelProbe.cancel();
     this.cancelRouteProbes();
     if (this.serviceRoutesRetry) clearTimeout(this.serviceRoutesRetry);
     this.serviceRoutesRetry = null;
@@ -1273,10 +1220,9 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     // pings taken through it say nothing about the servers: keep the last real ones.
     if (this.tunnelCapturesPings()) return this.refreshLiveLoad();
     const servers = [...this.state.servers];
-    const generation = this.pingGeneration;
     this.pingPromise = (async () => {
-      const [latencies] = await Promise.all([this.serverPinger.measure(servers, () => measureServerLatencies(servers)), this.refreshLiveLoad()]);
-      if (generation !== this.pingGeneration || !sameServers(servers, this.state.servers) || this.tunnelCapturesPings()) return;
+      const [latencies] = await Promise.all([measureServerLatencies(servers), this.refreshLiveLoad()]);
+      if (!sameServers(servers, this.state.servers) || this.tunnelCapturesPings()) return;
       this.endpointLatencies = latencies;
       this.patch({ serverLatencies: this.displayedRouteLatencies(latencies) });
       this.latenciesMeasuredAt = Date.now();
@@ -1527,7 +1473,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
         if (generation !== this.loginGeneration) return;
         this.accessToken = status.accessToken;
         await this.secureStore.put("access_token", Buffer.from(status.accessToken));
-        if (this.approvalsCore.isAccountHint(status.accountHint)) await this.secureStore.put("account_hint", Buffer.from(status.accountHint));
+        if (isAccountHint(status.accountHint)) await this.secureStore.put("account_hint", Buffer.from(status.accountHint));
         this.patch({ sessionAvailable: true });
         this.startLiveEvents();
         try {
@@ -1552,7 +1498,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     if (this.guestConnection.active) return;
     const plaintext = decryptTunnelProfile(this.identity, response.profile);
     try {
-      const profile = prepareProfileWithCore(this.core, plaintext, subscriptionId);
+      const profile = prepareTunnelProfile(plaintext, subscriptionId);
       if (this.profile?.subscriptionId === profile.subscriptionId && this.profile.serviceRoutes) profile.serviceRoutes = this.profile.serviceRoutes;
       await this.applyTunnelProfile(profile);
     } finally {
@@ -1925,7 +1871,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     if (this.serviceRoutesRollback || !profile || !this.accessToken) return false;
     await this.serviceRouteState.load().catch(() => {});
     if (!profile.serviceRoutes && !this.serviceRouteState.enrolled(profile.subscriptionId)
-      && !this.remoteFlag("service_routes")) return false;
+      && !flagEnabled(this.remoteStored?.config ?? null, "service_routes", this.identity.deviceId())) return false;
     const endpoint = extractServerEndpoint(server.outbound); const key = serviceServerKey(server);
     if (!endpoint || !key) return false;
     const previous = this.serviceRouteState.good(profile.subscriptionId) ?? profile.serviceRoutes;
@@ -2026,7 +1972,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
       this.holdRestartForGame("serviceRoutes", "Новые сервисные маршруты");
       return;
     }
-    const candidate = buildXrayConfigWithCore(this.core, candidateProfile, server, this.state.settings, this.gamePassword);
+    const candidate = buildXrayConfig(candidateProfile, server, this.state.settings, this.gamePassword);
     const compiled = compiledServiceRoutes(candidate);
     if (compiled && ["unsupported", "error", "suspended"].includes(compiled.status.state)) {
       this.serviceRouteStatusChanged(compiled.status); this.serviceRouteState.discard(profile.subscriptionId);
@@ -2132,7 +2078,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     if (!this.accessToken) return;
     if (watch) this.remoteWatchedUntil = Date.now() + REMOTE_WATCH_MS;
     const response = await this.withSession((token) => this.api.remoteDevices(token));
-    const commands = parseIssuedCommandsWithCore(this.core, response.commands);
+    const commands = parseIssuedCommands(response.commands);
     const notes = { ...this.state.remote.notes };
     for (const command of commands) {
       const key = this.replyKeys.get(command.id);
@@ -2141,7 +2087,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
       const link = command.state === "done" && command.detail ? openReply(key, command.detail) : null;
       if (link) notes[command.id] = link;
     }
-    this.patch({ remote: { devices: parseRemoteDevicesWithCore(this.core, response.devices), commands, notes, loadedAt: Date.now() } });
+    this.patch({ remote: { devices: parseRemoteDevices(response.devices), commands, notes, loadedAt: Date.now() } });
   }
 
   private refreshRemoteIfWatched(): void {
@@ -2155,9 +2101,9 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     if (!this.state.remote.devices.some((item) => item.deviceId === deviceId && item.remote)) {
       throw new Error("Устройство недоступно для пульта");
     }
-    const reply = command === "collect_diagnostics" ? createReplyKey(this.core.mode === "rust" ? this.replyCrypto : null) : null;
+    const reply = command === "collect_diagnostics" ? createReplyKey() : null;
     const response = await this.withSession((token) => this.api.issueCommand(token, deviceId, command, reply?.replyKey ?? null));
-    const [issued] = parseIssuedCommandsWithCore(this.core, [response.command]);
+    const [issued] = parseIssuedCommands([response.command]);
     if (issued && reply) this.replyKeys.set(issued.id, reply.privateKey);
     await this.refreshRemote(false);
   }
@@ -2182,7 +2128,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
   private async takeNotices(): Promise<void> {
     if (!this.accessToken) return;
     const response = await this.withSession((token) => this.api.takeNotifications(token));
-    for (const notice of parseAccountNoticesWithCore(this.core, response.notifications)) {
+    for (const notice of parseAccountNotices(response.notifications)) {
       if (this.shownNotices.has(notice.id)) continue;
       this.shownNotices.add(notice.id);
       if (this.shownNotices.size > MAX_HANDLED_COMMANDS) {
@@ -2203,7 +2149,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
   private async takeAndRunCommands(): Promise<void> {
     if (!this.accessToken) return;
     const response = await this.withSession((token) => this.api.takeCommands(token));
-    for (const command of parseDeliveredCommandsWithCore(this.core, response.commands)) {
+    for (const command of parseDeliveredCommands(response.commands)) {
       if (this.handledCommands.has(command.id)) continue;
       this.handledCommands.add(command.id);
       if (this.handledCommands.size > MAX_HANDLED_COMMANDS) {
@@ -2265,7 +2211,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
             body: "Её запросили с другого вашего устройства. Отчёт зашифрован и откроется только там.",
             tab: "profile",
           });
-          return { result: "done", detail: sealForReply(command.replyKey, link, this.core.mode === "rust" ? this.replyCrypto : null) };
+          return { result: "done", detail: sealForReply(command.replyKey, link) };
         }
       }
     } catch (error) {
@@ -2281,7 +2227,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     this.approvalsTimer = null;
     let approvals: PendingApproval[];
     try {
-      approvals = this.approvalsCore.parseApprovals((await this.withSession((token) => this.api.approvals(token))).approvals);
+      approvals = parseApprovals((await this.withSession((token) => this.api.approvals(token))).approvals);
     } catch (error) {
       this.addLog(`Запросы на вход: ${messageOf(error)}`);
       return;
@@ -2305,7 +2251,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
 
   async answerApproval(id: string, number: number | null): Promise<ApprovalAnswerResult> {
     const approval = this.state.pendingApprovals.find((item) => item.id === id);
-    if (!approval || !this.approvalsCore.isApprovalAnswer(approval, number)) throw new Error("Запрос на вход уже обработан или истёк");
+    if (!approval || !isApprovalAnswer(approval, number)) throw new Error("Запрос на вход уже обработан или истёк");
     try {
       const response = await this.withSession((token) => this.api.decideApproval(token, id, number));
       return response.state === "approved" ? "approved" : "declined";
@@ -2339,7 +2285,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
       await this.withdrawPresence();
       return;
     }
-    const report = this.loadCore.presenceReport(this.state.status, this.activeMainServer());
+    const report = presenceReport(this.state.status, this.activeMainServer());
     const fresh = Date.now() - this.sentPresenceAt < PRESENCE_REFRESH_MS - 10_000;
     if (!force && fresh && samePresence(this.sentPresence, report)) return;
     const result = await this.withSession((token) => this.api.reportPresence(token, report));
@@ -2368,9 +2314,6 @@ export class AppController extends EventEmitter<AppControllerEvents> {
       const fetched = await this.remoteConfig.fetch();
       if (!fetched) return;
       this.remoteStored = mergeFetched(this.remoteStored, fetched, Date.now(), !outside || this.tunnelActive());
-      // Compared only: the TypeScript parse stays the answer in every mode.
-      this.core.run("remoteConfig.parseRemoteConfig", fetched.response, () => fetched.config);
-      this.applyCoreMode();
       await this.remoteConfigStore.save(this.remoteStored);
       void this.applyServiceRoutes().catch(() => {});
       await this.updateAnnouncements();
@@ -2389,11 +2332,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
   }
 
   private announcements(): AppAnnouncement[] {
-    const config = this.remoteStored?.config ?? null;
-    const dismissed = this.notices.dismissed();
-    const now = Date.now();
-    return this.core.run("remoteConfig.visibleAnnouncements", { config, dismissed: [...dismissed], now },
-      () => visibleAnnouncements(config, dismissed, now), isAnnouncementList)
+    return visibleAnnouncements(this.remoteStored?.config ?? null, this.notices.dismissed(), Date.now())
       .map((item) => item.linkUrl && !isAllowedExternalUrl(item.linkUrl) ? { ...item, linkUrl: null } : item);
   }
 
@@ -2409,7 +2348,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
 
   private async checkExpiry(): Promise<void> {
     // Signed in, the account's reminders before the end come from the notification center.
-    const due = expiryNoticesWithCore(this.core, this.state.account?.subscriptions ?? [], this.notices.notified(), Date.now())
+    const due = expiryNotices(this.state.account?.subscriptions ?? [], this.notices.notified(), Date.now())
       .filter((item) => !this.accessToken || item.milestone === "expired");
     if (!due.length) return;
     await this.notices.remember(due.map((item) => item.key));
@@ -2424,7 +2363,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
       const record = typeof value === "object" && value !== null ? value as Record<string, unknown> : {};
       const revision = record.revision;
       this.settingsRevision = typeof revision === "number" && Number.isSafeInteger(revision) && revision >= 0 ? revision : 0;
-      this.pendingSync = this.settingsCore.parsePending(record.pending);
+      this.pendingSync = parsePending(record.pending);
       this.favoritesJoined = record.favoritesJoined === true;
       this.favoriteReconciledLocal = new Set(Array.isArray(record.favoriteLocal)
         ? record.favoriteLocal.filter((id): id is string => typeof id === "string").slice(0, 200)
@@ -2455,7 +2394,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
       return;
     }
     if (!next.syncSettings) return;
-    const changes = this.settingsCore.syncedChanges(previous, next);
+    const changes = syncedChanges(previous, next);
     // Until the first exchange joins them, favourites are not edits of the account's list.
     if (!this.favoritesJoined) delete changes.favoriteNodes;
     if (!Object.keys(changes).length) return;
@@ -2479,22 +2418,22 @@ export class AppController extends EventEmitter<AppControllerEvents> {
   private async exchangeSettings(): Promise<void> {
     if (!this.state.settings.syncSettings || !this.accessToken) return;
     const sent = { ...this.pendingSync };
-    let document = this.settingsCore.parseSettingsDocument(Object.keys(sent).length
+    let document = parseSettingsDocument(Object.keys(sent).length
       ? await this.withSession((token) => this.api.updateSettings(token, sent))
       : await this.withSession((token) => this.api.settings(token)));
     if (document?.revision === 0) {
       // Nothing saved for this account yet: this computer's settings become the shared ones.
-      const seed = this.settingsCore.portableSettings(this.state.settings);
-      document = this.settingsCore.parseSettingsDocument(await this.withSession((token) => this.api.updateSettings(token, seed)));
+      const seed = portableSettings(this.state.settings);
+      document = parseSettingsDocument(await this.withSession((token) => this.api.updateSettings(token, seed)));
     }
     if (!document) throw new Error("Сервер вернул некорректные настройки");
-    this.pendingSync = this.settingsCore.withoutConfirmed(this.pendingSync, sent);
+    this.pendingSync = withoutConfirmed(this.pendingSync, sent);
     if (!this.favoritesJoined) await this.joinFavorites(document.settings.favoriteNodes ?? undefined);
     this.settingsRevision = document.revision;
     await this.saveSyncState();
     this.lastSettingsSyncAt = Date.now();
     if (!this.state.settings.syncSettings) return;
-    const patch = this.settingsCore.remotePatch(this.state.settings, document.settings, this.pendingSync);
+    const patch = remotePatch(this.state.settings, document.settings, this.pendingSync);
     if (Object.keys(patch).length) {
       this.addLog(`Настройки синхронизированы с аккаунтом: ${Object.keys(patch).join(", ")}`);
       await this.updateSettings(patch, "sync");
@@ -2513,7 +2452,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
       if (theirs !== undefined) await this.updateSettings({ favoriteNodes: theirs }, "sync");
       return;
     }
-    const joined = theirs === undefined ? mine : unionNodeListsWithCore(this.core, mine, theirs);
+    const joined = theirs === undefined ? mine : unionNodeLists(mine, theirs);
     if (joined !== mine) await this.updateSettings({ favoriteNodes: joined }, "sync");
     if (joined !== theirs) this.pendingSync = { ...this.pendingSync, favoriteNodes: joined };
     this.favoritesJoined = true;
@@ -2534,14 +2473,12 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     this.reconcilingFavorites = true;
     try {
       const settings = this.state.settings;
-      const result = reconcileFavoritesWithCore(
-        this.core,
-        settings.favoriteNodes,
-        this.favoriteReconciledLocal,
-        settings.favoriteServerIds,
-        this.state.servers,
+      const result = reconcileFavorites(
+        { nodes: parseNodeList(settings.favoriteNodes), reconciledLocal: this.favoriteReconciledLocal },
+        new Set(settings.favoriteServerIds),
+        serversByNode(this.state.servers),
       );
-      const nodes = result.nodes;
+      const nodes = canonicalNodeList(result.nodes);
       const ids = [...result.local];
       this.favoriteReconciledLocal = result.local;
       await this.saveSyncState();
@@ -2558,8 +2495,6 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     if (raw) {
       try {
         return DeviceIdentity.restore(JSON.parse(raw.toString("utf8")) as SerializedIdentity);
-      } catch {
-        throw new Error("Не удалось восстановить вход. Проверьте доступ к системному хранилищу ключей.");
       } finally {
         raw.fill(0);
       }
@@ -2683,7 +2618,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     // Guest core diagnostics can contain local endpoints; never persist them or invitation credentials.
     if (this.guestConnection.active) return;
     this.addLog(line);
-    const code = classifyCoreLogLineWithCore(this.core, line);
+    const code = classifyCoreLogLine(line);
     if (!code) return;
     if (CORE_FAILURE_CODES.has(code)) this.coreFailure = code;
     this.telemetry.record((session) => session.coreLog(code));
@@ -2761,7 +2696,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
             if (server) {
               this.patch({ selectedServerId: server.id });
               await this.persistSelectedServer(server.id);
-              this.lastConfig = buildXrayConfigWithCore(this.core, this.profile, server, this.state.settings, this.gamePassword);
+              this.lastConfig = buildXrayConfig(this.profile, server, this.state.settings, this.gamePassword);
               this.lastTuic = server.tuic;
             }
           }
@@ -2886,7 +2821,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
           codes = ["other"];
           healthy = await routes.probeCurrent().catch(() => false);
         } else {
-          healthy = controlHealthy && await this.checkTunnelHealth({ onFailure: (failures) => { codes = failures; } });
+          healthy = controlHealthy && await isTunnelHealthy({ onFailure: (failures) => { codes = failures; } });
         }
       }
       if (generation !== this.connectionGeneration || this.state.status !== "connected") return;
@@ -2932,7 +2867,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
   private async verifyTunnelReadiness(generation: number, onFailure?: (codes: string[]) => void): Promise<void> {
     if (this.xray.serviceRoutes?.authentication && await this.xray.isHealthy()) return;
     let failures: string[] = [];
-    const healthy = await this.checkTunnelHealth({
+    const healthy = await isTunnelHealthy({
       startup: true,
       shouldContinue: () => generation === this.connectionGeneration && this.xray.isRunning(),
       onFailure: (codes) => { failures = codes; onFailure?.(codes); },
@@ -3249,7 +3184,6 @@ export class AppController extends EventEmitter<AppControllerEvents> {
 
   private async stopTunnelForReplacement(): Promise<void> {
     if (this.guestConnection.active) throw new Error("Сначала завершите гостевой режим.");
-    this.tunnelProbe.cancel();
     this.cancelRouteProbes();
     this.cancelTunnelRecovery();
     this.nextAttemptCause = "server_switch";
@@ -3283,107 +3217,6 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     return this.remoteStored?.config.maintenance ?? [];
   }
 
-  /** The maintenance window that keeps the app off this server now, if any. */
-  private maintenanceWindowOf(server: TunnelServer, now: number): MaintenanceWindow | null {
-    const windows = this.maintenanceWindows();
-    const nodeId = nodeIdForServer(server);
-    return this.core.run("maintenance.maintenanceFor", { windows, nodeId, now },
-      () => maintenanceFor(windows, nodeId, now), isMaintenanceWindowOrNull);
-  }
-
-  /** A remote switch for this install, by the private rollout bucket. */
-  private remoteFlag(key: string): boolean {
-    const config = this.remoteStored?.config ?? null;
-    const salt = this.identity.deviceId();
-    return this.core.run("remoteConfig.flagEnabled", { config, key, salt }, () => flagEnabled(config, key, salt), isBoolean);
-  }
-
-  /** Stage 2 of the Rust migration: the loaded module, compared with TypeScript or in charge per remote config. */
-  useRustCore(status: LevikCoreStatus): void {
-    this.openDropRecords = status.state === "loaded" ? status.module.openDropRecords : undefined;
-    this.openDropAgreement = status.state === "loaded" ? status.module.openDropAgreement : undefined;
-    this.openDropSource = status.state === "loaded" ? status.module.openDropSource : undefined;
-    this.openDropTargets = status.state === "loaded" ? status.module.openDropTargets : undefined;
-    this.startDropRelay = status.state === "loaded" ? status.module.startDropRelay : undefined;
-    this.nativeDropLan = status.state === "loaded" && status.module.startDropLanDial && status.module.openDropLanListener
-      ? { dial: status.module.startDropLanDial, listen: status.module.openDropLanListener } : undefined;
-    this.createApiDiscovery = status.state === "loaded" ? status.module.createApiDiscovery : undefined;
-    this.serverPinger.useRustCore(status.state === "loaded" ? status.module.startServerPings : undefined);
-    this.tunnelProbe.useRustCore(status.state === "loaded" ? status.module.startTunnelProbe : undefined);
-    const version = status.state === "loaded" ? status.info.version : null;
-    this.core = new RustCore(coreBridge(status), (line) => this.recordDiagnostic(line), "ts", version);
-    this.routeProbes.useRustCore(() => this.core, status.state === "loaded" ? status.module.openRouteProbe : undefined,
-      () => this.recordDiagnostic("Rust-ядро: измерение маршрута не подтверждено"));
-    this.xray.useRustCore(() => this.core, status.state === "loaded" ? status.module.startXrayRequest : undefined,
-      () => this.recordDiagnostic("Rust-ядро: локальный API или проверка маршрута не подтвердили запрос"),
-      status.state === "loaded" ? status.module.startServiceProbe : undefined,
-      status.state === "loaded" ? status.module.openRouteProbe : undefined);
-    this.telemetry.useCore(() => this.core.tally());
-    this.telemetry.useRustCore(this.core, status.state === "loaded" ? status.module.openTelemetryQueue : undefined,
-      () => this.recordDiagnostic("Rust-ядро: очередь анонимных отчётов использует резервную реализацию"));
-    const openConfigCache = status.state === "loaded" ? status.module.openConfigCache : undefined;
-    const reportCache = () => this.recordDiagnostic("Rust-ядро: кэш конфигурации использует резервную реализацию");
-    this.api?.useRustCore(this.core, this.createApiDiscovery,
-      () => this.recordDiagnostic("Rust-ядро: выбор API использует резервную реализацию"));
-    this.liveEvents?.useRustCore(this.core);
-    this.remoteConfigStore.useRustCore(this.core, openConfigCache, reportCache);
-    this.endpointsStore.useRustCore(this.core, openConfigCache, reportCache);
-    this.applyCoreMode();
-    this.identity.useRustCore(this.core, status.state === "loaded" ? status.module.restoreIdentity : undefined);
-    this.replyCrypto = status.state === "loaded" ? status.module.replyCrypto ?? null : null;
-    this.secureStore.useRustCore(this.core, status.state === "loaded" ? status.module.openSecureStore : undefined,
-      () => this.recordDiagnostic("Rust-ядро: защищённое хранилище недоступно, используется системное хранилище Electron"));
-    this.publicHttp = null;
-    try { this.publicHttp = status.state === "loaded" ? status.module.createPublicClient?.() ?? null : null; }
-    catch { this.recordDiagnostic("Rust-ядро: служебный HTTP-клиент недоступен"); }
-  }
-
-  private checkTunnelHealth(options: TunnelHealthOptions = {}): Promise<boolean> {
-    return this.tunnelProbe.check(options, isTunnelHealthy);
-  }
-  private measureTunnelTraffic(current: () => boolean): Promise<number | null> {
-    return this.tunnelProbe.traffic(current, measureTraffic);
-  }
-
-  private applyCoreMode(): void {
-    this.core.setMode(coreModeFor(this.remoteStored?.config ?? null, this.identity.deviceId()));
-  }
-
-
-  /** The salted key of the network this computer is on, see ProtocolHistoryStore.networkKey. */
-  private currentNetworkKey(): string | null {
-    const interfaces = networkInterfaces();
-    return this.core.run("smartAuto.networkKey", { salt: this.protocolHistory.localSalt(), interfaces },
-      () => this.protocolHistory.networkKey(interfaces), isStringOrNull);
-  }
-
-  private recordProtocolSuccess(history: ProtocolHistory, networkKey: string, protocol: string, serverId: string): ProtocolHistory {
-    const now = Date.now();
-    return this.core.run("smartAuto.recordSuccess", { history, networkKey, protocol, now, serverId },
-      () => recordSuccess(history, networkKey, protocol, now, serverId), isProtocolHistory);
-  }
-
-  private recordProtocolFailure(history: ProtocolHistory, networkKey: string, protocol: string, nodeId: string, failedServerId: string): ProtocolHistory {
-    const now = Date.now();
-    return this.core.run("smartAuto.recordFailure", { history, networkKey, protocol, nodeId, now, failedServerId },
-      () => recordFailure(history, networkKey, protocol, nodeId, now, failedServerId), isProtocolHistory);
-  }
-
-  private overloadDue(input: Parameters<typeof overloadMoveDue>[0]): boolean {
-    return this.core.run("smartAuto.overloadMoveDue", input, () => overloadMoveDue(input), isBoolean);
-  }
-
-  private relayHostSet(servers: Array<{ host: string | null; countryCode: string }>): Set<string> {
-    return new Set(this.core.run("smartAuto.relayHosts", servers, () => [...relayHosts(servers)], isStringList));
-  }
-
-  private nextSmartRung(ranked: RankedServer[]): RankedServer | null {
-    const triedProtocols = this.smartLadder.triedProtocols();
-    const triedIds = this.smartLadder.triedIds();
-    return this.core.run("smartAuto.nextRung", { ranked, triedProtocols: [...triedProtocols], triedIds: [...triedIds] },
-      () => nextRung(ranked, triedProtocols, triedIds), isRankedServerOrNull);
-  }
-
   /** Node load by server id for the list; a full node shows as full. */
   private serverLoad(now: number): Record<string, number> {
     const view = this.loadView(now);
@@ -3415,7 +3248,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
       load: useLive ? live.load : config?.config.nodeLoad ?? {},
       ageMs: now - fetchedAt,
       full: Object.fromEntries((fullFresh ? live.full : []).map((id) => [id, 1])),
-      quality: this.loadCore.currentQuality(live, now),
+      quality: currentQuality(live, now),
     };
   }
 
@@ -3430,7 +3263,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
       const answer = await this.liveLoadClient.fetch(this.liveLoad?.etag ?? null);
       if (!answer) return;
       const now = Date.now();
-      this.liveLoad = this.loadCore.merge(this.liveLoad, answer, now, throughTunnel);
+      this.liveLoad = mergeLiveLoad(this.liveLoad, answer, now, throughTunnel);
       this.trackFullServers(now);
       const load = this.serverLoad(now);
       if (JSON.stringify(load) !== JSON.stringify(this.state.serverLoad)) this.patch({ serverLoad: load });
@@ -3461,7 +3294,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     if (since === null) return;
     // Confirm with fresh readings while the node is full.
     void this.refreshLiveLoad(FULL_NODE_RECHECK_MS, 0);
-    const due = (bestScore: number | null) => this.overloadDue({
+    const due = (bestScore: number | null) => overloadMoveDue({
       fullSince: this.fullSince.get(current.id) ?? null,
       loadAgeMs: now - (this.liveLoad?.fetchedAt ?? 0),
       idle: this.idleMeter.idle(now),
@@ -3494,7 +3327,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
 
   private currentScore(server: TunnelServer, now: number): number {
     const history = this.protocolHistory.current();
-    const network = this.currentNetworkKey();
+    const network = this.protocolHistory.networkKey();
     return smartScore(this.smartCandidate(server, this.loadView(now), now, history, network, this.serverRelayHosts()), currentAdvice(this.remoteStored, now));
   }
 
@@ -3502,7 +3335,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
   private serverMaintenance(now: number): Record<string, number> {
     const marked: Record<string, number> = {};
     for (const server of this.state.servers) {
-      const window = this.maintenanceWindowOf(server, now);
+      const window = maintenanceFor(this.maintenanceWindows(), nodeIdForServer(server), now);
       if (window) marked[server.id] = window.endsAt;
     }
     return marked;
@@ -3522,8 +3355,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     if (this.maintenanceMoving || this.state.busy || this.state.status !== "connected" || !this.xray.isRunning()) return;
     const current = this.selectedServer();
     if (!current) return;
-    const window = this.maintenanceWindowOf(current, now);
-    const move = this.core.run("maintenance.maintenanceMove", { window, now }, () => maintenanceMove(window, now), isMaintenanceMove);
+    const move = maintenanceMove(maintenanceFor(this.maintenanceWindows(), nodeIdForServer(current), now), now);
     if (this.xray.serviceRoutes?.smartAutoActive) {
       if (now >= this.nextConnectedLoadAt) {
         this.nextConnectedLoadAt = now + LIVE_LOAD_CONNECTED_EVERY_MS / 2 + Math.floor(Math.random() * 5_000);
@@ -3549,10 +3381,10 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     if ((move === "when-idle" && (!this.idleMeter.idle(now) || this.gamePlaying)) || this.liveMatch()) return;
     // The same country first, docs/app-platform.md "Server list".
     const others = this.state.servers.filter((item) => item.id !== current.id);
-    const neighbours = countryServersWithCore(this.core, others, current.countryCode);
+    const neighbours = countryServers(others, current.countryCode);
     const target = [neighbours, others]
       .map((pool) => this.bestServer(pool))
-      .find((item) => item && !this.maintenanceWindowOf(item, now));
+      .find((item) => item && !maintenanceFor(this.maintenanceWindows(), nodeIdForServer(item), now));
     if (!target) return;
     this.maintenanceMoving = true;
     try {
@@ -3581,8 +3413,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
       online ? this.remoteConfig.diagnose().catch(() => null) : Promise.resolve(null),
     ]);
     const server = this.selectedServer();
-    const report = this.core.run("diagnosis.parseDiagnoseReport", raw, () => parseDiagnoseReport(raw), isDiagnoseReportOrNull);
-    const input: DiagnosisInput = {
+    const verdict = diagnosisVerdict({
       network: !online ? "none" : captive ? "captive" : "ok",
       cellular: false,
       vpn,
@@ -3591,12 +3422,10 @@ export class AppController extends EventEmitter<AppControllerEvents> {
       protocol: server ? protocolOf(server) : null,
       failingServices: checks.filter((item) => !item.ok).map((item) => item.slug),
       anyServiceWorks: checks.some((item) => item.ok),
-      report,
+      report: parseDiagnoseReport(raw),
       now: Date.now(),
-    };
-    const verdict = this.core.run("diagnosis.diagnosisVerdict", input, () => diagnosisVerdict(input), isDiagnosisVerdict);
-    const summary = this.core.run("diagnosis.diagnosisSummary", { result: verdict, networkSettings: true },
-      () => diagnosisSummary(verdict, { networkSettings: true }), isDiagnosisSummary);
+    });
+    const summary = diagnosisSummary(verdict, { networkSettings: true });
     this.lastDiagnosis = { at: Date.now(), summary };
     this.addLog(`Диагностика: ${summary.verdict}`);
     return summary;
@@ -3629,14 +3458,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     const pool = xrayServers.length ? xrayServers : offered;
     const nonRussian = pool.filter((item) => item.countryCode.toUpperCase() !== "RU");
     // Servers going into maintenance are left out while others remain.
-    const candidates = nonRussian.length ? nonRussian : pool;
-    const windows = this.maintenanceWindows();
-    const now = Date.now();
-    const kept = this.core.run("maintenance.avoidMaintenance", { nodeIds: candidates.map(nodeIdForServer), windows, now }, () => {
-      const usable = avoidMaintenance(candidates, windows, nodeIdForServer, now);
-      return usable.map((server) => candidates.indexOf(server));
-    }, isIndexList(candidates.length));
-    return kept.flatMap((index) => candidates[index] ?? []);
+    return avoidMaintenance(nonRussian.length ? nonRussian : pool, this.maintenanceWindows(), nodeIdForServer, Date.now());
   }
 
   /** Best first, docs/app-platform.md "Smart Auto". */
@@ -3644,16 +3466,13 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     const now = Date.now();
     const view = this.loadView(now);
     const history = this.protocolHistory.current();
-    const network = this.currentNetworkKey();
+    const network = this.protocolHistory.networkKey();
     const relays = this.serverRelayHosts();
     const candidates = servers.map((server) => this.smartCandidate(server, view, now, history, network, relays));
-    const advice = currentAdvice(this.remoteStored, now);
-    const spread = spreadSeed(this.protocolHistory.localSalt(), now);
-    return this.core.run("smartAuto.rankSmart", { candidates, advice, spread, now }, () => rankSmart(candidates, advice, spread, now), isRankedList);
+    return rankSmart(candidates, currentAdvice(this.remoteStored, now), spreadSeed(this.protocolHistory.localSalt(), now));
   }
 
   private cancelRouteProbes(): void {
-    this.routeProbes.cancel();
     this.connectionIntent++;
     this.routeProbeAbort?.abort();
   }
@@ -3665,7 +3484,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
 
   private routeProbeSource(server: TunnelServer): Record<string, unknown> {
     const profile = { ...this.serviceProfileFor(server) }; delete profile.serviceRoutes;
-    return buildXrayConfigWithCore(this.core, profile, server, { ...this.state.settings, automaticServer: false }, this.gamePassword);
+    return buildXrayConfig(profile, server, { ...this.state.settings, automaticServer: false }, this.gamePassword);
   }
 
   private smartAutoLiveChanged(update: LiveAutoUpdate): void {
@@ -3674,7 +3493,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     if (!this.state.settings.automaticServer && update.currentId !== this.xray.serviceRoutes.mainServerId) return;
     const server = this.state.servers.find((candidate) => candidate.id === update.currentId);
     if (!server) return;
-    this.routeMeasurementNetwork = this.currentNetworkKey();
+    this.routeMeasurementNetwork = this.protocolHistory.networkKey();
     for (const [id, measurement] of Object.entries(update.measurements)) {
       const candidate = this.state.servers.find((item) => item.id === id);
       if (!candidate) continue;
@@ -3693,7 +3512,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
 
   private routeResource(server: TunnelServer, now: number) {
     const endpoint = serverSyncEndpoint(server);
-    return this.loadCore.currentRouteResource(this.liveLoad, endpoint ? [
+    return currentRouteResource(this.liveLoad, endpoint ? [
       endpoint.port === null ? null : nodeIdForEndpoint(endpoint.host, endpoint.port), nodeIdForHost(endpoint.host),
     ] : [], now);
   }
@@ -3708,7 +3527,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
   }
 
   private measuredRoute(server: TunnelServer, now: number): RouteMeasurement | undefined {
-    if (this.routeMeasurementNetwork !== this.currentNetworkKey()
+    if (this.routeMeasurementNetwork !== this.protocolHistory.networkKey()
       || this.routeMeasurementKeys[server.id] !== this.routeMeasurementKey(server)) return undefined;
     const measurement = this.routeMeasurements[server.id];
     return measuredRouteUsable(measurement, now) ? measurement : undefined;
@@ -3727,7 +3546,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
    * interrupt a running flow or report the current TUN's local accept as RTT. */
   private async refreshRouteMeasurements(): Promise<boolean> {
     if (!this.profile || this.profile.gameOnly || this.xray.isRunning()) return true;
-    const network = this.currentNetworkKey();
+    const network = this.protocolHistory.networkKey();
     const servers = this.automaticCandidates(this.state.servers).filter((server) => !server.tuic && serverSyncEndpoint(server)?.port != null);
     if (!servers.length) return true;
     if (network !== null && servers.every((server) => this.measuredRoute(server, Date.now()))) return true;
@@ -3751,9 +3570,9 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     }
     this.patch({ status: "connecting", statusDetail: "Smart Auto: проверяем маршруты…", busy: true });
     try {
-      const measurements = await measureRouteCandidates({ executable: this.xray.executablePath(), candidates, signal: abort.signal, core: this.routeProbes });
+      const measurements = await measureRouteCandidates({ executable: this.xray.executablePath(), candidates, signal: abort.signal });
       if (abort.signal.aborted || this.xray.isRunning() || !sameServers(snapshot, this.state.servers)
-        || network !== this.currentNetworkKey() || profile !== this.profile || token !== this.accessToken || intent !== this.connectionIntent) return false;
+        || network !== this.protocolHistory.networkKey() || profile !== this.profile || token !== this.accessToken || intent !== this.connectionIntent) return false;
       this.routeMeasurements = measurements; this.routeMeasurementKeys = keys; this.routeMeasurementNetwork = network;
       this.patch({ serverLatencies: this.displayedRouteLatencies(this.endpointLatencies) });
       return true;
@@ -3762,7 +3581,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     } finally {
       if (this.routeProbeAbort === abort) {
         this.routeProbeAbort = null;
-        if ((abort.signal.aborted || network !== this.currentNetworkKey() || !sameServers(snapshot, this.state.servers))
+        if ((abort.signal.aborted || network !== this.protocolHistory.networkKey() || !sameServers(snapshot, this.state.servers))
           && !this.xray.isRunning() && this.state.status === "connecting") {
           this.patch({ status: "disconnected", statusDetail: null, busy: false });
         }
@@ -3772,7 +3591,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
 
   /** Relay entries among the account's servers, see [relayHosts]. */
   private serverRelayHosts(): Set<string> {
-    return this.relayHostSet(this.state.servers.map((server) => ({
+    return relayHosts(this.state.servers.map((server) => ({
       host: extractServerEndpoint(server.outbound)?.host ?? null,
       countryCode: server.countryCode,
     })));
@@ -3839,25 +3658,25 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     void (async () => {
       await delay(delayMs);
       if (!current()) return;
-      const elapsed = await this.measureTunnelTraffic(current);
+      const elapsed = await measureTraffic(current);
       const passed = elapsed !== null;
       if (!current()) return;
-      const network = this.currentNetworkKey();
+      const network = this.protocolHistory.networkKey();
       const protocol = protocolOf(server);
       const checkedNode = nodeIdForServer(server);
       if (passed && checkedNode) this.telemetry.record((session) => session.trafficCheck(checkedNode, elapsed, true));
       if (passed) {
         this.smartLadder.reset();
-        if (network) await this.protocolHistory.update((history) => this.recordProtocolSuccess(history, network, protocol, server.id));
+        if (network) await this.protocolHistory.update((history) => recordSuccess(history, network, protocol, Date.now(), server.id));
         return;
       }
       // No handshake either: the tunnel is down, which the health check handles.
       // A handshake without a download is a throttled protocol.
-      if (!await this.checkTunnelHealth({ shouldContinue: current }) || !current()) return;
+      if (!await isTunnelHealthy({ shouldContinue: current }) || !current()) return;
       if (checkedNode) this.telemetry.record((session) => session.trafficCheck(checkedNode, FAILED_TRAFFIC_CHECK_MS, false));
       if (network) {
         const node = nodeIdForServer(server) ?? server.id;
-        await this.protocolHistory.update((history) => this.recordProtocolFailure(history, network, protocol, node, server.id));
+        await this.protocolHistory.update((history) => recordFailure(history, network, protocol, node, Date.now(), server.id));
       }
       this.addLog(`Smart Auto: ${protocolLabel(protocol)} не передаёт трафик через ${server.name}`);
       // The next server gets its own check once it connects.
@@ -3881,7 +3700,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
       return;
     }
     const candidates = this.automaticCandidates(this.state.servers);
-    const next = this.nextSmartRung(this.rankServers(candidates));
+    const next = nextRung(this.rankServers(candidates), this.smartLadder.triedProtocols(), this.smartLadder.triedIds());
     if (!next || next.id === failed.id) return;
     this.smartLadder.climbed();
     this.climbingLadder = true;
@@ -3935,7 +3754,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
   }
 
   private recordNetwork(): void {
-    const type = networkTypeOfInterfaceWithCore(this.core, this.xray.outboundInterfaceName ?? null);
+    const type = networkTypeOfInterface(this.xray.outboundInterfaceName ?? null);
     this.telemetry.record((session) => session.setNetwork(type));
   }
 
@@ -4047,11 +3866,6 @@ export class AppController extends EventEmitter<AppControllerEvents> {
       apiPort, TUNNEL_HEALTH_PORT,
       ...(games ? [GAME_DATA_PROBE_PORT, GAME_DIRECT_PORT, ...Array.from({ length: games }, (_item, index) => GAME_PROBE_PORT + index)] : []),
     ];
-  }
-
-  /** One line for the local diagnostics log only, not the in-app log. */
-  recordDiagnostic(line: string): void {
-    this.diskLog?.write(line.replace(/[\r\n]/g, " ").slice(0, 1_000));
   }
 
   private addLog(line: string): void {

@@ -1,7 +1,3 @@
-import { CoreXrayApi } from "../src/main/core/nativeXrayApi";
-import { loadLevikCore } from "../src/main/core/levikCore";
-import { RustCore } from "../src/main/core/rustCore";
-import type { ServiceRouteAuth } from "../src/main/vpn/serviceRoutes";
 import { afterEach, describe, expect, it } from "vitest";
 import { spawn, execFile, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { createServer, request, type Server } from "node:http";
@@ -13,23 +9,6 @@ import { once } from "node:events";
 import { overrideServiceRoute, queryServiceRouteStats, probeServiceRouteDns } from "../src/main/vpn/serviceRouteTransport";
 
 const executable = process.env.LEVIK_TEST_XRAY ?? resolve("../levik_vpn_macos/vendor/xray", `darwin-${process.arch}`, "xray");
-const transports = process.env.LEVIK_TEST_CORE ? ["node", "rust"] as const : ["node"] as const;
-function transport(mode: "node" | "rust") {
-  if (mode === "node") return { overrideServiceRoute, queryServiceRouteStats };
-  const modulePath = process.env.LEVIK_TEST_CORE;
-  if (!modulePath) throw new Error("TEST Rust module missing");
-  const loaded = loadLevikCore(modulePath);
-  if (loaded.state !== "loaded" || !loaded.module.startXrayRequest) throw new Error("TEST Rust local Xray API missing");
-  const api = new CoreXrayApi(); api.useRustCore(() => new RustCore(null, () => {}, "rust"), loaded.module.startXrayRequest, () => {});
-  return {
-    overrideServiceRoute: (balancer: string, target: string, endpoint = "127.0.0.1:47185", auth?: ServiceRouteAuth) =>
-      api.override(balancer, target, auth, () => { throw new Error("Unexpected TEST Node replay"); }, endpoint),
-    queryServiceRouteStats: async (auth: ServiceRouteAuth) => {
-      const value = await api.statistics(auth, () => { throw new Error("Unexpected TEST Node replay"); });
-      return { uplink: value.uplink, downlink: value.downlink };
-    },
-  };
-}
 let core: ChildProcessWithoutNullStreams | undefined;
 let upstream: Server | undefined;
 let dnsUpstream: ReturnType<typeof createTcpServer> | undefined;
@@ -86,8 +65,7 @@ describe("service route transport", () => {
     await accepted; abort.abort();
     expect(await probing).toBe(false); await closed;
   });
-  it.skipIf(process.platform !== "darwin" || !existsSync(executable)).each(transports)("switches only one live route using the real pinned core (%s)", async (mode) => {
-    const { overrideServiceRoute } = transport(mode);
+  it.skipIf(process.platform !== "darwin" || !existsSync(executable))("switches only one live route using the real pinned core", async () => {
     // Entirely loopback: no TUN, privileges, public network, customer keys or live VPN nodes.
     const api = await freePort(); const routeA = await freePort(); const routeB = await freePort();
     upstream = createServer((_req, res) => res.end("ordinary-data")); upstream.listen(0, "127.0.0.1"); await once(upstream, "listening");
@@ -110,8 +88,7 @@ describe("service route transport", () => {
     expect(await get(routeB, address.port)).toBe("ordinary-data");
     expect(core.exitCode).toBeNull();
   }, 15000);
-  it.skipIf(process.platform !== "darwin" || !existsSync(executable)).each(transports)("requires per-session authentication for API and probe ingress (%s)", async (mode) => {
-    const { overrideServiceRoute, queryServiceRouteStats } = transport(mode);
+  it.skipIf(process.platform !== "darwin" || !existsSync(executable))("requires per-session authentication for API and probe ingress", async () => {
     const api = await freePort(); const probe = await freePort();
     const auth = { port: api, user: "levik-service", password: "b".repeat(48) };
     const settings = { accounts: [{ user: auth.user, pass: auth.password }] };

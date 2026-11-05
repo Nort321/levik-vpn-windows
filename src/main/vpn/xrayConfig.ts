@@ -42,7 +42,6 @@ export function buildXrayConfig(
   server: TunnelServer,
   settings: AppSettings,
   gameProbePassword?: string,
-  servicePassword?: string,
 ): Record<string, unknown> {
   const games = settings.gameEnabled && profile.game?.enabled ? profile.game.servers : [];
   const gaming = games.length > 0 && Boolean(gameProbePassword);
@@ -178,7 +177,7 @@ export function buildXrayConfig(
     },
     policy: { system: { statsInboundDownlink: true, statsInboundUplink: true, statsOutboundDownlink: true, statsOutboundUplink: true } },
     stats: {},
-  }, { policy: profile.serviceRoutes, selected: server, servers: profile.servers, servicePassword,
+  }, { policy: profile.serviceRoutes, selected: server, servers: profile.servers,
     automaticServer: settings.automaticServer,
     ...(settings.splitTunnelMode === "only" ? { onlyProcesses: processes, insertionIndex: includedAppRule ? rules.indexOf(includedAppRule) : rules.length } : {}), directTag: "direct",
     prepareOutbound: (candidate) => withBootstrapResolution(withAlternateXhttpMux(withAntiDpi(candidate, settings))), gameOnly: profile.gameOnly });

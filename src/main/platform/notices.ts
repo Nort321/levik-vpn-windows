@@ -26,20 +26,13 @@ export function expiryMilestone(expireAt: number, now: number): ExpiryMilestone 
   return null;
 }
 
-/** A reminder with the key that remembers it was shown. */
-export interface ExpiryNotice {
-  key: string;
-  milestone: ExpiryMilestone;
-  notice: AppNotice;
-}
-
 /** One reminder per subscription, milestone and end date; renewing starts over. */
 export function expiryNotices(
   subscriptions: readonly SubscriptionSummary[],
   remembered: ReadonlySet<string>,
   now: number,
-): ExpiryNotice[] {
-  const result: ExpiryNotice[] = [];
+): Array<{ key: string; milestone: ExpiryMilestone; notice: AppNotice }> {
+  const result: Array<{ key: string; milestone: ExpiryMilestone; notice: AppNotice }> = [];
   for (const subscription of subscriptions) {
     const status = subscription.status.toLowerCase();
     if (!subscription.expireAt || (status !== "active" && status !== "expired")) continue;

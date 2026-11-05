@@ -1,4 +1,3 @@
-import type { RustCore } from "../core/rustCore";
 import { EventEmitter } from "node:events";
 import { nodeIdForServer } from "./favoriteNodes";
 import type { ConnectionStatus, TunnelServer } from "../../shared/contracts";
@@ -17,21 +16,14 @@ const MAX_LINE = 4_096;
 export class EventStreamParser {
   private buffer = "";
   private name = "message";
-  private afterCr = false;
 
   push(chunk: string): LiveEvent[] {
-    if (this.afterCr && chunk.length) {
-      if (chunk.startsWith("\n")) chunk = chunk.slice(1);
-      this.afterCr = false;
-    }
     this.buffer += chunk;
     const events: LiveEvent[] = [];
     for (;;) {
       const end = this.buffer.search(/\r\n|\r|\n/);
       if (end < 0) break;
       const line = this.buffer.slice(0, end);
-      if (line.length > MAX_LINE) throw new Error("event stream line too long");
-      this.afterCr = this.buffer[end] === "\r" && end === this.buffer.length - 1;
       this.buffer = this.buffer.slice(this.buffer.startsWith("\r\n", end) ? end + 2 : end + 1);
       if (line === "") {
         if ((LIVE_EVENTS as readonly string[]).includes(this.name)) events.push(this.name as LiveEvent);
@@ -50,16 +42,7 @@ export class EventStreamParser {
 export const IDLE_TIMEOUT_MS = 70_000;
 const RETRY_DELAYS_MS = [2_000, 5_000, 15_000, 30_000, 60_000];
 
-export interface RetryPlan { failures: number; delay: number }
-export function retryPlan(failures: number, received: boolean, random: number): RetryPlan {
-  const next = received ? 0 : failures + 1;
-  const base = RETRY_DELAYS_MS[Math.min(next, RETRY_DELAYS_MS.length - 1)] ?? 60_000;
-  return { failures: next, delay: base + Math.floor(random * base * 0.3) };
-}
-
-
-export type EventSourceStream = ReadableStream<Uint8Array> | ReadableStream<LiveEvent[]>;
-export type OpenStream = (signal: AbortSignal) => Promise<EventSourceStream>;
+export type OpenStream = (signal: AbortSignal) => Promise<ReadableStream<Uint8Array>>;
 
 export interface LiveEventsEvents {
   event: [LiveEvent];
@@ -74,8 +57,6 @@ export interface LiveEventsEvents {
 export class LiveEvents extends EventEmitter<LiveEventsEvents> {
   private controller: AbortController | null = null;
   private running = false;
-  private generation = 0;
-  private plan: typeof retryPlan = retryPlan;
   private failures = 0;
   private retry: ReturnType<typeof setTimeout> | null = null;
 
@@ -87,14 +68,6 @@ export class LiveEvents extends EventEmitter<LiveEventsEvents> {
     super();
   }
 
-  useRustCore(core: RustCore): void {
-    this.plan = (failures, received, random) => core.run("liveEvents.retryPlan", { failures, received, random },
-      () => retryPlan(failures, received, random), (value): value is RetryPlan =>
-        typeof value === "object" && value !== null && "failures" in value && Number.isInteger(value.failures)
-        && typeof value.failures === "number" && value.failures >= 0 && "delay" in value
-        && typeof value.delay === "number" && Number.isInteger(value.delay) && value.delay >= 2000 && value.delay < 78_000);
-  }
-
   get active(): boolean {
     return this.running;
   }
@@ -103,12 +76,11 @@ export class LiveEvents extends EventEmitter<LiveEventsEvents> {
     if (this.running) return;
     this.running = true;
     this.failures = 0;
-    void this.loop(++this.generation);
+    void this.loop();
   }
 
   stop(): void {
     this.running = false;
-    this.generation++;
     if (this.retry) clearTimeout(this.retry);
     this.retry = null;
     this.controller?.abort();
@@ -119,21 +91,22 @@ export class LiveEvents extends EventEmitter<LiveEventsEvents> {
   reconnectNow(): void {
     if (!this.running) return;
     this.failures = 0;
-    if (this.retry) clearTimeout(this.retry);
-    this.retry = null;
-    this.controller?.abort();
-    this.controller = null;
-    void this.loop(++this.generation);
+    if (this.retry) {
+      clearTimeout(this.retry);
+      this.retry = null;
+      void this.loop();
+    } else {
+      this.controller?.abort();
+    }
   }
 
-  private async loop(generation: number): Promise<void> {
-    if (!this.running || generation !== this.generation) return;
+  private async loop(): Promise<void> {
+    if (!this.running) return;
     const controller = new AbortController();
     this.controller = controller;
     let received = false;
     try {
       const stream = await this.open(controller.signal);
-      if (!this.running || generation !== this.generation) { await stream.cancel().catch(() => {}); return; }
       const reader = stream.getReader();
       const decoder = new TextDecoder();
       const parser = new EventStreamParser();
@@ -141,12 +114,10 @@ export class LiveEvents extends EventEmitter<LiveEventsEvents> {
       try {
         for (;;) {
           const chunk = await reader.read();
-          if (chunk.done || !this.running || generation !== this.generation) break;
+          if (chunk.done) break;
           clearTimeout(idle);
           idle = setTimeout(() => controller.abort(), IDLE_TIMEOUT_MS);
-          const events = Array.isArray(chunk.value) ? chunk.value : parser.push(decoder.decode(chunk.value, { stream: true }));
-          for (const event of events) {
-            if (!this.running || generation !== this.generation) break;
+          for (const event of parser.push(decoder.decode(chunk.value, { stream: true }))) {
             received = true;
             this.emit("event", event);
           }
@@ -156,7 +127,7 @@ export class LiveEvents extends EventEmitter<LiveEventsEvents> {
         reader.releaseLock();
       }
     } catch (error) {
-      if (this.isUnauthorized(error) && this.running && generation === this.generation) {
+      if (this.isUnauthorized(error)) {
         this.running = false;
         this.emit("unauthorized");
         return;
@@ -164,14 +135,14 @@ export class LiveEvents extends EventEmitter<LiveEventsEvents> {
     } finally {
       if (this.controller === controller) this.controller = null;
     }
-    if (!this.running || generation !== this.generation) return;
-    // The Rust decision and the fallback use the same random sample.
-    const plan = this.plan(this.failures, received, this.random());
-    this.failures = plan.failures;
+    if (!this.running) return;
+    // A stream that delivered events ended normally (lifetime) or broke later: retry soon.
+    this.failures = received ? 0 : this.failures + 1;
+    const base = RETRY_DELAYS_MS[Math.min(this.failures, RETRY_DELAYS_MS.length - 1)] ?? 60_000;
     this.retry = setTimeout(() => {
       this.retry = null;
-      void this.loop(generation);
-    }, plan.delay);
+      void this.loop();
+    }, base + Math.floor(this.random() * base * 0.3));
   }
 }
 

@@ -242,8 +242,6 @@ export type CompiledServiceRoutes = { auth?: ServiceRouteAuth; resolvers?: strin
   automatic?: { selectedId: string; enabled: boolean; candidates: LiveAutoCandidate[] } };
 const compiledPolicies = new WeakMap<Record<string, unknown>, CompiledServiceRoutes>();
 export function compiledServiceRoutes(config: Record<string, unknown>): CompiledServiceRoutes | undefined { return compiledPolicies.get(config); }
-/** A configuration built elsewhere (the Rust core) with its compiled routes. */
-export function adoptServiceRoutes(config: Record<string, unknown>, compiled: CompiledServiceRoutes): void { compiledPolicies.set(config, compiled); }
 /** Keep recovery's saved configuration aligned with an acknowledged live target without reloading the running core. */
 export function rememberAutomaticMain(config: Record<string, unknown> | null, serverId: string, enabled: boolean): void {
   if (!config) return;
@@ -259,8 +257,6 @@ export function rememberAutomaticMain(config: Record<string, unknown> | null, se
 export function withServiceRoutes(base: Record<string, unknown>, input: {
   policy: ServiceRoutePolicy | undefined; selected: TunnelServer; servers: TunnelServer[]; gameOnly?: boolean | undefined;
   automaticServer: boolean; applicationFilterUnsupported?: boolean; bootstrapEndpoints?: boolean; onlyProcesses?: readonly string[]; insertionIndex?: number; directTag: string; prepareOutbound: (server: TunnelServer) => Record<string, unknown>;
-  /** The local control password; fresh per configuration unless the caller supplies one. */
-  servicePassword?: string | undefined;
 }): Record<string, unknown> {
   const autoPolicy = !input.gameOnly ? automaticOrdinaryPolicy(input.servers) : undefined;
   if (!input.policy && autoPolicy && !serviceExitForServer(autoPolicy, input.selected)) return base;
@@ -306,7 +302,7 @@ export function withServiceRoutes(base: Record<string, unknown>, input: {
     .map((server) => candidateTags.get(server.id)!) : [];
   const plans: RouteRuntimePlan[] = [{ id: "__main", balancerTag: SERVICE_MAIN_BALANCER, primary: primaryMain,
     fallback: otherMain, finalTag: "levik-block", exits: candidateExits, ...(automatic ? { externallyManaged: true } : {}) }];
-  const auth: ServiceRouteAuth = { port: 47187, user: "levik-service", password: input.servicePassword ?? randomBytes(24).toString("hex") };
+  const auth: ServiceRouteAuth = { port: 47187, user: "levik-service", password: randomBytes(24).toString("hex") };
   const config = structuredClone(base);
   const outbounds: Record<string, unknown>[] = Array.isArray(config.outbounds) ? config.outbounds.filter(record) : [];
   const selectedIndex = outbounds.findIndex((outbound) => outbound.tag === input.selected.tag);

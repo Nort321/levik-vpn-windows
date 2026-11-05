@@ -130,7 +130,6 @@ export class LiveLoadClient {
     private readonly platform: string,
     private readonly version: string,
     private readonly fetchImpl: Fetch = fetch,
-    private readonly parse: typeof parseLiveLoad = parseLiveLoad,
   ) {}
 
   /** Null when no host answered; "unsupported" while the website does not have the endpoint yet. */
@@ -168,7 +167,7 @@ export class LiveLoadClient {
         }
         const text = await reply.text();
         if (text.length > MAX_RESPONSE_BYTES) return null;
-        const parsed = this.parse(JSON.parse(text) as unknown);
+        const parsed = parseLiveLoad(JSON.parse(text) as unknown);
         if (!parsed) return null;
         const tag = reply.headers.get("etag");
         return { kind: "fresh", ...parsed, etag: tag && ETAG.test(tag) ? tag : null };

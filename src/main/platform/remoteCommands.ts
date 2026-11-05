@@ -1,4 +1,3 @@
-import { isNativeReplyKey, type NativeReplyCrypto, type NativeReplyKey } from "../core/nativeReply";
 import { constants, createPublicKey, generateKeyPairSync, privateDecrypt, publicEncrypt, type KeyObject } from "node:crypto";
 
 import {
@@ -93,37 +92,20 @@ export function parseIssuedCommands(value: unknown): IssuedCommand[] {
 }
 
 /** The diagnostics note link, encrypted to the sender's key (RSA-OAEP, SHA-256). */
-export function sealForReply(replyKey: string, link: string, crypto?: NativeReplyCrypto | null): string {
-  if (crypto) {
-    try { return crypto.seal(replyKey, link); } catch { /* Pure encryption may safely retry with Node. */ }
-  }
+export function sealForReply(replyKey: string, link: string): string {
   const key = createPublicKey({ key: Buffer.from(replyKey, "base64"), format: "der", type: "spki" });
   return publicEncrypt({ key, padding: constants.RSA_PKCS1_OAEP_PADDING, oaepHash: "sha256" }, Buffer.from(link)).toString("base64");
 }
 
 /** A fresh key for one diagnostics request; the private half never leaves memory. */
-export type ReplyPrivateKey = KeyObject | NativeReplyKey;
-
-export function createReplyKey(crypto?: NativeReplyCrypto | null): { replyKey: string; privateKey: ReplyPrivateKey } {
-  if (crypto) {
-    try {
-      const key = crypto.createKey();
-      const replyKey = key.publicKeySpkiBase64();
-      if (/^[A-Za-z0-9+/]{300,1000}={0,2}$/.test(replyKey)) return { replyKey, privateKey: key };
-    } catch { /* No key was sent yet: use a fresh Node key without changing the device. */ }
-  }
+export function createReplyKey(): { replyKey: string; privateKey: KeyObject } {
   const { publicKey, privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
   return { replyKey: publicKey.export({ type: "spki", format: "der" }).toString("base64"), privateKey };
 }
 
 /** The note link from a finished diagnostics command, or null when it is not one. */
-export function openReply(privateKey: ReplyPrivateKey, sealed: string): string | null {
+export function openReply(privateKey: KeyObject, sealed: string): string | null {
   try {
-    // Finish an in-flight Rust-key request even if the remote mode changed to ts.
-    if (isNativeReplyKey(privateKey)) {
-      const link = privateKey.open(sealed);
-      return typeof link === "string" && NOTE_LINK.test(link) ? link : null;
-    }
     const link = privateDecrypt({ key: privateKey, padding: constants.RSA_PKCS1_OAEP_PADDING, oaepHash: "sha256" }, Buffer.from(sealed, "base64"))
       .toString("utf8");
     return NOTE_LINK.test(link) ? link : null;

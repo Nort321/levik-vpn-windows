@@ -6,7 +6,6 @@ vendor/singbox/windows-x64/
 vendor/xray/*.zip
 vendor/xray/*.dgst
 vendor/kill-switch/windows-x64/
-vendor/levik-core/
 *.log
 .DS_Store
 
@@ -28,7 +27,3 @@ coverage/
 .vitest/
 .idea/
 .vscode/
-
-# Public TEST ONLY loopback TLS fixtures; never production identities.
-!tests/fixtures/health-test-cert.pem
-!tests/fixtures/health-test-key.pem

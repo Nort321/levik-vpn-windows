@@ -15,9 +15,7 @@
     "download:singbox": "node scripts/download-singbox.mjs",
     "verify:xray": "node scripts/verify-xray.mjs",
     "package:win": "npm run build && npm run build:win-helper && npm run verify:xray && electron-builder --win nsis --x64",
-    "check": "npm run lint && npm run build && npm test",
-    "fetch:levik-core": "node scripts/fetch-levik-core.mjs windows-x64",
-    "download:levik-core": "node scripts/download-levik-core.mjs"
+    "check": "npm run lint && npm run build && npm test"
   },
   "devDependencies": {
     "@types/qrcode": "^1.5.5",
@@ -60,13 +58,6 @@
         "to": "kill-switch",
         "filter": [
           "levik-kill-switch.exe"
-        ]
-      },
-      {
-        "from": "vendor/levik-core/windows-x64",
-        "to": "levik-core",
-        "filter": [
-          "levik_core.node"
         ]
       }
     ],

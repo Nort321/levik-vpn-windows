@@ -613,18 +613,6 @@ describe("AppController tunnel recovery", () => {
     expect(controller.snapshot().status).toBe("disconnected");
   });
 
-  it("does not apply stale latency results or start a tunnel after shutdown", async () => {
-    const { controller, xray, first, second } = tunnelController();
-    const previous = controller.snapshot().serverLatencies;
-    let finish!: (value: Record<string, number | null>) => void;
-    vi.mocked(measureServerLatencies).mockReturnValueOnce(new Promise((done) => { finish = done; }));
-    const measuring = controller.pingServers();
-    await controller.shutdown();
-    finish({ [first.id]: 999, [second.id]: 1 }); await measuring;
-    expect(controller.snapshot().serverLatencies).toEqual(previous);
-    expect(xray.start).not.toHaveBeenCalled();
-  });
-
   it("ignores a stale health failure after a new connection", async () => {
     const { controller } = tunnelController();
     await controller.connect();

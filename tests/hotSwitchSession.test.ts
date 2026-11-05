@@ -66,7 +66,7 @@ describe("manual same-core HotSwitch", () => {
     const h = await harness();
     vi.mocked(probeServiceRouteDns).mockResolvedValueOnce(false);
     expect(await h.session.selectMain("s1")).toEqual({ status: "failed" });
-    expect(openExistingRouteProbe).toHaveBeenCalledWith(47201, expect.any(Object), expect.any(AbortSignal), expect.objectContaining({ verifyData: true }));
+    expect(openExistingRouteProbe).toHaveBeenCalledWith(47201, expect.any(Object), expect.any(AbortSignal), { verifyData: true });
     expect(probeServiceRouteDns).toHaveBeenCalledWith(47201, expect.any(Object), ["tcp://1.1.1.1"], expect.any(AbortSignal));
     expect(overrideServiceRoute).not.toHaveBeenCalled(); expect(h.session.mainServerId).toBe("s0");
     vi.mocked(openExistingRouteProbe).mockResolvedValueOnce({ latency: async () => ({ values: [], failed: 0, setupMs: 1, dataVerified: false }),

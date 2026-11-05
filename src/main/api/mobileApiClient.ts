@@ -1,7 +1,3 @@
-import type { CreateApiDiscovery } from "../core/nativeApiDiscovery";
-import type { RustCore } from "../core/rustCore";
-import { nativeEventSource } from "../core/nativeEvents";
-import type { EventSourceStream } from "../platform/liveEvents";
 import type { ServiceRouteStatus } from "../../shared/serviceRoutes";
 import type {
   ApprovalDecisionResponse,
@@ -46,13 +42,8 @@ export class MobileApiClient {
     private readonly signer: RequestSigner,
     private readonly version: string,
     refreshEndpoints?: () => Promise<boolean>,
-    publicFetch: typeof fetch = fetch,
   ) {
-    this.endpoints = new ApiEndpoints(baseUrl, refreshEndpoints, publicFetch);
-  }
-
-  useRustCore(core: RustCore, create: CreateApiDiscovery | undefined, report: () => void): void {
-    this.endpoints.useRustCore(core, create, report);
+    this.endpoints = new ApiEndpoints(baseUrl, refreshEndpoints);
   }
 
   createChallenge(payload: Record<string, unknown>): Promise<AuthChallengeResponse> {
@@ -196,16 +187,9 @@ export class MobileApiClient {
   }
 
   /** Live hints for this account (liveEvents.ts). The caller aborts the stream. */
-  async openEvents(accessToken: string, signal: AbortSignal): Promise<EventSourceStream> {
+  async openEvents(accessToken: string, signal: AbortSignal): Promise<ReadableStream<Uint8Array>> {
     const origin = await this.endpoints.resolve();
     const url = new URL("/api/mobile/v1/events", origin);
-    signal.throwIfAborted();
-    try {
-      const stream = this.signer.openEventsWithRust({ origin: origin.origin, method: "GET", path: url.pathname,
-        accessToken, body: "", platform: "windows", version: this.version, road: false, game: false });
-      if (stream) return nativeEventSource(stream, signal, (status, rejected) =>
-        new MobileApiError(rejected ? "Сессия истекла. Войдите снова." : "Канал событий недоступен", status, rejected));
-    } catch { throw new MobileApiError("Канал событий недоступен"); }
     const signed = this.signer.sign("GET", url.pathname, accessToken, Buffer.alloc(0));
     const response = await fetch(url, {
       method: "GET",
@@ -256,37 +240,6 @@ export class MobileApiClient {
     if (url.origin !== origin.origin) throw new Error("Cross-origin API request rejected");
     const hasBody = method === "POST" || method === "PUT";
     const body = hasBody ? Buffer.from(JSON.stringify(payload ?? {})) : Buffer.alloc(0);
-    // Native transport signs and sends once. Shadow mode never opens another request.
-    // A failed native attempt must not fall back: the server may have committed it.
-    let native: Promise<string> | null;
-    try {
-      native = this.signer.requestWithRust({ origin: origin.origin, method, path: url.pathname,
-        accessToken, body: body.toString("utf8"), platform: "windows", version: this.version,
-        road: extraHeaders["X-Levik-Road"] === "1", game: extraHeaders["X-Levik-Game"] === "2" });
-    } catch {
-      body.fill(0);
-      throw new MobileApiError("Не удалось связаться с Levik VPN");
-    }
-    if (native) {
-      try {
-        const outcome: unknown = JSON.parse(await native);
-        if (!isRecord(outcome) || typeof outcome.ok !== "boolean") throw new Error("Invalid native API result");
-        if (outcome.ok === true && isRecord(outcome.value) && outcome.value.ok === true) return outcome.value as Response;
-        if (!isRecord(outcome.error) || typeof outcome.error.message !== "string"
-          || !(outcome.error.status === null || typeof outcome.error.status === "number")
-          || typeof outcome.error.authenticationRejected !== "boolean"
-          || !(outcome.error.code === null || typeof outcome.error.code === "string")
-          || typeof outcome.error.invalidateEndpoint !== "boolean") throw new Error("Invalid native API error");
-        if (outcome.error.invalidateEndpoint) this.endpoints.invalidate();
-        throw new MobileApiError(outcome.error.message, outcome.error.status, outcome.error.authenticationRejected, outcome.error.code);
-      } catch (error) {
-        if (error instanceof MobileApiError) throw error;
-        this.endpoints.invalidate();
-        throw new MobileApiError("Не удалось связаться с Levik VPN");
-      } finally {
-        body.fill(0);
-      }
-    }
     const signed = this.signer.sign(method, url.pathname, accessToken, body);
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 30_000);

@@ -1,4 +1,3 @@
-import type { CoreRouteProbes } from "../core/nativeRouteProbes";
 import { spawn, type ChildProcess } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { Agent, request, type ClientRequest } from "node:http";
@@ -146,7 +145,7 @@ export interface RouteProbeSession {
 }
 
 /** Exported separately for integration tests against the bundled, unprivileged core. */
-export async function openRouteProbe(executable: string, candidate: RouteProbeCandidate, signal: AbortSignal, core?: CoreRouteProbes): Promise<RouteProbeSession> {
+export async function openRouteProbe(executable: string, candidate: RouteProbeCandidate, signal: AbortSignal): Promise<RouteProbeSession> {
   signal.throwIfAborted();
   const port = await unusedPort();
   signal.throwIfAborted();
@@ -190,7 +189,7 @@ export async function openRouteProbe(executable: string, candidate: RouteProbeCa
       if (closed || coreFailed || Date.now() >= until) throw new Error("Probe core unavailable");
       await new Promise<void>((resolve) => setTimeout(resolve, 40));
     }
-    return proxyProbeSession(port, { user: "probe", password }, signal, () => !closed && !coreFailed, agents, close, false, core);
+    return proxyProbeSession(port, { user: "probe", password }, signal, () => !closed && !coreFailed, agents, close);
 
   } catch {
     config.fill(0);
@@ -201,7 +200,7 @@ export async function openRouteProbe(executable: string, candidate: RouteProbeCa
 
 /** The running core already owns the physical sockets; probes never create another core or TUN. */
 export async function openExistingRouteProbe(port: number, auth: { user: string; password: string }, signal: AbortSignal,
-  options: { verifyData?: boolean; core?: CoreRouteProbes } = {}): Promise<RouteProbeSession> {
+  options: { verifyData?: boolean } = {}): Promise<RouteProbeSession> {
   signal.throwIfAborted();
   if (!Number.isInteger(port) || port < 47200 || port > 47231 || !/^[a-z0-9-]{1,32}$/.test(auth.user)
     || !/^[a-f0-9]{48}$/.test(auth.password)) throw new Error("Invalid live probe listener");
@@ -212,16 +211,10 @@ export async function openExistingRouteProbe(port: number, auth: { user: string;
   };
   const onAbort = (): void => { void close(); };
   signal.addEventListener("abort", onAbort, { once: true });
-  return proxyProbeSession(port, auth, signal, () => !closed, agents, close, options.verifyData !== false, options.core);
+  return proxyProbeSession(port, auth, signal, () => !closed, agents, close, options.verifyData !== false);
 }
 
 function proxyProbeSession(port: number, auth: { user: string; password: string }, signal: AbortSignal,
-  available: () => boolean, agents: Set<Agent>, close: () => Promise<void>, verifyData = false, core?: CoreRouteProbes): RouteProbeSession {
-  const fallback = () => nodeProxyProbeSession(port, auth, signal, available, agents, close, verifyData);
-  return core?.wrap(port, auth, signal, available, close, verifyData, fallback) ?? fallback();
-}
-
-function nodeProxyProbeSession(port: number, auth: { user: string; password: string }, signal: AbortSignal,
   available: () => boolean, agents: Set<Agent>, close: () => Promise<void>, verifyData = false): RouteProbeSession {
   const connect = async (target: string): Promise<{ agent: Agent; setupMs: number }> => {
     signal.throwIfAborted();
@@ -387,8 +380,8 @@ export function diverseProbeCandidates<T extends { routeKey: string; path?: read
 
 export async function measureRouteCandidates(options: {
   executable: string; candidates: readonly RouteProbeCandidate[]; signal?: AbortSignal; targets?: ProbeTargets; transfers?: boolean;
-  canTransfer?: () => boolean; core?: CoreRouteProbes;
-}, dependencies: RouteProbeDependencies = { open: (executable, candidate, signal) => openRouteProbe(executable, candidate, signal, options.core), now: Date.now }): Promise<Record<string, RouteMeasurement>> {
+  canTransfer?: () => boolean;
+}, dependencies: RouteProbeDependencies = { open: openRouteProbe, now: Date.now }): Promise<Record<string, RouteMeasurement>> {
   const controller = new AbortController();
   const abort = (): void => controller.abort();
   options.signal?.addEventListener("abort", abort, { once: true });

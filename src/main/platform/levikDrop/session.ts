@@ -1,15 +1,14 @@
 import { createHash, randomBytes } from "node:crypto";
 import type { KeyObject } from "node:crypto";
-import { ChannelClosed, type DropSocket } from "./framing";
+import { ChannelClosed, FrameSocket } from "./framing";
 import { TargetFiles, TransferFailure, readSource } from "./files";
-import type { SourceFile, DropSource, TargetFile, DropTargetIO } from "./files";
-import { LanListener, dialLan, type DropLan, type LanAcceptor } from "./lan";
+import type { SourceFile } from "./files";
+import { LanListener, dialLan } from "./lan";
 import {
   ACK_EVERY,
   ProtocolError,
   RecordOpener,
   RecordSealer,
-  type DropRecords,
   WINDOW,
   commitment,
   decodePlaintext,
@@ -51,42 +50,6 @@ export type SessionOutcome =
   | { kind: "cancelled"; by: "self" | "peer" }
   | { kind: "failed"; by: "self" | "peer"; reason: FailReason };
 
-/** The protocol functions a session reads the peer's handshake and messages with. */
-export interface DropAgreement {
-  publicKey(): Buffer;
-  signTranscript(role: "sender" | "receiver", th: Buffer): Buffer;
-  sessionKeys(peer: Buffer, th: Buffer): SessionKeys;
-  /** Final, idempotent and non-throwing. */
-  close(): void;
-}
-
-export interface DropProtocol {
-  createLan?(): DropLan | null;
-  createTargets?(folder: string, targets: TargetFile[]): DropTargetIO | null;
-  createSource?(file: SourceFile, offset: number, prefix: string | null): DropSource | null;
-  createAgreement?(identity: Identity): DropAgreement | null;
-  createRecords?(role: "sender" | "receiver", keys: SessionKeys): DropRecords | null;
-  decodeSenderHello: typeof decodeSenderHello;
-  decodeReceiverHello: typeof decodeReceiverHello;
-  decodeSenderProof: typeof decodeSenderProof;
-  decodeReceiverProof: typeof decodeReceiverProof;
-  commitment: typeof commitment;
-  transcript: typeof transcript;
-  verifyTranscript: typeof verifyTranscript;
-  decodePlaintext: typeof decodePlaintext;
-}
-
-export const TYPESCRIPT_PROTOCOL: DropProtocol = {
-  decodeSenderHello,
-  decodeReceiverHello,
-  decodeSenderProof,
-  decodeReceiverProof,
-  commitment,
-  transcript,
-  verifyTranscript,
-  decodePlaintext,
-};
-
 export interface Identity {
   privateKey: KeyObject;
   spki: Buffer;
@@ -115,8 +78,7 @@ interface Common {
   expectedFiles?: number;
   expectedBytes?: number;
   selectRoute?(path: SessionPath): Promise<boolean>;
-  /** How the peer's bytes are read; the app may run these through the Rust core. TypeScript by default. */
-  protocol?: DropProtocol;
+
 }
 
 export interface SenderWork extends Common {
@@ -182,43 +144,19 @@ export class Inbox {
   }
 }
 
-/** Construct Node ECDH only when no native owner was selected before the hello. */
-function nodeAgreement(identity: Identity): DropAgreement {
-  const key = ephemeralKey();
-  return {
-    publicKey: () => key.getPublicKey(),
-    signTranscript: (role, th) => signTranscript(role, identity.privateKey, th),
-    sessionKeys: (peer, th) => sessionKeys(key, peer, th),
-    close: () => {},
-  };
-}
-
-function nodeSource(file: SourceFile, offset: number, prefix: string | null): DropSource {
-  const hash = createHash("sha256"); const chunks = readSource(file, offset, prefix, hash);
-  return {
-    read: async () => { const next = await chunks.next(); return next.done ? null : next.value; },
-    digest: () => hash.digest("hex"),
-    close: () => { void chunks.return(undefined).catch(() => {}); },
-  };
-}
-
 class Ended extends Error {}
 
 export class Session {
   readonly inbox = new Inbox();
   private keys: SessionKeys | null = null;
-  private agreement: DropAgreement | null = null;
-  private source: DropSource | null = null;
-  private sealer: Pick<RecordSealer, "seal"> | null = null;
-  private records: DropRecords | null = null;
-  private opener: Pick<RecordOpener, "open"> | null = null;
+  private sealer: RecordSealer | null = null;
+  private opener: RecordOpener | null = null;
   private readonly transfer: Buffer;
   private input: SessionPath = "relay";
   private output: SessionPath = "relay";
-  private lan: DropSocket | null = null;
-  private lanReady: Promise<DropSocket | null> | null = null;
-  private lanListener: LanAcceptor | null = null;
-  private readonly lanTransport: DropLan | null;
+  private lan: FrameSocket | null = null;
+  private lanReady: Promise<FrameSocket | null> | null = null;
+  private lanListener: LanListener | null = null;
   private lanBroke = false;
   private routeSettled = false;
   private manifestParts: ManifestFile[] = [];
@@ -244,11 +182,7 @@ export class Session {
   private lastAck: number[] = [];
   private written: number[] = [];
 
-  private readonly protocol: DropProtocol;
-
-  constructor(private readonly relay: DropSocket, private readonly work: SenderWork | ReceiverWork) {
-    this.protocol = work.protocol ?? TYPESCRIPT_PROTOCOL;
-    this.lanTransport = this.protocol.createLan?.() ?? null;
+  constructor(private readonly relay: FrameSocket, private readonly work: SenderWork | ReceiverWork) {
     this.transfer = transferBytes(work.transferId);
     this.result = new Promise((resolve) => {
       this.settle = resolve;
@@ -293,32 +227,12 @@ export class Session {
     this.outcome = outcome;
     this.inbox.close(new Ended());
     this.lanListener?.close();
-    this.lanTransport?.close();
     // Records already written still leave before the direct connection closes.
     this.lan?.closeGracefully();
-    this.clearAgreement();
-    this.clearSource();
-    this.clearRecords();
     this.ackWaiter?.();
     if (this.work.role === "receiver") void this.work.targets?.closeWriting();
     this.settle?.(outcome);
     this.settle = null;
-  }
-
-  private clearAgreement(): void {
-    const agreement = this.agreement; this.agreement = null;
-    agreement?.close();
-  }
-
-  private clearSource(): void {
-    const source = this.source; this.source = null; source?.close();
-  }
-
-  private clearRecords(): void {
-    this.records?.close(); this.records = null;
-    this.sealer = null; this.opener = null;
-    const keys = this.keys; this.keys = null;
-    if (keys) { keys.sr.fill(0); keys.rs.fill(0); keys.lan.fill(0); }
   }
 
   private fromError(error: unknown): void {
@@ -337,54 +251,41 @@ export class Session {
 
   private async handshake(): Promise<{ keys: SessionKeys; peerKey: Buffer }> {
     const own = this.work.identity;
-    const protocol = this.protocol;
-    if (this.outcome) throw new Ended();
-    const offered = protocol.createAgreement?.(own) ?? null;
-    if (this.outcome) { offered?.close(); throw new Ended(); }
-    const agreement = offered ?? nodeAgreement(own);
-    this.agreement = agreement;
-    try {
-      const ephemeral = agreement.publicKey();
-      if (this.work.role === "sender") {
-        const nonce = randomBytes(32);
-        const hello: SenderHello = { transfer: this.transfer, identity: own.spki, ephemeral, commit: protocol.commitment(own.spki, ephemeral, nonce) };
-        await this.relay.send(encodeSenderHello(hello));
-        const reply = protocol.decodeReceiverHello(await this.inbox.next(STEP_TIMEOUT_MS));
-        if (!sameBytes(reply.transfer, this.transfer)) throw new ProtocolError("another transfer");
-        const th = protocol.transcript(hello, reply, nonce);
-        await this.relay.send(encodeSenderProof(nonce, agreement.signTranscript("sender", th)));
-        const signature = protocol.decodeReceiverProof(await this.inbox.next(STEP_TIMEOUT_MS));
-        if (!protocol.verifyTranscript("receiver", reply.identity, th, signature)) throw new ProtocolError("receiver signature");
-        return { keys: agreement.sessionKeys(reply.ephemeral, th), peerKey: reply.identity };
-      }
-      const hello = protocol.decodeSenderHello(await this.inbox.next(STEP_TIMEOUT_MS));
-      if (!sameBytes(hello.transfer, this.transfer)) throw new ProtocolError("another transfer");
-      const reply: ReceiverHello = { transfer: this.transfer, identity: own.spki, ephemeral, nonce: randomBytes(32) };
-      await this.relay.send(encodeReceiverHello(reply));
-      const proof = protocol.decodeSenderProof(await this.inbox.next(STEP_TIMEOUT_MS));
-      if (!sameBytes(protocol.commitment(hello.identity, hello.ephemeral, proof.nonce), hello.commit)) throw new ProtocolError("commitment");
-      const th = protocol.transcript(hello, reply, proof.nonce);
-      if (!protocol.verifyTranscript("sender", hello.identity, th, proof.signature)) throw new ProtocolError("sender signature");
-      await this.relay.send(encodeReceiverProof(agreement.signTranscript("receiver", th)));
-      return { keys: agreement.sessionKeys(hello.ephemeral, th), peerKey: hello.identity };
-    } finally {
-      if (this.agreement === agreement) this.clearAgreement();
+    const ecdh = ephemeralKey();
+    const ephemeral = ecdh.getPublicKey();
+    if (this.work.role === "sender") {
+      const nonce = randomBytes(32);
+      const hello: SenderHello = { transfer: this.transfer, identity: own.spki, ephemeral, commit: commitment(own.spki, ephemeral, nonce) };
+      await this.relay.send(encodeSenderHello(hello));
+      const reply = decodeReceiverHello(await this.inbox.next(STEP_TIMEOUT_MS));
+      if (!sameBytes(reply.transfer, this.transfer)) throw new ProtocolError("another transfer");
+      const th = transcript(hello, reply, nonce);
+      await this.relay.send(encodeSenderProof(nonce, signTranscript("sender", own.privateKey, th)));
+      const signature = decodeReceiverProof(await this.inbox.next(STEP_TIMEOUT_MS));
+      if (!verifyTranscript("receiver", reply.identity, th, signature)) throw new ProtocolError("receiver signature");
+      return { keys: sessionKeys(ecdh, reply.ephemeral, th), peerKey: reply.identity };
     }
+    const hello = decodeSenderHello(await this.inbox.next(STEP_TIMEOUT_MS));
+    if (!sameBytes(hello.transfer, this.transfer)) throw new ProtocolError("another transfer");
+    const reply: ReceiverHello = { transfer: this.transfer, identity: own.spki, ephemeral, nonce: randomBytes(32) };
+    await this.relay.send(encodeReceiverHello(reply));
+    const proof = decodeSenderProof(await this.inbox.next(STEP_TIMEOUT_MS));
+    if (!sameBytes(commitment(hello.identity, hello.ephemeral, proof.nonce), hello.commit)) throw new ProtocolError("commitment");
+    const th = transcript(hello, reply, proof.nonce);
+    if (!verifyTranscript("sender", hello.identity, th, proof.signature)) throw new ProtocolError("sender signature");
+    await this.relay.send(encodeReceiverProof(signTranscript("receiver", own.privateKey, th)));
+    return { keys: sessionKeys(ecdh, hello.ephemeral, th), peerKey: hello.identity };
   }
 
   private async main(): Promise<void> {
     const { keys, peerKey } = await this.handshake();
-    if (this.outcome) { keys.sr.fill(0); keys.rs.fill(0); keys.lan.fill(0); return; }
     this.keys = keys;
     const role = this.work.role;
-    this.records = this.protocol.createRecords?.(role, keys) ?? null;
-    this.sealer = this.records ?? new RecordSealer(role === "sender" ? keys.sr : keys.rs);
-    this.opener = this.records ?? new RecordOpener(role === "sender" ? keys.rs : keys.sr);
+    this.sealer = new RecordSealer(role === "sender" ? keys.sr : keys.rs);
+    this.opener = new RecordOpener(role === "sender" ? keys.rs : keys.sr);
     const trust = this.work.trust(peerKey);
     this.work.events.keyed(keys.code, trust, peerKey);
-    if (this.outcome) return;
     if (!this.work.route) this.work.events.path("relay");
-    if (this.outcome) return;
 
     const reading = this.readLoop(trust);
     if (this.work.route && this.listensOnLan() && this.work.route !== "relay") void this.openLan();
@@ -424,7 +325,7 @@ export class Session {
 
   // Records --------------------------------------------------------------------------
 
-  private socketFor(path: SessionPath): DropSocket {
+  private socketFor(path: SessionPath): FrameSocket {
     if (path === "relay") return this.relay;
     if (!this.lan) throw new ChannelClosed("no direct connection");
     return this.lan;
@@ -471,7 +372,7 @@ export class Session {
       for (;;) {
         const frame = await this.nextRecord();
         if (this.outcome) return;
-        const plaintext = this.protocol.decodePlaintext(opener.open(frame));
+        const plaintext = decodePlaintext(opener.open(frame));
         if (plaintext.kind === "unknown") continue;
         if (plaintext.kind === "data") {
           if (this.work.route && frame[0] !== 0x11) throw new ProtocolError("unmarked file data");
@@ -557,7 +458,7 @@ export class Session {
   private async openLan(): Promise<void> {
     const keys = this.keys;
     if (!keys) return;
-    const listener = await (this.lanTransport ? this.lanTransport.open(this.transfer, keys.lan) : LanListener.open(this.transfer, keys.lan));
+    const listener = await LanListener.open(this.transfer, keys.lan);
     if (!listener || this.outcome) {
       listener?.close();
       return;
@@ -571,11 +472,11 @@ export class Session {
   private dialLan(addresses: string[], port: number): void {
     const keys = this.keys;
     if (!keys) return;
-    this.lanReady = this.lanTransport ? this.lanTransport.dial(addresses, port, this.transfer, keys.lan) : dialLan(addresses, port, this.transfer, keys.lan);
+    this.lanReady = dialLan(addresses, port, this.transfer, keys.lan);
     void this.lanReady.then((socket) => this.onLanReady(socket));
   }
 
-  private onLanReady(socket: DropSocket | null): void {
+  private onLanReady(socket: FrameSocket | null): void {
     if (!socket) return;
     if (this.outcome || this.routeSettled) {
       socket.close();
@@ -587,9 +488,7 @@ export class Session {
     socket.onClose(() => {
       if (this.outcome) return;
       this.lanBroke = true;
-      // The read loop drains queued final controls before observing EOF.
-      // A native close notice may arrive before its pending read Promise.
-      if (this.input !== "lan" && this.output === "lan") this.abort("direct connection closed");
+      if (this.output === "lan" || this.input === "lan") this.abort("direct connection closed");
     });
     if (this.work.role === "sender") {
       void this.sendControl({ t: "lan_on" }).catch(() => {});
@@ -679,27 +578,21 @@ export class Session {
     for (const [index, file] of files.entries()) {
       const offset = accepted.offsets[index] ?? 0;
       if (offset === file.size && file.size > 0) continue;
-      const source = this.protocol.createSource?.(file, offset, accepted.prefix[index] ?? null) ?? nodeSource(file, offset, accepted.prefix[index] ?? null);
-      if (this.outcome) { source.close(); return; }
-      this.source = source;
-      try {
-        let position = offset;
-        for (;;) {
-          const chunk = await source.read();
-          if (this.outcome) return;
-          if (chunk === null) break;
-          while (!this.outcome && this.sentBytes - (this.ackedTotal() - this.ackedAtAccept) > WINDOW) {
-            await new Promise<void>((resolve) => { this.ackWaiter = resolve; });
-          }
-          if (this.outcome) return;
-          await this.sendPlaintext(encodeData(index, position, chunk, !!this.work.route));
-          position += chunk.length; this.sentBytes += chunk.length;
+      const hash = createHash("sha256");
+      let position = offset;
+      for await (const chunk of readSource(file, offset, accepted.prefix[index] ?? null, hash)) {
+        while (!this.outcome && this.sentBytes - (this.ackedTotal() - this.ackedAtAccept) > WINDOW) {
+          await new Promise<void>((resolve) => {
+            this.ackWaiter = resolve;
+          });
         }
         if (this.outcome) return;
-        await this.sendControl({ t: "end", file: index, sha256: source.digest() });
-      } finally {
-        if (this.source === source) this.clearSource();
+        await this.sendPlaintext(encodeData(index, position, chunk, !!this.work.route));
+        position += chunk.length;
+        this.sentBytes += chunk.length;
       }
+      if (this.outcome) return;
+      await this.sendControl({ t: "end", file: index, sha256: hash.digest("hex") });
     }
   }
 

@@ -1,7 +1,3 @@
-import type { OpenRouteProbe } from "../core/nativeRouteProbes";
-import type { StartServiceProbe } from "../core/nativeServiceProbes";
-import { CoreXrayApi, type StartXrayRequest } from "../core/nativeXrayApi";
-import type { RustCore } from "../core/rustCore";
 import { ServiceRouteSession } from "./serviceRouteSession";
 import type { ServiceRouteStatus } from "./serviceRoutes";
 import { app } from "electron";
@@ -38,11 +34,6 @@ interface XrayEvents {
 
 export class XrayManager extends EventEmitter<XrayEvents> {
   readonly serviceRoutes = new ServiceRouteSession((status) => this.emit("serviceRoutes", status));
-  private readonly localApi = new CoreXrayApi();
-  useRustCore(current: () => RustCore, start: StartXrayRequest | undefined, report: () => void, startProbe?: StartServiceProbe, openProbe?: OpenRouteProbe): void {
-    this.localApi.useRustCore(current, start, report);
-    this.serviceRoutes.useRustCore(current, start, report, startProbe, openProbe);
-  }
   private process: ChildProcessWithoutNullStreams | null = null;
   private readonly stopping = new WeakSet<ChildProcess>();
   private statsTimer: ReturnType<typeof setInterval> | null = null;
@@ -148,8 +139,7 @@ export class XrayManager extends EventEmitter<XrayEvents> {
     await this.multipath?.connect(candidates, password, options);
   }
 
-  /** Binds the configuration to the physical adapter; the controller passes the core's. */
-  constructor(private readonly bind: typeof bindXrayOutboundInterface = bindXrayOutboundInterface) {
+  constructor() {
     super();
     this.tuic.on("log", (line) => this.emit("log", line));
     this.gameTuic.on("log", (line) => this.emit("log", `Game ${line}`));
@@ -217,7 +207,7 @@ export class XrayManager extends EventEmitter<XrayEvents> {
     }
     this.tunnelTag = ordinaryTunnelTag(launchConfig);
     const loopback = Object.entries(networkInterfaces()).find(([, addresses]) => addresses?.some((address) => address.address === "127.0.0.1"))?.[0];
-    const configInput = Buffer.from(JSON.stringify(this.bind(launchConfig, interfaceName, outbound.ipv6, loopback)), "utf8");
+    const configInput = Buffer.from(JSON.stringify(bindXrayOutboundInterface(launchConfig, interfaceName, outbound.ipv6, loopback)), "utf8");
     this.emit("log", `Xray: outbound interface [${interfaceName}] (TCP/UDP, direct, IPv6 ${outbound.ipv6 ? "on" : "off"})`);
     try {
       await this.validate(configInput);
@@ -333,12 +323,9 @@ export class XrayManager extends EventEmitter<XrayEvents> {
         const healthy = this.serviceRoutes.active || await this.serviceRoutes.probeCurrent();
         return this.process === child && healthy;
       }
-      await this.localApi.statistics(undefined, async () => {
-        await execFileAsync(this.executablePath(), [
-          "api", "statsquery", `--server=${XRAY_STATS_ENDPOINT}`, "-pattern", "inbound>>>levik-tun-in>>>",
-        ], { windowsHide: true, timeout: 3_500, maxBuffer: 256 * 1024 });
-        return { uplink: 0, downlink: 0, initialized: false };
-      });
+      await execFileAsync(this.executablePath(), [
+        "api", "statsquery", `--server=${XRAY_STATS_ENDPOINT}`, "-pattern", "inbound>>>levik-tun-in>>>",
+      ], { windowsHide: true, timeout: 3_500, maxBuffer: 256 * 1024 });
       return this.process === child;
     } catch {
       return false;
@@ -404,7 +391,6 @@ export class XrayManager extends EventEmitter<XrayEvents> {
   }
 
   private stopStatsPolling(): void {
-    this.localApi.cancel();
     if (this.statsTimer) clearInterval(this.statsTimer);
     this.statsTimer = null;
   }
@@ -419,13 +405,12 @@ export class XrayManager extends EventEmitter<XrayEvents> {
         if (this.process === child) this.emit("stats", stats.downlink, stats.uplink);
         return;
       }
-      const values = await this.localApi.statistics(undefined, async () => {
-        const { stdout } = await execFileAsync(this.executablePath(), [
-          "api", "statsquery", `--server=${XRAY_STATS_ENDPOINT}`,
-          "-pattern", "inbound>>>levik-tun-in>>>traffic>>>",
-        ], { windowsHide: true, timeout: 3_500, maxBuffer: 256 * 1024 });
-        return { ...parseXrayStats(stdout), initialized: false };
-      });
+      const { stdout } = await execFileAsync(this.executablePath(), [
+        "api", "statsquery",
+        `--server=${XRAY_STATS_ENDPOINT}`,
+        "-pattern", "inbound>>>levik-tun-in>>>traffic>>>",
+      ], { windowsHide: true, timeout: 3_500, maxBuffer: 256 * 1024 });
+      const values = parseXrayStats(stdout);
       if (this.process !== child) return;
       this.statsErrorReported = false;
       if (this.process) this.emit("stats", values.downlink, values.uplink);

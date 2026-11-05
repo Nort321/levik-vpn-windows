@@ -1,4 +1,4 @@
-import type { DropSocket } from "./framing";
+import type { FrameSocket } from "./framing";
 import { joinRelay, relayControl } from "./relay";
 import type { RelayEndpoint } from "./relay";
 import { Session } from "./session";
@@ -28,7 +28,7 @@ const FINAL_ENDS = new Set(["ended", "limit", "replaced"]);
 
 export class RelayLink {
   private running = false;
-  private socket: DropSocket | null = null;
+  private socket: FrameSocket | null = null;
   private session: Session | null = null;
   private failures = 0;
   private allowLan = true;
@@ -108,7 +108,7 @@ export class RelayLink {
   }
 
   /** Reads the relay until the connection ends; returns the relay's end reason, if it gave one. */
-  private async serve(socket: DropSocket): Promise<string | null> {
+  private async serve(socket: FrameSocket): Promise<string | null> {
     for (;;) {
       let frame: Buffer;
       try {
@@ -145,7 +145,7 @@ export class RelayLink {
     }
   }
 
-  private startSession(socket: DropSocket): void {
+  private startSession(socket: FrameSocket): void {
     const work = this.host.work(this.allowLan);
     const session = new Session(socket, work);
     this.session = session;

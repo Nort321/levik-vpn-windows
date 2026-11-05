@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
-import { ConfigCacheFile, type OpenConfigCache } from "../core/nativeConfigCache";
-import type { RustCore } from "../core/rustCore";
+import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { dirname } from "node:path";
 import type { AppAnnouncement } from "../../shared/contracts";
 import { parseMaintenance, type MaintenanceWindow } from "./maintenance";
 import { serviceEndpoints } from "./serviceEndpoints";
@@ -241,14 +241,11 @@ export class RemoteConfigClient {
 
 /** Last configuration on disk, so announcements and advice survive a restart offline. */
 export class RemoteConfigStore {
-  private readonly cache: ConfigCacheFile;
-  constructor(path: string) { this.cache = new ConfigCacheFile(path, "remote-config"); }
-
-  useRustCore(core: RustCore, open: OpenConfigCache | undefined, report: () => void): void { this.cache.useRustCore(core, open, report); }
+  constructor(private readonly path: string) {}
 
   async load(): Promise<StoredRemoteConfig | null> {
     try {
-      const value: unknown = JSON.parse(await this.cache.read() ?? "null");
+      const value: unknown = JSON.parse(await readFile(this.path, "utf8"));
       if (!isRecord(value) || typeof value.fetchedAt !== "number") return null;
       const config = parseRemoteConfig(value.response);
       if (!config) return null;
@@ -266,8 +263,11 @@ export class RemoteConfigStore {
   }
 
   async save(stored: StoredRemoteConfig): Promise<void> {
+    await mkdir(dirname(this.path), { recursive: true });
+    const temporary = `${this.path}.tmp`;
     const { response, fetchedAt, advice, adviceAt } = stored;
-    await this.cache.write(JSON.stringify({ response, fetchedAt, advice, adviceAt }));
+    await writeFile(temporary, JSON.stringify({ response, fetchedAt, advice, adviceAt }), { mode: 0o600 });
+    await rename(temporary, this.path);
   }
 }
 

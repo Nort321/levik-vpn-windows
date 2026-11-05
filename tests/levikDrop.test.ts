@@ -1,7 +1,3 @@
-import { dropProtocolWithCore } from "../src/main/core/coreDrop";
-import { loadLevikCore } from "../src/main/core/levikCore";
-import { RustCore } from "../src/main/core/rustCore";
-import type { DropProtocol } from "../src/main/platform/levikDrop/session";
 import { createECDH, createHash, createPrivateKey, createPublicKey, generateKeyPairSync, randomBytes } from "node:crypto";
 import { mkdir, mkdtemp, open, readFile, readdir, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { createServer, connect } from "node:net";
@@ -195,7 +191,7 @@ type Setup = Awaited<ReturnType<typeof setup>>;
 async function run(
   context: Setup,
   receiverState: { manifest: protocol.ManifestFile[] | null; targets: TargetFiles | null },
-  options: { allowLan?: boolean; stopAfter?: number; senderPlatform?: "windows" | "macos"; route?: "auto" | "lan" | "relay"; decline?: boolean; senderProtocol?: DropProtocol; receiverProtocol?: DropProtocol; abortSenderOnKeyed?: boolean } = {},
+  options: { allowLan?: boolean; stopAfter?: number; senderPlatform?: "windows" | "macos"; route?: "auto" | "lan" | "relay"; decline?: boolean } = {},
 ): Promise<Run> {
   const [senderSocket, receiverSocket] = await socketPair();
   let relayPayloadBytes = 0;
@@ -216,7 +212,6 @@ async function run(
   const senderWork: SenderWork = {
     ...common,
     role: "sender",
-    ...(options.senderProtocol ? { protocol: options.senderProtocol } : {}),
     identity: context.senderIdentity,
     peerDeviceId: "receiver",
     ownPlatform: options.senderPlatform ?? "macos",
@@ -226,12 +221,11 @@ async function run(
       codes.push(code);
       return true;
     },
-    events: { keyed: () => { if (options.abortSenderOnKeyed) sender.abort("TEST keyed abort"); }, path: (path) => paths.push(path), progress: () => {} },
+    events: { keyed: () => {}, path: (path) => paths.push(path), progress: () => {} },
   };
   const receiverWork: ReceiverWork = {
     ...common,
     role: "receiver",
-    ...(options.receiverProtocol ? { protocol: options.receiverProtocol } : {}),
     identity: context.receiverIdentity,
     peerDeviceId: "sender",
     ownPlatform: "windows",
@@ -242,8 +236,7 @@ async function run(
       if (options.route) expect(paths).toHaveLength(2); // Both sides know the route before accepting.
       codes.push(code);
       if (options.decline) return null;
-      const planned = await planTargets(context.target, manifest);
-      return new TargetFiles(context.target, planned, async () => {}, options.receiverProtocol?.createTargets?.(context.target, planned) ?? null);
+      return new TargetFiles(context.target, await planTargets(context.target, manifest), async () => {});
     },
     confirm: async () => true,
     events: {
@@ -285,7 +278,7 @@ describe("LevikDrop session", () => {
     expect((await readFile(join(context.target, "empty.txt"))).length).toBe(0);
     expect(await readFile(join(context.target, "CON_.txt"), "utf8")).toBe("hi");
     expect((await readdir(context.target)).filter((name) => name.endsWith(".levikdrop"))).toEqual([]);
-  }, 30_000);
+  });
 
   it("continues where it stopped and checks the source did not change", async () => {
     const content = randomBytes(5 * 1024 * 1024 + 123);
@@ -309,7 +302,7 @@ describe("LevikDrop session", () => {
     const third = await run(changed, changedState);
     expect(third.sender).toEqual({ kind: "failed", by: "self", reason: "source_changed" });
     expect(third.receiver).toEqual({ kind: "failed", by: "peer", reason: "source_changed" });
-  }, 30_000);
+  });
 
   it.runIf(privateAddresses().length > 0)("switches to the local network", async () => {
     const content = randomBytes(3 * 1024 * 1024);
@@ -321,7 +314,7 @@ describe("LevikDrop session", () => {
       expect(result.paths.filter((path) => path === "lan")).toHaveLength(2);
       expect((await readFile(join(context.target, "lan.bin"))).equals(content)).toBe(true);
     }
-  }, 30_000);
+  });
 });
 
 
@@ -345,7 +338,7 @@ describe("LevikDrop route selection", () => {
     expect(result.receiver.kind).toBe("done");
     expect(result.paths).toEqual(["relay", "relay"]);
     expect(await readFile(join(context.target, "relay.txt"), "utf8")).toBe("relay payload");
-  }, 30_000);
+  });
 
   it.runIf(privateAddresses().length > 0)("negotiates LAN before offering a large file without sending its contents", async () => {
     const context = await setup([["large.bin", Buffer.alloc(0)]]);
@@ -354,7 +347,7 @@ describe("LevikDrop route selection", () => {
     expect(result.paths).toEqual(["lan", "lan"]);
     expect(result.sender.kind).toBe("declined");
     expect(await readdir(context.target)).toEqual([]);
-  }, 30_000);
+  });
 
   it.runIf(privateAddresses().length > 0)("streams more than twenty files and resume offsets on LAN", async () => {
     const context = await setup(Array.from({ length: 40 }, (_, i): [string, Buffer] => [`file-${i}.txt`, Buffer.from(`payload-${i}`)]));
@@ -364,7 +357,7 @@ describe("LevikDrop route selection", () => {
     expect(result.paths).toEqual(["lan", "lan"]);
     expect(await readdir(context.target)).toHaveLength(40);
     expect(await readFile(join(context.target, "file-39.txt"), "utf8")).toBe("payload-39");
-  }, 30_000);
+  });
 
   it("never falls back to relay when a pinned local route is unavailable", async () => {
     const context = await setup([["local.txt", Buffer.from("local only")]]);
@@ -385,7 +378,7 @@ describe("LevikDrop route selection", () => {
     const next = await run(context, state, { route: "lan", allowLan: true });
     expect(next.sender.kind).toBe("done");
     expect((await readFile(join(context.target, "resume.bin"))).equals(content)).toBe(true);
-  }, 30_000);
+  });
 });
 
 
@@ -420,141 +413,3 @@ it.runIf(process.env.LEVIK_DROP_LARGE_TEST === "1" && privateAddresses().length 
   expect(result.relayPayloadBytes).toBe(0);
   expect((await stat(join(context.target, "large.bin"))).size).toBe(size);
 }, 180_000);
-
-
-const nativeModulePath = process.env.LEVIK_TEST_CORE;
-function nativeProtocol() {
-  if (!nativeModulePath) throw new Error("LEVIK_TEST_CORE missing");
-  const loaded = loadLevikCore(nativeModulePath);
-  if (loaded.state !== "loaded" || !loaded.module.openDropRecords || !loaded.module.openDropAgreement) throw new Error("Native Drop records missing");
-  const core = new RustCore(null, () => {}, "rust");
-  const base = dropProtocolWithCore(() => core, () => loaded.module.openDropRecords, () => {}, () => loaded.module.openDropAgreement, () => loaded.module.openDropSource, () => loaded.module.openDropTargets,
-    () => loaded.module.startDropLanDial && loaded.module.openDropLanListener ? { dial: loaded.module.startDropLanDial, listen: loaded.module.openDropLanListener } : undefined);
-  const retained: protocol.SessionKeys[] = [];
-  let closed = 0; let agreements = 0; let agreementsClosed = 0; let sources = 0; let sourcesClosed = 0; let targetsCreated = 0; let lanCreated = 0; let lanClosed = 0;
-  const native: DropProtocol = { ...base, createLan: () => {
-    const owner = base.createLan?.(); if (!owner) return null; lanCreated++;
-    return { open: owner.open, dial: owner.dial, close: () => { lanClosed++; owner.close(); } };
-  }, createTargets: (folder, targets) => {
-    const owner = base.createTargets?.(folder, targets); if (owner) targetsCreated++; return owner ?? null;
-  }, createSource: (file, offset, prefix) => {
-    const source = base.createSource?.(file, offset, prefix); if (!source) return null;
-    sources++; return { read: source.read, digest: source.digest, close: () => { sourcesClosed++; source.close(); } };
-  }, createAgreement: (identity) => {
-    const agreement = base.createAgreement?.(identity);
-    if (!agreement) throw new Error("TEST native agreement was not selected");
-    agreements++;
-    return { publicKey: agreement.publicKey, signTranscript: agreement.signTranscript, sessionKeys: agreement.sessionKeys,
-      close: () => { agreementsClosed++; agreement.close(); } };
-  }, createRecords: (role, keys) => {
-    retained.push(keys);
-    const records = base.createRecords?.(role, keys);
-    if (!records) throw new Error("TEST native codec was not selected");
-    return { seal: records.seal, open: records.open, close: () => { closed++; records.close(); } };
-  } };
-  return { protocol: native, lanCreated: () => lanCreated, created: () => retained.length, agreementsCreated: () => agreements, sourcesCreated: () => sources, sourcesSupported: !!loaded.module.openDropSource, targetsCreated: () => targetsCreated, targetsSupported: !!loaded.module.openDropTargets, verifyRetired: (count: number) => {
-    expect(lanClosed).toBe(lanCreated); expect(closed).toBe(count); expect(retained).toHaveLength(count);
-    expect(agreements).toBeGreaterThanOrEqual(count); expect(agreementsClosed).toBe(agreements); expect(sourcesClosed).toBe(sources);
-    for (const keys of retained) for (const bytes of [keys.sr, keys.rs, keys.lan]) expect(bytes.every((byte) => byte === 0)).toBe(true);
-  } };
-}
-
-describe.skipIf(!nativeModulePath)("real Rust/Node Drop transfer", () => {
-  it("retires private agreement state immediately when abort interrupts the handshake", async () => {
-    const context = await setup([["unused.bin", Buffer.from("TEST")]]); const native = nativeProtocol();
-    const [socket, peer] = await socketPair();
-    const sender = new Session(socket, { role: "sender", transferId: TRANSFER, identity: context.senderIdentity,
-      peerDeviceId: "TEST peer", ownPlatform: "macos", peerPlatform: "windows", allowLan: false, trust: () => "new",
-      events: { keyed: () => { throw new Error("Unexpected keyed event"); }, path: () => {}, progress: () => {} },
-      files: context.sources, confirm: async () => true, protocol: native.protocol });
-    try {
-      const result = sender.run(); const hello = await peer.next(2000);
-      expect(hello[0]).toBe(0x01); expect(native.agreementsCreated()).toBe(1);
-      sender.abort("TEST interrupted handshake"); native.verifyRetired(0);
-      expect((await result).kind).toBe("lost"); native.verifyRetired(0);
-    } finally { sender.abort("TEST cleanup"); socket.close(); peer.close(); }
-  });
-
-  it.each(["sender", "receiver", "both"] as const)("delivers unchanged files with native %s and retires session secrets", async (side) => {
-    const content = randomBytes(1024 * 1024 + 123);
-    const context = await setup([["native.bin", content], ["empty.txt", Buffer.alloc(0)]]);
-    const native = nativeProtocol();
-    const result = await run(context, { manifest: null, targets: null }, {
-      ...(side !== "receiver" ? { senderProtocol: native.protocol } : {}),
-      ...(side !== "sender" ? { receiverProtocol: native.protocol } : {}),
-    });
-    expect(result.sender).toEqual({ kind: "done" }); expect(result.receiver).toEqual({ kind: "done" });
-    expect(result.codes[0]).toBe(result.codes[1]); expect((await readFile(join(context.target, "native.bin"))).equals(content)).toBe(true);
-    expect((await readFile(join(context.target, "empty.txt"))).length).toBe(0); native.verifyRetired(side === "both" ? 2 : 1);
-    if (native.sourcesSupported && side !== "receiver") expect(native.sourcesCreated()).toBe(2);
-    if (native.targetsSupported && side !== "sender") expect(native.targetsCreated()).toBe(1);
-  }, 30_000);
-  it("keeps the v2 relay data markers and survives interrupted transfer with fresh owners", async () => {
-    const content = randomBytes(3 * 1024 * 1024 + 123);
-    const context = await setup([["resume.bin", content]]);
-    const state: { manifest: protocol.ManifestFile[] | null; targets: TargetFiles | null } = { manifest: null, targets: null };
-    const native = nativeProtocol();
-    const options = { route: "relay" as const, senderProtocol: native.protocol, receiverProtocol: native.protocol };
-    const first = await run(context, state, { ...options, stopAfter: 1024 * 1024 });
-    expect(first.sender.kind).toBe("lost"); expect(first.receiver.kind).toBe("lost"); native.verifyRetired(2);
-    const second = await run(context, state, options);
-    expect(second.sender).toEqual({ kind: "done" }); expect(second.receiver).toEqual({ kind: "done" });
-    expect(second.relayPayloadBytes).toBeGreaterThan(0);
-    expect((await readFile(join(context.target, "resume.bin"))).equals(content)).toBe(true); native.verifyRetired(4);
-  }, 30_000);
-  it("sends a native decline before closing and erases both attempts", async () => {
-    const context = await setup([["declined.bin", Buffer.from("TEST")]]); const native = nativeProtocol();
-    const result = await run(context, { manifest: null, targets: null }, { decline: true, senderProtocol: native.protocol, receiverProtocol: native.protocol });
-    expect(result.sender).toEqual({ kind: "declined", by: "peer" }); expect(result.receiver).toEqual({ kind: "declined", by: "self" });
-    expect(await readdir(context.target)).toEqual([]); native.verifyRetired(2);
-  });
-  it("does not prompt or send after a synchronous abort from the keyed event", async () => {
-    const context = await setup([["aborted.bin", Buffer.from("TEST")]]); const native = nativeProtocol();
-    const result = await run(context, { manifest: null, targets: null }, {
-      abortSenderOnKeyed: true, senderProtocol: native.protocol, receiverProtocol: native.protocol,
-    });
-    expect(result.sender).toMatchObject({ kind: "lost", detail: "TEST keyed abort" });
-    expect(result.receiver.kind).toBe("lost"); expect(result.codes).toEqual([]); expect(native.created()).toBeGreaterThan(0);
-    native.verifyRetired(native.created());
-  });
-
-});
-
-
-describe.skipIf(!nativeModulePath || privateAddresses().length === 0)("real Rust/Node LAN transfer", () => {
-  it.each([
-    ["sender", "macos"], ["receiver", "macos"], ["both", "macos"],
-    ["sender", "windows"], ["receiver", "windows"], ["both", "windows"],
-  ] as const)("delivers files with native %s and %s listener selection", async (side, senderPlatform) => {
-    const content = randomBytes(3 * 1024 * 1024 + 123);
-    const context = await setup([["native-lan.bin", content], ["empty.txt", Buffer.alloc(0)]]);
-    const native = nativeProtocol();
-    const result = await run(context, { manifest: null, targets: null }, {
-      allowLan: true, route: "lan", senderPlatform,
-      ...(side !== "receiver" ? { senderProtocol: native.protocol } : {}),
-      ...(side !== "sender" ? { receiverProtocol: native.protocol } : {}),
-    });
-    expect(result.sender).toEqual({ kind: "done" }); expect(result.receiver).toEqual({ kind: "done" });
-    expect(result.paths).toEqual(["lan", "lan"]); expect(result.relayPayloadBytes).toBe(0);
-    expect((await readFile(join(context.target, "native-lan.bin"))).equals(content)).toBe(true);
-    expect(await readFile(join(context.target, "empty.txt"))).toEqual(Buffer.alloc(0));
-    const attempts = side === "both" ? 2 : 1;
-    expect(native.lanCreated()).toBe(attempts); native.verifyRetired(attempts);
-  }, 30_000);
-  it("resumes an interrupted LAN transfer with new native owners and no relay payload", async () => {
-    const content = randomBytes(12 * 1024 * 1024 + 123);
-    const context = await setup([["resume-native-lan.bin", content]]);
-    const state: { manifest: protocol.ManifestFile[] | null; targets: TargetFiles | null } = { manifest: null, targets: null };
-    const native = nativeProtocol();
-    const options = { allowLan: true, route: "lan" as const, senderPlatform: "windows" as const, senderProtocol: native.protocol, receiverProtocol: native.protocol };
-    const first = await run(context, state, { ...options, stopAfter: 1024 * 1024 });
-    expect(first.sender).toMatchObject({ kind: "lost", lanBroke: true });
-    expect(first.receiver).toMatchObject({ kind: "lost", lanBroke: true });
-    expect(first.relayPayloadBytes).toBe(0); native.verifyRetired(2);
-    const second = await run(context, state, options);
-    expect(second.sender).toEqual({ kind: "done" }); expect(second.receiver).toEqual({ kind: "done" });
-    expect(second.paths).toEqual(["lan", "lan"]); expect(second.relayPayloadBytes).toBe(0);
-    expect((await readFile(join(context.target, "resume-native-lan.bin"))).equals(content)).toBe(true);
-    expect(native.lanCreated()).toBe(4); native.verifyRetired(4);
-  }, 30_000);
-});
