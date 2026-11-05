@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 // Run with ELECTRON_RUN_AS_NODE=1 on the packaged executable. Uses a fresh TEST
-// identity in memory and uses only a disposable TEST queue; never initializes the app, OS key store, network or VPN.
+// identity in memory and uses only disposable TEST queue/cache directories; never initializes the app, OS key store, network or VPN.
 const assert = require("node:assert/strict");
 const { createHash, generateKeyPairSync, sign } = require("node:crypto");
 const { resolve, join } = require("node:path");
-const { mkdtemp, readdir, rm } = require("node:fs/promises");
+const { mkdtemp, readFile, readdir, rm, writeFile } = require("node:fs/promises");
 const { tmpdir } = require("node:os");
 
 if (!process.versions.electron) throw new Error("Run this check with Electron, not regular Node");
@@ -46,6 +46,17 @@ async function checkAsyncHandles() {
     await queue.clear();
     assert.deepEqual(await readdir(directory), []);
   } finally { await rm(directory, { recursive: true, force: true }); }
+  const cacheDirectory = await mkdtemp(join(tmpdir(), "levik-bundled-cache-"));
+  try {
+    const original = '{"response":{"ok":true},"fetchedAt":1}';
+    await writeFile(join(cacheDirectory, "remote-config.json"), original);
+    const cache = await core.openConfigCache(cacheDirectory);
+    assert.equal(await cache.read("remote-config"), original);
+    await cache.write("remote-config", '{"response":{"ok":true},"fetchedAt":2}');
+    assert.equal(await readFile(join(cacheDirectory, "migration-backup-rust-v1/data/remote-config.json"), "utf8"), original);
+    await assert.rejects(cache.read("../secure-v1/device_identity.json"));
+    assert.deepEqual(JSON.parse(core.call("liveEvents.retryPlan", JSON.stringify({ failures: 0, received: false, random: 0.5 }))), { failures: 1, delay: 5750 });
+  } finally { await rm(cacheDirectory, { recursive: true, force: true }); }
   console.log(`Bundled Rust core ${info.version} verified in Electron ${process.versions.electron} (${info.os}/${info.arch}); async handles verified`);
 }
 const deadline = setTimeout(() => { console.error("Bundled Rust async check timed out"); process.exit(1); }, 10_000);
