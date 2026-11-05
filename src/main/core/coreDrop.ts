@@ -1,3 +1,4 @@
+import { planTargetsWithCore, type StartDropFilePlan } from "./nativeDropPlanning";
 import { dropLanWithCore, type NativeLanConstructors } from "./nativeDropLan";
 import { dropTargetsWithCore, type OpenDropTargets } from "./nativeDropTargets";
 import { dropSourceWithCore, type OpenDropSource } from "./nativeDropSource";
@@ -70,7 +71,7 @@ function decide<T>(core: RustCore, name: string, input: unknown, typescript: () 
  * call because the app loads the module after the engine exists.
  */
 export function dropProtocolWithCore(current: () => RustCore, records: () => OpenDropRecords | undefined = () => undefined,
-  report: () => void = () => {}, agreement: () => OpenDropAgreement | undefined = () => undefined, source: () => OpenDropSource | undefined = () => undefined, targets: () => OpenDropTargets | undefined = () => undefined, lan: () => NativeLanConstructors | undefined = () => undefined): DropProtocol {
+  report: () => void = () => {}, agreement: () => OpenDropAgreement | undefined = () => undefined, source: () => OpenDropSource | undefined = () => undefined, targets: () => OpenDropTargets | undefined = () => undefined, lan: () => NativeLanConstructors | undefined = () => undefined, planning: () => StartDropFilePlan | undefined = () => undefined): DropProtocol {
   const ready = (name: string): RustCore | null => {
     const core = current();
     return core.mode === "ts" || !core.has(name) ? null : core;
@@ -83,6 +84,7 @@ export function dropProtocolWithCore(current: () => RustCore, records: () => Ope
   };
 
   return {
+    planTargets: (folder, manifest) => planTargetsWithCore(current(), planning(), folder, manifest, report),
     createLan: () => dropLanWithCore(current(), lan(), report),
     createTargets: (folder, files) => dropTargetsWithCore(current(), targets(), folder, files, report),
     createSource: (file, offset, prefix) => dropSourceWithCore(current(), source(), file, offset, prefix, report),

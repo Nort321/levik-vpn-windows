@@ -61,6 +61,7 @@ export interface DropAgreement {
 }
 
 export interface DropProtocol {
+  planTargets?(folder: string, manifest: readonly ManifestFile[]): Promise<TargetFile[]>;
   createLan?(): DropLan | null;
   createTargets?(folder: string, targets: TargetFile[]): DropTargetIO | null;
   createSource?(file: SourceFile, offset: number, prefix: string | null): DropSource | null;

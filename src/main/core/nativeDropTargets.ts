@@ -34,6 +34,10 @@ export function dropTargetsWithCore(core: RustCore, open: OpenDropTargets | unde
   if (!isAbsolute(folder) || targets.some((target) => !Number.isSafeInteger(target.size) || target.size < 0
     || !isAbsolute(target.partial) || dirname(target.partial) !== resolve(folder)
     || (target.final !== null && (!isAbsolute(target.final) || dirname(target.final) !== resolve(folder))))) throw new TransferFailure("protocol");
+  // Unix JS paths with lone UTF-16 surrogates use Node's filesystem encoding;
+  // keep their exact legacy metadata before a native owner can touch files.
+  if (process.platform !== "win32" && [folder, ...targets.flatMap((target) => [target.partial, ...(target.final === null ? [] : [target.final])])]
+    .some((path) => Buffer.from(path).toString("utf8") !== path)) return null;
   const native = core.runNative<NativeDropTargets | null>("levikDrop.targets.activate", () => open(folder,
     targets.map((target) => ({ name: target.name, size: target.size, partial: target.partial, finalPath: target.final }))), () => null, isNativeDropTargets);
   if (!native) return null;

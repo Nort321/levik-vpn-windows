@@ -242,7 +242,7 @@ async function run(
       if (options.route) expect(paths).toHaveLength(2); // Both sides know the route before accepting.
       codes.push(code);
       if (options.decline) return null;
-      const planned = await planTargets(context.target, manifest);
+      const planned = await (options.receiverProtocol?.planTargets?.(context.target, manifest) ?? planTargets(context.target, manifest));
       return new TargetFiles(context.target, planned, async () => {}, options.receiverProtocol?.createTargets?.(context.target, planned) ?? null);
     },
     confirm: async () => true,
@@ -429,7 +429,7 @@ function nativeProtocol() {
   if (loaded.state !== "loaded" || !loaded.module.openDropRecords || !loaded.module.openDropAgreement) throw new Error("Native Drop records missing");
   const core = new RustCore(null, () => {}, "rust");
   const base = dropProtocolWithCore(() => core, () => loaded.module.openDropRecords, () => {}, () => loaded.module.openDropAgreement, () => loaded.module.openDropSource, () => loaded.module.openDropTargets,
-    () => loaded.module.startDropLanDial && loaded.module.openDropLanListener ? { dial: loaded.module.startDropLanDial, listen: loaded.module.openDropLanListener } : undefined);
+    () => loaded.module.startDropLanDial && loaded.module.openDropLanListener ? { dial: loaded.module.startDropLanDial, listen: loaded.module.openDropLanListener } : undefined, () => loaded.module.startDropFilePlan);
   const retained: protocol.SessionKeys[] = [];
   let closed = 0; let agreements = 0; let agreementsClosed = 0; let sources = 0; let sourcesClosed = 0; let targetsCreated = 0; let lanCreated = 0; let lanClosed = 0;
   const native: DropProtocol = { ...base, createLan: () => {

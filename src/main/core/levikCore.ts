@@ -1,3 +1,5 @@
+import { isNativeDropFilePlan, type NativeDropFilePlan, type StartDropFilePlan } from "./nativeDropPlanning";
+import type { ManifestFile } from "../platform/levikDrop/protocol";
 import { isNativeLanDialer, isNativeLanListener, type NativeLanDialer, type NativeLanListener, type StartDropLanDial, type OpenDropLanListener } from "./nativeDropLan";
 import { isNativeDropRelay, type NativeDropRelay, type StartDropRelay } from "./nativeDropRelay";
 import type { RelayEndpoint } from "../platform/levikDrop/relay";
@@ -55,6 +57,7 @@ export interface LevikCoreModule {
   openDropSource?: OpenDropSource;
   openDropTargets?: OpenDropTargets;
   startDropRelay?: StartDropRelay;
+  startDropFilePlan?: StartDropFilePlan;
   startDropLanDial?: StartDropLanDial;
   openDropLanListener?: OpenDropLanListener;
   /** Names of the core functions this build offers. */
@@ -122,7 +125,7 @@ export function loadLevikCore(path: string, options: {
   if (!isRecord(loaded) || typeof loaded.coreInfo !== "function") {
     return { state: "rejected", reason: "нет coreInfo()" };
   }
-  const { coreInfo, functions, call, restoreIdentity, createReplyKey, sealReply, createPublicClient, openSecureStore, openTelemetryQueue, openConfigCache, createApiDiscovery, startServerPings, startTunnelProbe, startXrayRequest, startServiceProbe, openRouteProbe, openDropRecords, openDropAgreement, openDropSource, openDropTargets, startDropRelay, startDropLanDial, openDropLanListener } = loaded;
+  const { coreInfo, functions, call, restoreIdentity, createReplyKey, sealReply, createPublicClient, openSecureStore, openTelemetryQueue, openConfigCache, createApiDiscovery, startServerPings, startTunnelProbe, startXrayRequest, startServiceProbe, openRouteProbe, openDropRecords, openDropAgreement, openDropSource, openDropTargets, startDropRelay, startDropLanDial, openDropLanListener, startDropFilePlan } = loaded;
   let info: unknown;
   try {
     info = coreInfo();
@@ -145,6 +148,11 @@ export function loadLevikCore(path: string, options: {
   const described: LevikCoreInfo = info;
   const module: LevikCoreModule = {
     coreInfo: () => described,
+    ...(typeof startDropFilePlan === "function" ? { startDropFilePlan: (folder: string, files: ManifestFile[]): NativeDropFilePlan => {
+      const owner: unknown = startDropFilePlan(folder, files);
+      if (!isNativeDropFilePlan(owner)) throw new Error("Invalid native Drop file plan");
+      return owner;
+    } } : {}),
     ...(typeof startDropLanDial === "function" ? { startDropLanDial: (addresses: string[], port: number, transfer: Buffer, key: Buffer): NativeLanDialer => {
       const owner: unknown = startDropLanDial(addresses, port, transfer, key);
       if (!isNativeLanDialer(owner)) throw new Error("Invalid native LAN dial owner");

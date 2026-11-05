@@ -748,7 +748,7 @@ export class DropEngine extends EventEmitter<DropEngineEvents> {
     this.assertCurrent(generation);
     if (free !== null && free < needed + 64 * 1024 * 1024) throw new TransferFailure("storage_full");
     stored.folder = folder;
-    stored.targets = await planTargets(folder, manifest);
+    stored.targets = await (this.options.protocol?.planTargets?.(folder, manifest) ?? planTargets(folder, manifest));
     if (!this.current(generation)) { await removePartials(stored.targets); this.assertCurrent(generation); }
     this.store.save();
     const files = this.targetFilesFor(stored);

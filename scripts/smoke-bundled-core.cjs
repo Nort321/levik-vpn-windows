@@ -84,7 +84,31 @@ async function checkDropLan() {
     })(),new Promise((_,reject)=>{timer=setTimeout(()=>reject(new Error("TEST LAN timed out")),15000);})]);
   } finally { clearTimeout(timer); sender?.close(); receiver?.close(); dial?.close(); listener.close(); key.fill(0); }
 }
+async function checkDropPlanning() {
+  const directory=await mkdtemp(join(tmpdir(),"levik-bundled-plan-"));
+  let planner;
+  try {
+    await writeFile(join(directory,".é.txt.levikdrop"),"prior");
+    const manifest=[{name:"e\u0301.txt",size:4},{name:"é.txt",size:0}];
+    planner=core.startDropFilePlan(directory,manifest); manifest[0].name="mutated";
+    const targets=await planner.read();
+    assert.equal(targets[0].name,"é.txt"); assert.equal(targets[0].partial,join(directory,".é (1).txt.levikdrop"));
+    assert.equal(targets[1].partial,join(directory,".é (2).txt.levikdrop"));
+    planner.commit(); planner.close();
+    const receiver=core.openDropTargets(directory,targets);
+    try {
+      await receiver.offsets(); await receiver.write(0,0,Buffer.from("TEST"));
+      const final=await receiver.finish(0,createHash("sha256").update("TEST").digest("hex"));
+      assert.equal(await readFile(final,"utf8"),"TEST");
+    } finally { await receiver.closeWriting(); }
+    const unclaimed=core.startDropFilePlan(directory,[{name:"unclaimed.txt",size:0}]);
+    try {const pending=await unclaimed.read(); await unclaimed.discard(); assert.ok(!(await readdir(directory)).includes(pending[0].partial.split(/[\\/]/).pop()));}
+    finally {unclaimed.close();}
+    assert.equal(await readFile(join(directory,".é.txt.levikdrop"),"utf8"),"prior");
+  } finally {planner?.close(); await planner?.discard(); await rm(directory,{recursive:true,force:true});}
+}
 async function checkAsyncHandles() {
+  await checkDropPlanning();
   await checkDropRelay();
   await checkDropLan();
   assert.equal(typeof core.openSecureStore, "function");

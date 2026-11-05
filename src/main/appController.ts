@@ -1,3 +1,4 @@
+import type { StartDropFilePlan } from "./core/nativeDropPlanning";
 import type { NativeLanConstructors } from "./core/nativeDropLan";
 import { joinRelayWithCore, type StartDropRelay } from "./core/nativeDropRelay";
 import type { OpenDropTargets } from "./core/nativeDropTargets";
@@ -415,6 +416,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
   private openDropTargets: OpenDropTargets | undefined;
   private startDropRelay: StartDropRelay | undefined;
   private nativeDropLan: NativeLanConstructors | undefined;
+  private startDropFilePlan: StartDropFilePlan | undefined;
   private readonly approvalsCore = new CoreApprovals(() => this.core);
   private readonly endpointsCore = new CoreEndpoints(() => this.core);
   private readonly settingsCore = new CoreSettings(() => this.core);
@@ -583,7 +585,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
       join: joinRelayWithCore(() => this.core, () => this.startDropRelay,
         () => this.recordDiagnostic("Rust-ядро: не удалось освободить соединение LevikDrop")),
       protocol: dropProtocolWithCore(() => this.core, () => this.openDropRecords,
-        () => this.recordDiagnostic("Rust-ядро: не удалось освободить состояние LevikDrop"), () => this.openDropAgreement, () => this.openDropSource, () => this.openDropTargets, () => this.nativeDropLan),
+        () => this.recordDiagnostic("Rust-ядро: не удалось освободить состояние LevikDrop"), () => this.openDropAgreement, () => this.openDropSource, () => this.openDropTargets, () => this.nativeDropLan, () => this.startDropFilePlan),
     });
     this.drop.on("changed", () => {
       if (this.drop) this.patch({ drop: this.drop.snapshot() });
@@ -3305,6 +3307,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     this.openDropSource = status.state === "loaded" ? status.module.openDropSource : undefined;
     this.openDropTargets = status.state === "loaded" ? status.module.openDropTargets : undefined;
     this.startDropRelay = status.state === "loaded" ? status.module.startDropRelay : undefined;
+    this.startDropFilePlan = status.state === "loaded" ? status.module.startDropFilePlan : undefined;
     this.nativeDropLan = status.state === "loaded" && status.module.startDropLanDial && status.module.openDropLanListener
       ? { dial: status.module.startDropLanDial, listen: status.module.openDropLanListener } : undefined;
     this.createApiDiscovery = status.state === "loaded" ? status.module.createApiDiscovery : undefined;
