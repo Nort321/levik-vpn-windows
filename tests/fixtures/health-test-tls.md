@@ -1,0 +1,1 @@
+Public TEST ONLY keypair for the isolated loopback health server, copied byte-for-byte from levik_desktop/crates/levik-api/tests/tls. It is deliberately not trusted by the OS. Never install its CA or use this key as a device or service identity. Tests must reject this certificate and must not contact real VPN nodes.

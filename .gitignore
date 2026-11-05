@@ -28,3 +28,7 @@ coverage/
 .vitest/
 .idea/
 .vscode/
+
+# Public TEST ONLY loopback TLS fixtures; never production identities.
+!tests/fixtures/health-test-cert.pem
+!tests/fixtures/health-test-key.pem

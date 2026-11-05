@@ -1,3 +1,4 @@
+import { CoreTunnelHealth, type TunnelHealthOptions } from "./core/nativeTunnelHealth";
 import { CoreServerPinger } from "./core/nativeServerPinger";
 import type { CreateApiDiscovery } from "./core/nativeApiDiscovery";
 import { corePublicFetch, type NativePublicClient } from "./core/publicFetch";
@@ -301,8 +302,8 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     // Capture IPv6 in TUN and block it explicitly; the phone endpoint itself is IPv4.
     start: (config, name, current) => this.xray.start(config, undefined, [], current, { name, ipv6: true }),
     allowTunnel: () => this.killSwitch.allowTunnel(),
-    healthy: () => isTunnelHealthy(),
-    stop: () => this.xray.stop(),
+    healthy: () => this.checkTunnelHealth(),
+    stop: () => { this.tunnelProbe.cancel(); return this.xray.stop(); },
     releaseProtection: () => this.releaseProtection(),
     changed: (guest, statusDetail) => this.patch({ guest, statusDetail,
       status: !guest ? "disconnected" : guest.phase === "connected" ? "connected" : guest.phase === "connecting" ? "connecting" : "error",
@@ -326,6 +327,8 @@ export class AppController extends EventEmitter<AppControllerEvents> {
   private identity!: DeviceIdentity;
   private api!: MobileApiClient;
   private createApiDiscovery: CreateApiDiscovery | undefined;
+  private readonly tunnelProbe = new CoreTunnelHealth(() => this.core, "windows",
+    () => this.recordDiagnostic("Rust-ядро: проверка трафика через туннель не завершена"));
   private pingGeneration = 0;
   private readonly serverPinger = new CoreServerPinger(() => this.core,
     () => this.recordDiagnostic("Rust-ядро: замер доступности серверов не завершён"));
@@ -1119,6 +1122,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     // Account expiry and background Home decisions never release a guest's boundary.
     if (this.guestConnection.active) return (by === "user" && code === "user") || (by === "system" && code === null)
       ? this.disconnectGuest() : Promise.resolve();
+    this.tunnelProbe.cancel();
     this.cancelRouteProbes();
     void this.telemetry.finish(by, code);
     this.cancelTunnelRecovery();
@@ -1215,6 +1219,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
   async shutdown(reason: "quit" | "app_update" = "quit"): Promise<void> {
     this.pingGeneration++;
     this.serverPinger.cancel();
+    this.tunnelProbe.cancel();
     this.cancelRouteProbes();
     if (this.serviceRoutesRetry) clearTimeout(this.serviceRoutesRetry);
     this.serviceRoutesRetry = null;
@@ -2864,7 +2869,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
           codes = ["other"];
           healthy = await routes.probeCurrent().catch(() => false);
         } else {
-          healthy = controlHealthy && await isTunnelHealthy({ onFailure: (failures) => { codes = failures; } });
+          healthy = controlHealthy && await this.checkTunnelHealth({ onFailure: (failures) => { codes = failures; } });
         }
       }
       if (generation !== this.connectionGeneration || this.state.status !== "connected") return;
@@ -2910,7 +2915,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
   private async verifyTunnelReadiness(generation: number, onFailure?: (codes: string[]) => void): Promise<void> {
     if (this.xray.serviceRoutes?.authentication && await this.xray.isHealthy()) return;
     let failures: string[] = [];
-    const healthy = await isTunnelHealthy({
+    const healthy = await this.checkTunnelHealth({
       startup: true,
       shouldContinue: () => generation === this.connectionGeneration && this.xray.isRunning(),
       onFailure: (codes) => { failures = codes; onFailure?.(codes); },
@@ -3227,6 +3232,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
 
   private async stopTunnelForReplacement(): Promise<void> {
     if (this.guestConnection.active) throw new Error("Сначала завершите гостевой режим.");
+    this.tunnelProbe.cancel();
     this.cancelRouteProbes();
     this.cancelTunnelRecovery();
     this.nextAttemptCause = "server_switch";
@@ -3279,6 +3285,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
   useRustCore(status: LevikCoreStatus): void {
     this.createApiDiscovery = status.state === "loaded" ? status.module.createApiDiscovery : undefined;
     this.serverPinger.useRustCore(status.state === "loaded" ? status.module.startServerPings : undefined);
+    this.tunnelProbe.useRustCore(status.state === "loaded" ? status.module.startTunnelProbe : undefined);
     const version = status.state === "loaded" ? status.info.version : null;
     this.core = new RustCore(coreBridge(status), (line) => this.recordDiagnostic(line), "ts", version);
     this.telemetry.useCore(() => this.core.tally());
@@ -3299,6 +3306,13 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     this.publicHttp = null;
     try { this.publicHttp = status.state === "loaded" ? status.module.createPublicClient?.() ?? null : null; }
     catch { this.recordDiagnostic("Rust-ядро: служебный HTTP-клиент недоступен"); }
+  }
+
+  private checkTunnelHealth(options: TunnelHealthOptions = {}): Promise<boolean> {
+    return this.tunnelProbe.check(options, isTunnelHealthy);
+  }
+  private measureTunnelTraffic(current: () => boolean): Promise<number | null> {
+    return this.tunnelProbe.traffic(current, measureTraffic);
   }
 
   private applyCoreMode(): void {
@@ -3794,7 +3808,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     void (async () => {
       await delay(delayMs);
       if (!current()) return;
-      const elapsed = await measureTraffic(current);
+      const elapsed = await this.measureTunnelTraffic(current);
       const passed = elapsed !== null;
       if (!current()) return;
       const network = this.currentNetworkKey();
@@ -3808,7 +3822,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
       }
       // No handshake either: the tunnel is down, which the health check handles.
       // A handshake without a download is a throttled protocol.
-      if (!await isTunnelHealthy({ shouldContinue: current }) || !current()) return;
+      if (!await this.checkTunnelHealth({ shouldContinue: current }) || !current()) return;
       if (checkedNode) this.telemetry.record((session) => session.trafficCheck(checkedNode, FAILED_TRAFFIC_CHECK_MS, false));
       if (network) {
         const node = nodeIdForServer(server) ?? server.id;

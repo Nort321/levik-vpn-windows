@@ -34,6 +34,15 @@ async function checkAsyncHandles() {
   const publicRequest = core.createPublicClient().start(JSON.stringify({ url: "https://unused.invalid/api/health", method: "GET" }));
   publicRequest.close();
   assert.deepEqual(JSON.parse(await publicRequest.read()), { ok: false });
+  const discovery = core.createApiDiscovery("https://unused.invalid");
+  discovery.invalidate();
+  assert.equal(await discovery.resolve("[]"), "https://unused.invalid");
+  const pings = core.startServerPings(JSON.stringify([{ id: "TEST", endpoint: { host: "unused.invalid", port: 443 }, udp: true }]));
+  pings.close();
+  assert.deepEqual(JSON.parse(await pings.read()), { ok: false });
+  const health = core.startTunnelProbe('{"kind":"handshake"}');
+  health.close(); health.close();
+  assert.deepEqual(JSON.parse(await health.read()), { ok: true, value: { healthy: false, durationMs: null, codes: [], cancelled: true } });
   const directory = await mkdtemp(join(tmpdir(), "levik-bundled-queue-"));
   try {
     const queue = await core.openTelemetryQueue(directory);
