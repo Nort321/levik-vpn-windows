@@ -5,7 +5,7 @@ import { existsSync } from "node:fs";
 import { loadLevikCore } from "../src/main/core/levikCore";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createServer, type Server } from "node:http";
-import { createServer as createTlsServer } from "node:tls";
+import { createServer as createHttpsServer } from "node:https";
 import { connect, type Socket } from "node:net";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
@@ -104,10 +104,10 @@ describe("route measurement ownership",()=>{
   });
 });
 
-const modulePath=process.env.LEVIK_TEST_CORE;const servers=new Set<Server|ReturnType<typeof createTlsServer>>();const sockets=new Set<Socket>();
+const modulePath=process.env.LEVIK_TEST_CORE;const servers=new Set<Server|ReturnType<typeof createHttpsServer>>();const sockets=new Set<Socket>();
 function track(socket:Socket){sockets.add(socket);socket.on("error",()=>{});socket.once("close",()=>sockets.delete(socket));return socket;}
 afterEach(async()=>{for(const socket of sockets)socket.destroy();sockets.clear();await Promise.all([...servers].map(server=>new Promise<void>(done=>server.close(()=>done()))));servers.clear();});
-async function listen(server:Server|ReturnType<typeof createTlsServer>):Promise<number>{servers.add(server);server.on("connection",track);server.listen(0,"127.0.0.1");await once(server,"listening");const address=server.address();if(!address||typeof address==="string")throw new Error("TEST listener");return address.port;}
+async function listen(server:Server|ReturnType<typeof createHttpsServer>):Promise<number>{servers.add(server);server.on("connection",track);server.listen(0,"127.0.0.1");await once(server,"listening");const address=server.address();if(!address||typeof address==="string")throw new Error("TEST listener");return address.port;}
 function real(port:number,signal=new AbortController().signal){
   if(!modulePath)throw new Error("LEVIK_TEST_CORE missing");const status=loadLevikCore(modulePath);
   if(status.state!=="loaded"||!status.module.openRouteProbe)throw new Error("Native route measurement missing");
@@ -127,11 +127,13 @@ describe.skipIf(!modulePath)("real native route probe",()=>{
     const closed=once(socket,"close");socket.once("end",()=>socket.end());socket.resume();await rejected;expect(Date.now()-started).toBeGreaterThanOrEqual(2400);await closed;await probe.close();
   });
   it("uses OS trust and never accepts the public TEST certificate",async()=>{
-    const fixture=(name:string)=>readFileSync(resolve("../levik_desktop/crates/levik-api/tests/tls",`${name}.pem`));
-    const tls=createTlsServer({cert:fixture("cert"),key:fixture("key")});tls.on("tlsClientError",()=>{});const tlsPort=await listen(tls);
+    const fixture=(name:string)=>readFileSync(resolve(__dirname,"fixtures",`health-test-${name}.pem`));
+    let secureConnections=0; let httpRequests=0;
+    const tls=createHttpsServer({cert:fixture("cert"),key:fixture("key")},(_req,res)=>{httpRequests++;res.writeHead(200,{"Content-Length":"0"});res.end();});
+    tls.on("secureConnection",()=>{secureConnections++;});tls.on("tlsClientError",()=>{});const tlsPort=await listen(tls);
     const proxy=createServer();const port=await listen(proxy);let requests=0;
     proxy.on("connect",(_req,socket)=>{requests++;const peer=track(connect(tlsPort,"127.0.0.1"));socket.once("close",()=>peer.destroy());peer.once("connect",()=>{socket.write("HTTP/1.1 200 OK\r\n\r\n");socket.pipe(peer).pipe(socket);});});
     const probe=real(port);await expect(probe.latency("https://api.test/")).rejects.toThrow("Измерение маршрута не подтверждено");
-    expect(requests).toBe(1);await probe.close();
+    expect(requests).toBe(1);expect(secureConnections).toBe(0);expect(httpRequests).toBe(0);await probe.close();
   });
 });
