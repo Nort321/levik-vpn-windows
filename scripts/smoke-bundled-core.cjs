@@ -1,9 +1,11 @@
 #!/usr/bin/env node
 // Run with ELECTRON_RUN_AS_NODE=1 on the packaged executable. Uses a fresh TEST
-// identity in memory and never initializes the app, storage, network or VPN.
+// identity in memory and uses only a disposable TEST queue; never initializes the app, OS key store, network or VPN.
 const assert = require("node:assert/strict");
 const { createHash, generateKeyPairSync, sign } = require("node:crypto");
-const { resolve } = require("node:path");
+const { resolve, join } = require("node:path");
+const { mkdtemp, readdir, rm } = require("node:fs/promises");
+const { tmpdir } = require("node:os");
 
 if (!process.versions.electron) throw new Error("Run this check with Electron, not regular Node");
 const [modulePath, expectedVersion] = process.argv.slice(2);
@@ -32,6 +34,18 @@ async function checkAsyncHandles() {
   const publicRequest = core.createPublicClient().start(JSON.stringify({ url: "https://unused.invalid/api/health", method: "GET" }));
   publicRequest.close();
   assert.deepEqual(JSON.parse(await publicRequest.read()), { ok: false });
+  const directory = await mkdtemp(join(tmpdir(), "levik-bundled-queue-"));
+  try {
+    const queue = await core.openTelemetryQueue(directory);
+    const now = Date.UTC(2026, 10, 5, 12);
+    const install = await queue.installId(now);
+    const entry = { startedAt: now, savedAt: now, body: { sid: "TEST", seq: 0, final: false, ageS: 0 } };
+    await queue.put(JSON.stringify(entry), now);
+    assert.deepEqual(JSON.parse(await queue.pending(now)), [entry]);
+    assert.equal(await queue.installId(now), install);
+    await queue.clear();
+    assert.deepEqual(await readdir(directory), []);
+  } finally { await rm(directory, { recursive: true, force: true }); }
   console.log(`Bundled Rust core ${info.version} verified in Electron ${process.versions.electron} (${info.os}/${info.arch}); async handles verified`);
 }
 const deadline = setTimeout(() => { console.error("Bundled Rust async check timed out"); process.exit(1); }, 10_000);
