@@ -152,7 +152,7 @@ describe.skipIf(!modulePath)("actual TLS file transfer with Rust owners",()=>{
     try{
       const outcomes=await Promise.all([sender.run(),receiver.run()]);expect(outcomes).toEqual([{kind:"done"},{kind:"done"}]);
       expect(codes).toHaveLength(2);expect(codes[0]).toBe(codes[1]);expect(broker.count()).toBe(2);
-      expect(await readFile(join(target,"mixed (1).bin"))).toEqual(bytes);expect(await readFile(join(target,"empty.txt"))).toEqual(Buffer.alloc(0));expect(await readFile(join(target,"mixed.bin"),"utf8")).toBe("original");
+      expect((await readFile(join(target,"mixed (1).bin"))).equals(bytes)).toBe(true);expect(await readFile(join(target,"empty.txt"))).toEqual(Buffer.alloc(0));expect(await readFile(join(target,"mixed.bin"),"utf8")).toBe("original");
     }finally{sender.abort("TEST cleanup");receiver.abort("TEST cleanup");senderSocket.close();receiverSocket.close();await Promise.all(reading);}
   },30_000);
 });

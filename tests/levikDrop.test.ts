@@ -536,7 +536,7 @@ describe.skipIf(!nativeModulePath || privateAddresses().length === 0)("real Rust
     });
     expect(result.sender).toEqual({ kind: "done" }); expect(result.receiver).toEqual({ kind: "done" });
     expect(result.paths).toEqual(["lan", "lan"]); expect(result.relayPayloadBytes).toBe(0);
-    expect(await readFile(join(context.target, "native-lan.bin"))).toEqual(content);
+    expect((await readFile(join(context.target, "native-lan.bin"))).equals(content)).toBe(true);
     expect(await readFile(join(context.target, "empty.txt"))).toEqual(Buffer.alloc(0));
     const attempts = side === "both" ? 2 : 1;
     expect(native.lanCreated()).toBe(attempts); native.verifyRetired(attempts);
@@ -554,7 +554,7 @@ describe.skipIf(!nativeModulePath || privateAddresses().length === 0)("real Rust
     const second = await run(context, state, options);
     expect(second.sender).toEqual({ kind: "done" }); expect(second.receiver).toEqual({ kind: "done" });
     expect(second.paths).toEqual(["lan", "lan"]); expect(second.relayPayloadBytes).toBe(0);
-    expect(await readFile(join(context.target, "resume-native-lan.bin"))).toEqual(content);
+    expect((await readFile(join(context.target, "resume-native-lan.bin"))).equals(content)).toBe(true);
     expect(native.lanCreated()).toBe(4); native.verifyRetired(4);
   }, 30_000);
 });
