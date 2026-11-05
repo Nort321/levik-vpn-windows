@@ -1,3 +1,4 @@
+import { CoreRouteProbes } from "./core/nativeRouteProbes";
 import { CoreTunnelHealth, type TunnelHealthOptions } from "./core/nativeTunnelHealth";
 import { CoreServerPinger } from "./core/nativeServerPinger";
 import type { CreateApiDiscovery } from "./core/nativeApiDiscovery";
@@ -368,6 +369,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
   private routeMeasurementKeys: Record<string, string> = {};
   private routeMeasurementNetwork: string | null = null;
   private routeProbeAbort: AbortController | null = null;
+  private readonly routeProbes = new CoreRouteProbes();
   private connectionIntent = 0;
   /** Smart Auto, docs/app-platform.md: which protocols carried traffic on which network. */
   private readonly protocolHistory = new ProtocolHistoryStore(join(app.getPath("userData"), "smart-auto.json"));
@@ -3288,9 +3290,12 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     this.tunnelProbe.useRustCore(status.state === "loaded" ? status.module.startTunnelProbe : undefined);
     const version = status.state === "loaded" ? status.info.version : null;
     this.core = new RustCore(coreBridge(status), (line) => this.recordDiagnostic(line), "ts", version);
+    this.routeProbes.useRustCore(() => this.core, status.state === "loaded" ? status.module.openRouteProbe : undefined,
+      () => this.recordDiagnostic("Rust-ядро: измерение маршрута не подтверждено"));
     this.xray.useRustCore(() => this.core, status.state === "loaded" ? status.module.startXrayRequest : undefined,
       () => this.recordDiagnostic("Rust-ядро: локальный API или проверка маршрута не подтвердили запрос"),
-      status.state === "loaded" ? status.module.startServiceProbe : undefined);
+      status.state === "loaded" ? status.module.startServiceProbe : undefined,
+      status.state === "loaded" ? status.module.openRouteProbe : undefined);
     this.telemetry.useCore(() => this.core.tally());
     this.telemetry.useRustCore(this.core, status.state === "loaded" ? status.module.openTelemetryQueue : undefined,
       () => this.recordDiagnostic("Rust-ядро: очередь анонимных отчётов использует резервную реализацию"));
@@ -3626,6 +3631,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
   }
 
   private cancelRouteProbes(): void {
+    this.routeProbes.cancel();
     this.connectionIntent++;
     this.routeProbeAbort?.abort();
   }
@@ -3723,7 +3729,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     }
     this.patch({ status: "connecting", statusDetail: "Smart Auto: проверяем маршруты…", busy: true });
     try {
-      const measurements = await measureRouteCandidates({ executable: this.xray.executablePath(), candidates, signal: abort.signal });
+      const measurements = await measureRouteCandidates({ executable: this.xray.executablePath(), candidates, signal: abort.signal, core: this.routeProbes });
       if (abort.signal.aborted || this.xray.isRunning() || !sameServers(snapshot, this.state.servers)
         || network !== this.currentNetworkKey() || profile !== this.profile || token !== this.accessToken || intent !== this.connectionIntent) return false;
       this.routeMeasurements = measurements; this.routeMeasurementKeys = keys; this.routeMeasurementNetwork = network;

@@ -43,6 +43,10 @@ async function checkAsyncHandles() {
   const rpc = core.startXrayRequest('{"request":{"kind":"statistics"}}');
   rpc.close(); rpc.close();
   assert.deepEqual(JSON.parse(await rpc.read()), { ok: false });
+  const route = core.openRouteProbe(JSON.stringify({ port: 47200,
+    auth: { port: 47200, user: "probe", password: "a".repeat(48) } }));
+  route.close(); route.close();
+  assert.deepEqual(JSON.parse(await route.latency("https://unused.invalid/", false)), { ok: false });
   const service = core.startServiceProbe(JSON.stringify({ kind: "dns", port: 47200,
     auth: { port: 47188, user: "levik-service", password: "a".repeat(48) }, resolvers: ["tcp://unused.invalid"] }));
   service.close(); service.close();

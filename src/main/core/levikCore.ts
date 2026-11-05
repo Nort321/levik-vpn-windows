@@ -1,3 +1,4 @@
+import { isNativeRouteProbe, type NativeRouteProbe, type OpenRouteProbe } from "./nativeRouteProbes";
 import { isNativeServiceProbe, type NativeServiceProbe, type StartServiceProbe } from "./nativeServiceProbes";
 import { isNativeXrayRequest, type NativeXrayRequest, type StartXrayRequest } from "./nativeXrayApi";
 import { isNativeTunnelProbe, type NativeTunnelProbe, type StartTunnelProbe } from "./nativeTunnelHealth";
@@ -41,6 +42,7 @@ export interface LevikCoreModule {
   startTunnelProbe?: StartTunnelProbe;
   startXrayRequest?: StartXrayRequest;
   startServiceProbe?: StartServiceProbe;
+  openRouteProbe?: OpenRouteProbe;
   /** Names of the core functions this build offers. */
   functions(): string[];
   /** Runs a core function: JSON in, JSON out; throws on bad input. */
@@ -106,7 +108,7 @@ export function loadLevikCore(path: string, options: {
   if (!isRecord(loaded) || typeof loaded.coreInfo !== "function") {
     return { state: "rejected", reason: "нет coreInfo()" };
   }
-  const { coreInfo, functions, call, restoreIdentity, createReplyKey, sealReply, createPublicClient, openSecureStore, openTelemetryQueue, openConfigCache, createApiDiscovery, startServerPings, startTunnelProbe, startXrayRequest, startServiceProbe } = loaded;
+  const { coreInfo, functions, call, restoreIdentity, createReplyKey, sealReply, createPublicClient, openSecureStore, openTelemetryQueue, openConfigCache, createApiDiscovery, startServerPings, startTunnelProbe, startXrayRequest, startServiceProbe, openRouteProbe } = loaded;
   let info: unknown;
   try {
     info = coreInfo();
@@ -129,6 +131,11 @@ export function loadLevikCore(path: string, options: {
   const described: LevikCoreInfo = info;
   const module: LevikCoreModule = {
     coreInfo: () => described,
+    ...(typeof openRouteProbe === "function" ? { openRouteProbe: (input: string): NativeRouteProbe => {
+      const probe: unknown = openRouteProbe(input);
+      if (!isNativeRouteProbe(probe)) throw new Error("Invalid native route probe");
+      return probe;
+    } } : {}),
     ...(typeof startServiceProbe === "function" ? { startServiceProbe: (input: string): NativeServiceProbe => {
       const probe: unknown = startServiceProbe(input);
       if (!isNativeServiceProbe(probe)) throw new Error("Invalid native service probe");

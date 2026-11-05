@@ -68,4 +68,14 @@ describe("loadLevikCore", () => {
     expect(() => bad.module.startServiceProbe?.("{}")).toThrow("Invalid native service probe");
   });
 
+  it("validates the optional native route measurement handle", () => {
+    const native = { latency: async () => '{"ok":false}', transfer: async () => '{"ok":false}', close: () => {} };
+    const loaded = loadLevikCore("/m.node", { ...present, load: () => ({ coreInfo: () => info, ...bridge, openRouteProbe: () => native }) });
+    if (loaded.state !== "loaded") throw new Error("TEST module rejected");
+    expect(loaded.module.openRouteProbe?.("{}")).toBe(native);
+    const bad = loadLevikCore("/m.node", { ...present, load: () => ({ coreInfo: () => info, ...bridge, openRouteProbe: () => ({ close: () => {} }) }) });
+    if (bad.state !== "loaded") throw new Error("TEST module rejected");
+    expect(() => bad.module.openRouteProbe?.("{}")).toThrow("Invalid native route probe");
+  });
+
 });

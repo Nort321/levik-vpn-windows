@@ -1,3 +1,4 @@
+import type { OpenRouteProbe } from "../core/nativeRouteProbes";
 import type { StartServiceProbe } from "../core/nativeServiceProbes";
 import { CoreXrayApi, type StartXrayRequest } from "../core/nativeXrayApi";
 import type { RustCore } from "../core/rustCore";
@@ -38,9 +39,9 @@ interface XrayEvents {
 export class XrayManager extends EventEmitter<XrayEvents> {
   readonly serviceRoutes = new ServiceRouteSession((status) => this.emit("serviceRoutes", status));
   private readonly localApi = new CoreXrayApi();
-  useRustCore(current: () => RustCore, start: StartXrayRequest | undefined, report: () => void, startProbe?: StartServiceProbe): void {
+  useRustCore(current: () => RustCore, start: StartXrayRequest | undefined, report: () => void, startProbe?: StartServiceProbe, openProbe?: OpenRouteProbe): void {
     this.localApi.useRustCore(current, start, report);
-    this.serviceRoutes.useRustCore(current, start, report, startProbe);
+    this.serviceRoutes.useRustCore(current, start, report, startProbe, openProbe);
   }
   private process: ChildProcessWithoutNullStreams | null = null;
   private readonly stopping = new WeakSet<ChildProcess>();
