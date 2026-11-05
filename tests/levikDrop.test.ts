@@ -428,10 +428,14 @@ function nativeProtocol() {
   const loaded = loadLevikCore(nativeModulePath);
   if (loaded.state !== "loaded" || !loaded.module.openDropRecords || !loaded.module.openDropAgreement) throw new Error("Native Drop records missing");
   const core = new RustCore(null, () => {}, "rust");
-  const base = dropProtocolWithCore(() => core, () => loaded.module.openDropRecords, () => {}, () => loaded.module.openDropAgreement, () => loaded.module.openDropSource, () => loaded.module.openDropTargets);
+  const base = dropProtocolWithCore(() => core, () => loaded.module.openDropRecords, () => {}, () => loaded.module.openDropAgreement, () => loaded.module.openDropSource, () => loaded.module.openDropTargets,
+    () => loaded.module.startDropLanDial && loaded.module.openDropLanListener ? { dial: loaded.module.startDropLanDial, listen: loaded.module.openDropLanListener } : undefined);
   const retained: protocol.SessionKeys[] = [];
-  let closed = 0; let agreements = 0; let agreementsClosed = 0; let sources = 0; let sourcesClosed = 0; let targetsCreated = 0;
-  const native: DropProtocol = { ...base, createTargets: (folder, targets) => {
+  let closed = 0; let agreements = 0; let agreementsClosed = 0; let sources = 0; let sourcesClosed = 0; let targetsCreated = 0; let lanCreated = 0; let lanClosed = 0;
+  const native: DropProtocol = { ...base, createLan: () => {
+    const owner = base.createLan?.(); if (!owner) return null; lanCreated++;
+    return { open: owner.open, dial: owner.dial, close: () => { lanClosed++; owner.close(); } };
+  }, createTargets: (folder, targets) => {
     const owner = base.createTargets?.(folder, targets); if (owner) targetsCreated++; return owner ?? null;
   }, createSource: (file, offset, prefix) => {
     const source = base.createSource?.(file, offset, prefix); if (!source) return null;
@@ -448,8 +452,8 @@ function nativeProtocol() {
     if (!records) throw new Error("TEST native codec was not selected");
     return { seal: records.seal, open: records.open, close: () => { closed++; records.close(); } };
   } };
-  return { protocol: native, created: () => retained.length, agreementsCreated: () => agreements, sourcesCreated: () => sources, sourcesSupported: !!loaded.module.openDropSource, targetsCreated: () => targetsCreated, targetsSupported: !!loaded.module.openDropTargets, verifyRetired: (count: number) => {
-    expect(closed).toBe(count); expect(retained).toHaveLength(count);
+  return { protocol: native, lanCreated: () => lanCreated, created: () => retained.length, agreementsCreated: () => agreements, sourcesCreated: () => sources, sourcesSupported: !!loaded.module.openDropSource, targetsCreated: () => targetsCreated, targetsSupported: !!loaded.module.openDropTargets, verifyRetired: (count: number) => {
+    expect(lanClosed).toBe(lanCreated); expect(closed).toBe(count); expect(retained).toHaveLength(count);
     expect(agreements).toBeGreaterThanOrEqual(count); expect(agreementsClosed).toBe(agreements); expect(sourcesClosed).toBe(sources);
     for (const keys of retained) for (const bytes of [keys.sr, keys.rs, keys.lan]) expect(bytes.every((byte) => byte === 0)).toBe(true);
   } };
@@ -514,4 +518,43 @@ describe.skipIf(!nativeModulePath)("real Rust/Node Drop transfer", () => {
     native.verifyRetired(native.created());
   });
 
+});
+
+
+describe.skipIf(!nativeModulePath || privateAddresses().length === 0)("real Rust/Node LAN transfer", () => {
+  it.each([
+    ["sender", "macos"], ["receiver", "macos"], ["both", "macos"],
+    ["sender", "windows"], ["receiver", "windows"], ["both", "windows"],
+  ] as const)("delivers files with native %s and %s listener selection", async (side, senderPlatform) => {
+    const content = randomBytes(3 * 1024 * 1024 + 123);
+    const context = await setup([["native-lan.bin", content], ["empty.txt", Buffer.alloc(0)]]);
+    const native = nativeProtocol();
+    const result = await run(context, { manifest: null, targets: null }, {
+      allowLan: true, route: "lan", senderPlatform,
+      ...(side !== "receiver" ? { senderProtocol: native.protocol } : {}),
+      ...(side !== "sender" ? { receiverProtocol: native.protocol } : {}),
+    });
+    expect(result.sender).toEqual({ kind: "done" }); expect(result.receiver).toEqual({ kind: "done" });
+    expect(result.paths).toEqual(["lan", "lan"]); expect(result.relayPayloadBytes).toBe(0);
+    expect(await readFile(join(context.target, "native-lan.bin"))).toEqual(content);
+    expect(await readFile(join(context.target, "empty.txt"))).toEqual(Buffer.alloc(0));
+    const attempts = side === "both" ? 2 : 1;
+    expect(native.lanCreated()).toBe(attempts); native.verifyRetired(attempts);
+  }, 30_000);
+  it("resumes an interrupted LAN transfer with new native owners and no relay payload", async () => {
+    const content = randomBytes(12 * 1024 * 1024 + 123);
+    const context = await setup([["resume-native-lan.bin", content]]);
+    const state: { manifest: protocol.ManifestFile[] | null; targets: TargetFiles | null } = { manifest: null, targets: null };
+    const native = nativeProtocol();
+    const options = { allowLan: true, route: "lan" as const, senderPlatform: "windows" as const, senderProtocol: native.protocol, receiverProtocol: native.protocol };
+    const first = await run(context, state, { ...options, stopAfter: 1024 * 1024 });
+    expect(first.sender).toMatchObject({ kind: "lost", lanBroke: true });
+    expect(first.receiver).toMatchObject({ kind: "lost", lanBroke: true });
+    expect(first.relayPayloadBytes).toBe(0); native.verifyRetired(2);
+    const second = await run(context, state, options);
+    expect(second.sender).toEqual({ kind: "done" }); expect(second.receiver).toEqual({ kind: "done" });
+    expect(second.paths).toEqual(["lan", "lan"]); expect(second.relayPayloadBytes).toBe(0);
+    expect(await readFile(join(context.target, "resume-native-lan.bin"))).toEqual(content);
+    expect(native.lanCreated()).toBe(4); native.verifyRetired(4);
+  }, 30_000);
 });

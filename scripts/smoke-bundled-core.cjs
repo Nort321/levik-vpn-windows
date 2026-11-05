@@ -68,8 +68,25 @@ async function checkDropRelay() {
     await new Promise(done=>server.close(done));
   }
 }
+async function checkDropLan() {
+  const transfer=Buffer.alloc(16,0x54), key=Buffer.alloc(32,0x5a);
+  const copied=Buffer.from(key), listener=core.openDropLanListener(["127.0.0.1"],transfer,copied); copied.fill(0);
+  let dial, sender, receiver, timer;
+  try {
+    const bound=await listener.listen(); assert.ok(bound && bound.port>0);
+    assert.deepEqual(bound.addresses,["127.0.0.1"]);
+    dial=core.startDropLanDial(bound.addresses,bound.port,transfer,key);
+    await Promise.race([(async()=>{
+      [sender,receiver]=await Promise.all([dial.read(()=>{}),listener.accepted(()=>{})]);
+      assert.ok(sender && receiver); dial.close(); listener.close();
+      const bytes=Buffer.from("TEST bundled LAN"), pending=sender.send(bytes); bytes.fill(0); sender.closeGracefully();
+      await pending; assert.equal((await receiver.read(10000)).toString(),"TEST bundled LAN");
+    })(),new Promise((_,reject)=>{timer=setTimeout(()=>reject(new Error("TEST LAN timed out")),15000);})]);
+  } finally { clearTimeout(timer); sender?.close(); receiver?.close(); dial?.close(); listener.close(); key.fill(0); }
+}
 async function checkAsyncHandles() {
   await checkDropRelay();
+  await checkDropLan();
   assert.equal(typeof core.openSecureStore, "function");
   await assert.rejects(core.openSecureStore("relative-path-is-rejected", "secret_service"));
   const events = identity.openEventStream(JSON.stringify({ origin: "https://unused.invalid", method: "GET",

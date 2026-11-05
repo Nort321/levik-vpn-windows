@@ -1,10 +1,22 @@
 import { connect, createServer } from "node:net";
 import type { Server, Socket } from "node:net";
 import { networkInterfaces } from "node:os";
-import { FrameSocket } from "./framing";
+import { FrameSocket, type DropSocket } from "./framing";
 import { isPrivateIpv4, lanDialerFrame, lanListenerFrame, sameBytes } from "./protocol";
 
 /** docs/levik-drop.md "Local network": a direct TCP connection when both apps share a network. */
+
+export interface LanAcceptor {
+  readonly port: number;
+  readonly addresses: string[];
+  accepted(): Promise<DropSocket | null>;
+  close(): void;
+}
+export interface DropLan {
+  open(transfer: Buffer, key: Buffer): Promise<LanAcceptor | null>;
+  dial(addresses: readonly string[], port: number, transfer: Buffer, key: Buffer): Promise<DropSocket | null>;
+  close(): void;
+}
 
 const TUNNEL_INTERFACE = /tun|tap|wintun|utun|wg|ppp|ipsec|levik|vpn/i;
 const DIAL_TIMEOUT_MS = 1_500;
@@ -36,7 +48,7 @@ function listen(server: Server, port: number, host: string): Promise<boolean> {
 }
 
 /** Listens on one port of every private address until the other app proves the session key. */
-export class LanListener {
+export class LanListener implements LanAcceptor {
   private readonly servers: Server[] = [];
   private result: Promise<FrameSocket | null> | null = null;
   private settle: ((socket: FrameSocket | null) => void) | null = null;

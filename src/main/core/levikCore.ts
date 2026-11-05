@@ -1,3 +1,4 @@
+import { isNativeLanDialer, isNativeLanListener, type NativeLanDialer, type NativeLanListener, type StartDropLanDial, type OpenDropLanListener } from "./nativeDropLan";
 import { isNativeDropRelay, type NativeDropRelay, type StartDropRelay } from "./nativeDropRelay";
 import type { RelayEndpoint } from "../platform/levikDrop/relay";
 import { isNativeDropTargets, type NativeDropTarget, type NativeDropTargets, type OpenDropTargets } from "./nativeDropTargets";
@@ -54,6 +55,8 @@ export interface LevikCoreModule {
   openDropSource?: OpenDropSource;
   openDropTargets?: OpenDropTargets;
   startDropRelay?: StartDropRelay;
+  startDropLanDial?: StartDropLanDial;
+  openDropLanListener?: OpenDropLanListener;
   /** Names of the core functions this build offers. */
   functions(): string[];
   /** Runs a core function: JSON in, JSON out; throws on bad input. */
@@ -119,7 +122,7 @@ export function loadLevikCore(path: string, options: {
   if (!isRecord(loaded) || typeof loaded.coreInfo !== "function") {
     return { state: "rejected", reason: "нет coreInfo()" };
   }
-  const { coreInfo, functions, call, restoreIdentity, createReplyKey, sealReply, createPublicClient, openSecureStore, openTelemetryQueue, openConfigCache, createApiDiscovery, startServerPings, startTunnelProbe, startXrayRequest, startServiceProbe, openRouteProbe, openDropRecords, openDropAgreement, openDropSource, openDropTargets, startDropRelay } = loaded;
+  const { coreInfo, functions, call, restoreIdentity, createReplyKey, sealReply, createPublicClient, openSecureStore, openTelemetryQueue, openConfigCache, createApiDiscovery, startServerPings, startTunnelProbe, startXrayRequest, startServiceProbe, openRouteProbe, openDropRecords, openDropAgreement, openDropSource, openDropTargets, startDropRelay, startDropLanDial, openDropLanListener } = loaded;
   let info: unknown;
   try {
     info = coreInfo();
@@ -142,6 +145,16 @@ export function loadLevikCore(path: string, options: {
   const described: LevikCoreInfo = info;
   const module: LevikCoreModule = {
     coreInfo: () => described,
+    ...(typeof startDropLanDial === "function" ? { startDropLanDial: (addresses: string[], port: number, transfer: Buffer, key: Buffer): NativeLanDialer => {
+      const owner: unknown = startDropLanDial(addresses, port, transfer, key);
+      if (!isNativeLanDialer(owner)) throw new Error("Invalid native LAN dial owner");
+      return owner;
+    } } : {}),
+    ...(typeof openDropLanListener === "function" ? { openDropLanListener: (addresses: string[], transfer: Buffer, key: Buffer): NativeLanListener => {
+      const owner: unknown = openDropLanListener(addresses, transfer, key);
+      if (!isNativeLanListener(owner)) throw new Error("Invalid native LAN listener owner");
+      return owner;
+    } } : {}),
     ...(typeof startDropRelay === "function" ? { startDropRelay: (endpoints: RelayEndpoint[], token: string, onClosed: () => void): NativeDropRelay => {
       const owner: unknown = startDropRelay(endpoints,token,onClosed);
       if (!isNativeDropRelay(owner)) throw new Error("Invalid native Drop relay owner");

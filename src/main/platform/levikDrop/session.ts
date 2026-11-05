@@ -3,7 +3,7 @@ import type { KeyObject } from "node:crypto";
 import { ChannelClosed, type DropSocket } from "./framing";
 import { TargetFiles, TransferFailure, readSource } from "./files";
 import type { SourceFile, DropSource, TargetFile, DropTargetIO } from "./files";
-import { LanListener, dialLan } from "./lan";
+import { LanListener, dialLan, type DropLan, type LanAcceptor } from "./lan";
 import {
   ACK_EVERY,
   ProtocolError,
@@ -61,6 +61,7 @@ export interface DropAgreement {
 }
 
 export interface DropProtocol {
+  createLan?(): DropLan | null;
   createTargets?(folder: string, targets: TargetFile[]): DropTargetIO | null;
   createSource?(file: SourceFile, offset: number, prefix: string | null): DropSource | null;
   createAgreement?(identity: Identity): DropAgreement | null;
@@ -216,7 +217,8 @@ export class Session {
   private output: SessionPath = "relay";
   private lan: DropSocket | null = null;
   private lanReady: Promise<DropSocket | null> | null = null;
-  private lanListener: LanListener | null = null;
+  private lanListener: LanAcceptor | null = null;
+  private readonly lanTransport: DropLan | null;
   private lanBroke = false;
   private routeSettled = false;
   private manifestParts: ManifestFile[] = [];
@@ -246,6 +248,7 @@ export class Session {
 
   constructor(private readonly relay: DropSocket, private readonly work: SenderWork | ReceiverWork) {
     this.protocol = work.protocol ?? TYPESCRIPT_PROTOCOL;
+    this.lanTransport = this.protocol.createLan?.() ?? null;
     this.transfer = transferBytes(work.transferId);
     this.result = new Promise((resolve) => {
       this.settle = resolve;
@@ -290,6 +293,7 @@ export class Session {
     this.outcome = outcome;
     this.inbox.close(new Ended());
     this.lanListener?.close();
+    this.lanTransport?.close();
     // Records already written still leave before the direct connection closes.
     this.lan?.closeGracefully();
     this.clearAgreement();
@@ -553,7 +557,7 @@ export class Session {
   private async openLan(): Promise<void> {
     const keys = this.keys;
     if (!keys) return;
-    const listener = await LanListener.open(this.transfer, keys.lan);
+    const listener = await (this.lanTransport ? this.lanTransport.open(this.transfer, keys.lan) : LanListener.open(this.transfer, keys.lan));
     if (!listener || this.outcome) {
       listener?.close();
       return;
@@ -567,7 +571,7 @@ export class Session {
   private dialLan(addresses: string[], port: number): void {
     const keys = this.keys;
     if (!keys) return;
-    this.lanReady = dialLan(addresses, port, this.transfer, keys.lan);
+    this.lanReady = this.lanTransport ? this.lanTransport.dial(addresses, port, this.transfer, keys.lan) : dialLan(addresses, port, this.transfer, keys.lan);
     void this.lanReady.then((socket) => this.onLanReady(socket));
   }
 
@@ -583,7 +587,9 @@ export class Session {
     socket.onClose(() => {
       if (this.outcome) return;
       this.lanBroke = true;
-      if (this.output === "lan" || this.input === "lan") this.abort("direct connection closed");
+      // The read loop drains queued final controls before observing EOF.
+      // A native close notice may arrive before its pending read Promise.
+      if (this.input !== "lan" && this.output === "lan") this.abort("direct connection closed");
     });
     if (this.work.role === "sender") {
       void this.sendControl({ t: "lan_on" }).catch(() => {});
