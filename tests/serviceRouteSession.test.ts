@@ -73,4 +73,25 @@ describe("service route session lifetime", () => {
     expect(pending?.close).toHaveBeenCalled();
   });
 
+  it.each(["stop", "sleep"])("owns native service probes and cancels them on %s", async (action) => {
+    const session = new ServiceRouteSession(vi.fn()); sessions.push(session);
+    let hold = false;
+    const pending = new Set<{ close: () => void }>();
+    const startProbe = vi.fn((_input: string) => {
+      if (!hold) return { read: async () => '{"ok":true,"value":true}', close: vi.fn() };
+      let release: (text: string) => void = () => {};
+      const result = new Promise<string>((done) => { release = done; });
+      const probe = { read: () => result, close: vi.fn(() => release('{"ok":true,"value":false}')) };
+      pending.add(probe); return probe;
+    });
+    session.useRustCore(() => new RustCore(null, () => {}, "rust"), undefined, () => {}, startProbe);
+    await session.start(config());
+    expect(startProbe).toHaveBeenCalled(); expect(probeServiceRoute).not.toHaveBeenCalled();
+    hold = true; const refreshing = session.refresh(); await new Promise<void>((done) => setImmediate(done));
+    expect(pending.size).toBeGreaterThan(0);
+    if (action === "stop") session.stop(); else session.setSuspended(true);
+    await refreshing;
+    for (const probe of pending) expect(probe.close).toHaveBeenCalled();
+  });
+
 });

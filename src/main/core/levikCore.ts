@@ -1,3 +1,4 @@
+import { isNativeServiceProbe, type NativeServiceProbe, type StartServiceProbe } from "./nativeServiceProbes";
 import { isNativeXrayRequest, type NativeXrayRequest, type StartXrayRequest } from "./nativeXrayApi";
 import { isNativeTunnelProbe, type NativeTunnelProbe, type StartTunnelProbe } from "./nativeTunnelHealth";
 import { isNativePingBatch, type NativePingBatch, type StartServerPings } from "./nativeServerPinger";
@@ -39,6 +40,7 @@ export interface LevikCoreModule {
   startServerPings?: StartServerPings;
   startTunnelProbe?: StartTunnelProbe;
   startXrayRequest?: StartXrayRequest;
+  startServiceProbe?: StartServiceProbe;
   /** Names of the core functions this build offers. */
   functions(): string[];
   /** Runs a core function: JSON in, JSON out; throws on bad input. */
@@ -104,7 +106,7 @@ export function loadLevikCore(path: string, options: {
   if (!isRecord(loaded) || typeof loaded.coreInfo !== "function") {
     return { state: "rejected", reason: "нет coreInfo()" };
   }
-  const { coreInfo, functions, call, restoreIdentity, createReplyKey, sealReply, createPublicClient, openSecureStore, openTelemetryQueue, openConfigCache, createApiDiscovery, startServerPings, startTunnelProbe, startXrayRequest } = loaded;
+  const { coreInfo, functions, call, restoreIdentity, createReplyKey, sealReply, createPublicClient, openSecureStore, openTelemetryQueue, openConfigCache, createApiDiscovery, startServerPings, startTunnelProbe, startXrayRequest, startServiceProbe } = loaded;
   let info: unknown;
   try {
     info = coreInfo();
@@ -127,6 +129,11 @@ export function loadLevikCore(path: string, options: {
   const described: LevikCoreInfo = info;
   const module: LevikCoreModule = {
     coreInfo: () => described,
+    ...(typeof startServiceProbe === "function" ? { startServiceProbe: (input: string): NativeServiceProbe => {
+      const probe: unknown = startServiceProbe(input);
+      if (!isNativeServiceProbe(probe)) throw new Error("Invalid native service probe");
+      return probe;
+    } } : {}),
     ...(typeof startXrayRequest === "function" ? { startXrayRequest: (input: string): NativeXrayRequest => {
       const request: unknown = startXrayRequest(input);
       if (!isNativeXrayRequest(request)) throw new Error("Invalid native local Xray request");

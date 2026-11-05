@@ -43,6 +43,10 @@ async function checkAsyncHandles() {
   const rpc = core.startXrayRequest('{"request":{"kind":"statistics"}}');
   rpc.close(); rpc.close();
   assert.deepEqual(JSON.parse(await rpc.read()), { ok: false });
+  const service = core.startServiceProbe(JSON.stringify({ kind: "dns", port: 47200,
+    auth: { port: 47188, user: "levik-service", password: "a".repeat(48) }, resolvers: ["tcp://unused.invalid"] }));
+  service.close(); service.close();
+  assert.deepEqual(JSON.parse(await service.read()), { ok: true, value: false });
   const health = core.startTunnelProbe('{"kind":"handshake"}');
   health.close(); health.close();
   assert.deepEqual(JSON.parse(await health.read()), { ok: true, value: { healthy: false, durationMs: null, codes: [], cancelled: true } });

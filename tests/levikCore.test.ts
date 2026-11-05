@@ -58,4 +58,14 @@ describe("loadLevikCore", () => {
     if (status.state === "missing") return;
     expect(status.state).toBe("loaded");
   });
+  it("keeps service probes optional and validates handles when the capability is invoked", async () => {
+    const native = { read: async () => '{"ok":true,"value":false}', close: () => {} };
+    const loaded = loadLevikCore("/m.node", { ...present, load: () => ({ coreInfo: () => info, ...bridge, startServiceProbe: () => native }) });
+    if (loaded.state !== "loaded") throw new Error("TEST module rejected");
+    expect(loaded.module.startServiceProbe?.("{}")).toBe(native);
+    const bad = loadLevikCore("/m.node", { ...present, load: () => ({ coreInfo: () => info, ...bridge, startServiceProbe: () => ({ read: () => "wrong" }) }) });
+    if (bad.state !== "loaded") throw new Error("TEST module rejected");
+    expect(() => bad.module.startServiceProbe?.("{}")).toThrow("Invalid native service probe");
+  });
+
 });

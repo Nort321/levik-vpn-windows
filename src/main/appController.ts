@@ -3289,7 +3289,8 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     const version = status.state === "loaded" ? status.info.version : null;
     this.core = new RustCore(coreBridge(status), (line) => this.recordDiagnostic(line), "ts", version);
     this.xray.useRustCore(() => this.core, status.state === "loaded" ? status.module.startXrayRequest : undefined,
-      () => this.recordDiagnostic("Rust-ядро: локальный API Xray не подтвердил запрос"));
+      () => this.recordDiagnostic("Rust-ядро: локальный API или проверка маршрута не подтвердили запрос"),
+      status.state === "loaded" ? status.module.startServiceProbe : undefined);
     this.telemetry.useCore(() => this.core.tally());
     this.telemetry.useRustCore(this.core, status.state === "loaded" ? status.module.openTelemetryQueue : undefined,
       () => this.recordDiagnostic("Rust-ядро: очередь анонимных отчётов использует резервную реализацию"));
