@@ -140,7 +140,7 @@ jobs:
           }
           Copy-Item $installer "release/LevikVPN-Windows-x64.exe"
           Get-ChildItem release -File |
-            Where-Object { $_.Extension -in '.exe', '.blockmap', '.yml' } |
+            Where-Object { $_.Extension -in '.exe', '.blockmap' -or $_.Name -eq 'latest.yml' } |
             Sort-Object Name |
             ForEach-Object {
               $hash = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
