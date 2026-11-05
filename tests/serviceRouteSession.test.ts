@@ -1,3 +1,5 @@
+import { RustCore } from "../src/main/core/rustCore";
+import type { NativeXrayRequest } from "../src/main/core/nativeXrayApi";
 import { afterEach, describe, expect, it, vi } from "vitest";
 vi.mock("../src/main/vpn/serviceRouteTransport", () => ({ overrideServiceRoute: vi.fn(async () => {}),
   probeServiceRoute: vi.fn(async () => true), probeServiceRouteDns: vi.fn(async () => true),
@@ -45,4 +47,30 @@ describe("service route session lifetime", () => {
     session.setPolicySuspended(false); await new Promise<void>((resolve) => setImmediate(resolve));
     expect(vi.mocked(probeServiceRoute).mock.calls.length).toBeGreaterThan(probes);
   });
+  it("routes writes and counters through Rust and cancels a pending read on stop", async () => {
+    const session = new ServiceRouteSession(vi.fn()); sessions.push(session);
+    const current = new RustCore(null, () => {}, "rust");
+    let hold = false; let release: (value: string) => void = () => {};
+    let pending: NativeXrayRequest | undefined;
+    const start = vi.fn((input: string): NativeXrayRequest => {
+      const value: unknown = JSON.parse(input);
+      if (typeof value !== "object" || value === null || !("request" in value) || typeof value.request !== "object" || value.request === null
+        || !("kind" in value.request)) throw new Error("Invalid TEST request");
+      const statistics = value.request.kind === "statistics";
+      const waiting = hold && statistics;
+      const read = waiting ? new Promise<string>((done) => { release = done; })
+        : Promise.resolve(JSON.stringify({ ok: true, value: statistics ? { uplink: 3, downlink: 5, initialized: true } : { applied: true } }));
+      const request = { read: () => read, close: vi.fn(() => { if (waiting) release('{"ok":false}'); }) };
+      if (waiting) pending = request;
+      return request;
+    });
+    session.useRustCore(() => current, start, () => {});
+    await session.start(config()); expect(session.snapshot?.state).toBe("applied");
+    expect(await session.queryStats()).toEqual({ uplink: 3, downlink: 5 });
+    expect(overrideServiceRoute).not.toHaveBeenCalled();
+    hold = true; const reading = session.queryStats();
+    const rejected = expect(reading).rejects.toThrow(); session.stop(); await rejected;
+    expect(pending?.close).toHaveBeenCalled();
+  });
+
 });

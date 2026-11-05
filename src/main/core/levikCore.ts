@@ -1,3 +1,4 @@
+import { isNativeXrayRequest, type NativeXrayRequest, type StartXrayRequest } from "./nativeXrayApi";
 import { isNativeTunnelProbe, type NativeTunnelProbe, type StartTunnelProbe } from "./nativeTunnelHealth";
 import { isNativePingBatch, type NativePingBatch, type StartServerPings } from "./nativeServerPinger";
 import { isNativeApiDiscovery, type NativeApiDiscovery, type CreateApiDiscovery } from "./nativeApiDiscovery";
@@ -37,6 +38,7 @@ export interface LevikCoreModule {
   createApiDiscovery?: CreateApiDiscovery;
   startServerPings?: StartServerPings;
   startTunnelProbe?: StartTunnelProbe;
+  startXrayRequest?: StartXrayRequest;
   /** Names of the core functions this build offers. */
   functions(): string[];
   /** Runs a core function: JSON in, JSON out; throws on bad input. */
@@ -102,7 +104,7 @@ export function loadLevikCore(path: string, options: {
   if (!isRecord(loaded) || typeof loaded.coreInfo !== "function") {
     return { state: "rejected", reason: "нет coreInfo()" };
   }
-  const { coreInfo, functions, call, restoreIdentity, createReplyKey, sealReply, createPublicClient, openSecureStore, openTelemetryQueue, openConfigCache, createApiDiscovery, startServerPings, startTunnelProbe } = loaded;
+  const { coreInfo, functions, call, restoreIdentity, createReplyKey, sealReply, createPublicClient, openSecureStore, openTelemetryQueue, openConfigCache, createApiDiscovery, startServerPings, startTunnelProbe, startXrayRequest } = loaded;
   let info: unknown;
   try {
     info = coreInfo();
@@ -125,6 +127,11 @@ export function loadLevikCore(path: string, options: {
   const described: LevikCoreInfo = info;
   const module: LevikCoreModule = {
     coreInfo: () => described,
+    ...(typeof startXrayRequest === "function" ? { startXrayRequest: (input: string): NativeXrayRequest => {
+      const request: unknown = startXrayRequest(input);
+      if (!isNativeXrayRequest(request)) throw new Error("Invalid native local Xray request");
+      return request;
+    } } : {}),
     ...(typeof startTunnelProbe === "function" ? { startTunnelProbe: (input: string): NativeTunnelProbe => {
       const probe: unknown = startTunnelProbe(input);
       if (!isNativeTunnelProbe(probe)) throw new Error("Invalid native tunnel probe");

@@ -40,6 +40,9 @@ async function checkAsyncHandles() {
   const pings = core.startServerPings(JSON.stringify([{ id: "TEST", endpoint: { host: "unused.invalid", port: 443 }, udp: true }]));
   pings.close();
   assert.deepEqual(JSON.parse(await pings.read()), { ok: false });
+  const rpc = core.startXrayRequest('{"request":{"kind":"statistics"}}');
+  rpc.close(); rpc.close();
+  assert.deepEqual(JSON.parse(await rpc.read()), { ok: false });
   const health = core.startTunnelProbe('{"kind":"handshake"}');
   health.close(); health.close();
   assert.deepEqual(JSON.parse(await health.read()), { ok: true, value: { healthy: false, durationMs: null, codes: [], cancelled: true } });
