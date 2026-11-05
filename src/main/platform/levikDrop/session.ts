@@ -2,7 +2,7 @@ import { createHash, randomBytes } from "node:crypto";
 import type { KeyObject } from "node:crypto";
 import { ChannelClosed, FrameSocket } from "./framing";
 import { TargetFiles, TransferFailure, readSource } from "./files";
-import type { SourceFile } from "./files";
+import type { SourceFile, DropSource } from "./files";
 import { LanListener, dialLan } from "./lan";
 import {
   ACK_EVERY,
@@ -61,6 +61,7 @@ export interface DropAgreement {
 }
 
 export interface DropProtocol {
+  createSource?(file: SourceFile, offset: number, prefix: string | null): DropSource | null;
   createAgreement?(identity: Identity): DropAgreement | null;
   createRecords?(role: "sender" | "receiver", keys: SessionKeys): DropRecords | null;
   decodeSenderHello: typeof decodeSenderHello;
@@ -190,12 +191,22 @@ function nodeAgreement(identity: Identity): DropAgreement {
   };
 }
 
+function nodeSource(file: SourceFile, offset: number, prefix: string | null): DropSource {
+  const hash = createHash("sha256"); const chunks = readSource(file, offset, prefix, hash);
+  return {
+    read: async () => { const next = await chunks.next(); return next.done ? null : next.value; },
+    digest: () => hash.digest("hex"),
+    close: () => { void chunks.return(undefined).catch(() => {}); },
+  };
+}
+
 class Ended extends Error {}
 
 export class Session {
   readonly inbox = new Inbox();
   private keys: SessionKeys | null = null;
   private agreement: DropAgreement | null = null;
+  private source: DropSource | null = null;
   private sealer: Pick<RecordSealer, "seal"> | null = null;
   private records: DropRecords | null = null;
   private opener: Pick<RecordOpener, "open"> | null = null;
@@ -281,6 +292,7 @@ export class Session {
     // Records already written still leave before the direct connection closes.
     this.lan?.closeGracefully();
     this.clearAgreement();
+    this.clearSource();
     this.clearRecords();
     this.ackWaiter?.();
     if (this.work.role === "receiver") void this.work.targets?.closeWriting();
@@ -291,6 +303,10 @@ export class Session {
   private clearAgreement(): void {
     const agreement = this.agreement; this.agreement = null;
     agreement?.close();
+  }
+
+  private clearSource(): void {
+    const source = this.source; this.source = null; source?.close();
   }
 
   private clearRecords(): void {
@@ -656,21 +672,27 @@ export class Session {
     for (const [index, file] of files.entries()) {
       const offset = accepted.offsets[index] ?? 0;
       if (offset === file.size && file.size > 0) continue;
-      const hash = createHash("sha256");
-      let position = offset;
-      for await (const chunk of readSource(file, offset, accepted.prefix[index] ?? null, hash)) {
-        while (!this.outcome && this.sentBytes - (this.ackedTotal() - this.ackedAtAccept) > WINDOW) {
-          await new Promise<void>((resolve) => {
-            this.ackWaiter = resolve;
-          });
+      const source = this.protocol.createSource?.(file, offset, accepted.prefix[index] ?? null) ?? nodeSource(file, offset, accepted.prefix[index] ?? null);
+      if (this.outcome) { source.close(); return; }
+      this.source = source;
+      try {
+        let position = offset;
+        for (;;) {
+          const chunk = await source.read();
+          if (this.outcome) return;
+          if (chunk === null) break;
+          while (!this.outcome && this.sentBytes - (this.ackedTotal() - this.ackedAtAccept) > WINDOW) {
+            await new Promise<void>((resolve) => { this.ackWaiter = resolve; });
+          }
+          if (this.outcome) return;
+          await this.sendPlaintext(encodeData(index, position, chunk, !!this.work.route));
+          position += chunk.length; this.sentBytes += chunk.length;
         }
         if (this.outcome) return;
-        await this.sendPlaintext(encodeData(index, position, chunk, !!this.work.route));
-        position += chunk.length;
-        this.sentBytes += chunk.length;
+        await this.sendControl({ t: "end", file: index, sha256: source.digest() });
+      } finally {
+        if (this.source === source) this.clearSource();
       }
-      if (this.outcome) return;
-      await this.sendControl({ t: "end", file: index, sha256: hash.digest("hex") });
     }
   }
 

@@ -1,3 +1,4 @@
+import { isNativeDropSource, type NativeDropSource, type OpenDropSource } from "./nativeDropSource";
 import { isNativeDropAgreement, type NativeDropAgreement, type OpenDropAgreement } from "./nativeDropAgreement";
 import { isNativeDropRecords, type NativeDropRecords, type OpenDropRecords } from "./nativeDropRecords";
 import { isNativeRouteProbe, type NativeRouteProbe, type OpenRouteProbe } from "./nativeRouteProbes";
@@ -47,6 +48,7 @@ export interface LevikCoreModule {
   openRouteProbe?: OpenRouteProbe;
   openDropRecords?: OpenDropRecords;
   openDropAgreement?: OpenDropAgreement;
+  openDropSource?: OpenDropSource;
   /** Names of the core functions this build offers. */
   functions(): string[];
   /** Runs a core function: JSON in, JSON out; throws on bad input. */
@@ -112,7 +114,7 @@ export function loadLevikCore(path: string, options: {
   if (!isRecord(loaded) || typeof loaded.coreInfo !== "function") {
     return { state: "rejected", reason: "нет coreInfo()" };
   }
-  const { coreInfo, functions, call, restoreIdentity, createReplyKey, sealReply, createPublicClient, openSecureStore, openTelemetryQueue, openConfigCache, createApiDiscovery, startServerPings, startTunnelProbe, startXrayRequest, startServiceProbe, openRouteProbe, openDropRecords, openDropAgreement } = loaded;
+  const { coreInfo, functions, call, restoreIdentity, createReplyKey, sealReply, createPublicClient, openSecureStore, openTelemetryQueue, openConfigCache, createApiDiscovery, startServerPings, startTunnelProbe, startXrayRequest, startServiceProbe, openRouteProbe, openDropRecords, openDropAgreement, openDropSource } = loaded;
   let info: unknown;
   try {
     info = coreInfo();
@@ -135,6 +137,11 @@ export function loadLevikCore(path: string, options: {
   const described: LevikCoreInfo = info;
   const module: LevikCoreModule = {
     coreInfo: () => described,
+    ...(typeof openDropSource === "function" ? { openDropSource: (path: string, size: number, mtime: number, offset: number, prefix: string | null): NativeDropSource => {
+      const source: unknown = openDropSource(path, size, mtime, offset, prefix);
+      if (!isNativeDropSource(source)) throw new Error("Invalid native Drop source owner");
+      return source;
+    } } : {}),
     ...(typeof openDropAgreement === "function" ? { openDropAgreement: (privateDer: Buffer, publicSpki: Buffer): NativeDropAgreement => {
       const agreement: unknown = openDropAgreement(privateDer, publicSpki);
       if (!isNativeDropAgreement(agreement)) throw new Error("Invalid native Drop agreement owner");

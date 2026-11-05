@@ -4,7 +4,7 @@
 const assert = require("node:assert/strict");
 const { createHash, createECDH, generateKeyPairSync, hkdfSync, sign, verify } = require("node:crypto");
 const { resolve, join } = require("node:path");
-const { mkdtemp, readFile, readdir, rm, writeFile } = require("node:fs/promises");
+const { mkdtemp, readFile, readdir, rm, stat, writeFile } = require("node:fs/promises");
 const { tmpdir } = require("node:os");
 
 if (!process.versions.electron) throw new Error("Run this check with Electron, not regular Node");
@@ -81,6 +81,20 @@ async function checkAsyncHandles() {
   const health = core.startTunnelProbe('{"kind":"handshake"}');
   health.close(); health.close();
   assert.deepEqual(JSON.parse(await health.read()), { ok: true, value: { healthy: false, durationMs: null, codes: [], cancelled: true } });
+  const sourceDirectory = await mkdtemp(join(tmpdir(), "levik-bundled-source-"));
+  try {
+    const sourcePath = join(sourceDirectory,"TEST.bin"), bytes = Buffer.alloc(700000,0x5a);
+    await writeFile(sourcePath,bytes); const metadata = await stat(sourcePath);
+    const offset = 262151, prefix = createHash("sha256").update(bytes.subarray(0,offset)).digest("hex");
+    const source = core.openDropSource(sourcePath,bytes.length,Math.trunc(metadata.mtimeMs),offset,prefix);
+    try {
+      const chunks = []; for (;;) { const chunk = await source.read(); if (chunk === null) break;
+        assert.ok(Buffer.isBuffer(chunk) && chunk.length > 0 && chunk.length <= 262144); chunks.push(chunk); }
+      assert.deepEqual(Buffer.concat(chunks),bytes.subarray(offset));
+      assert.equal(source.digest(),createHash("sha256").update(bytes).digest("hex"));
+      source.close(); await assert.rejects(source.read());
+    } finally { source.close(); }
+  } finally { await rm(sourceDirectory,{recursive:true,force:true}); }
   const directory = await mkdtemp(join(tmpdir(), "levik-bundled-queue-"));
   try {
     const queue = await core.openTelemetryQueue(directory);

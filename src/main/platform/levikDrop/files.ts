@@ -27,6 +27,9 @@ function storageFailure(error: unknown): TransferFailure {
 
 // Sender ---------------------------------------------------------------------------------
 
+/** One selected source, including its full-file hash and final cancellation. */
+export interface DropSource { read(): Promise<Buffer | null>; digest(): string; close(): void }
+
 export interface SourceFile {
   path: string;
   name: string;

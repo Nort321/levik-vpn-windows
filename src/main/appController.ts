@@ -1,3 +1,4 @@
+import type { OpenDropSource } from "./core/nativeDropSource";
 import type { OpenDropAgreement } from "./core/nativeDropAgreement";
 import type { OpenDropRecords } from "./core/nativeDropRecords";
 import { CoreRouteProbes } from "./core/nativeRouteProbes";
@@ -407,6 +408,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
   private replyCrypto: NativeReplyCrypto | null = null;
   private openDropRecords: OpenDropRecords | undefined;
   private openDropAgreement: OpenDropAgreement | undefined;
+  private openDropSource: OpenDropSource | undefined;
   private readonly approvalsCore = new CoreApprovals(() => this.core);
   private readonly endpointsCore = new CoreEndpoints(() => this.core);
   private readonly settingsCore = new CoreSettings(() => this.core);
@@ -573,7 +575,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
       errorCode: (error) => error instanceof MobileApiError ? error.code ?? (error.status ? `http_${error.status}` : null) : null,
       log: (line) => this.addLog(line),
       protocol: dropProtocolWithCore(() => this.core, () => this.openDropRecords,
-        () => this.recordDiagnostic("Rust-ядро: не удалось освободить состояние LevikDrop"), () => this.openDropAgreement),
+        () => this.recordDiagnostic("Rust-ядро: не удалось освободить состояние LevikDrop"), () => this.openDropAgreement, () => this.openDropSource),
     });
     this.drop.on("changed", () => {
       if (this.drop) this.patch({ drop: this.drop.snapshot() });
@@ -3292,6 +3294,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
   useRustCore(status: LevikCoreStatus): void {
     this.openDropRecords = status.state === "loaded" ? status.module.openDropRecords : undefined;
     this.openDropAgreement = status.state === "loaded" ? status.module.openDropAgreement : undefined;
+    this.openDropSource = status.state === "loaded" ? status.module.openDropSource : undefined;
     this.createApiDiscovery = status.state === "loaded" ? status.module.createApiDiscovery : undefined;
     this.serverPinger.useRustCore(status.state === "loaded" ? status.module.startServerPings : undefined);
     this.tunnelProbe.useRustCore(status.state === "loaded" ? status.module.startTunnelProbe : undefined);

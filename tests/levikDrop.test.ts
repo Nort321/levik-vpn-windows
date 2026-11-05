@@ -427,10 +427,13 @@ function nativeProtocol() {
   const loaded = loadLevikCore(nativeModulePath);
   if (loaded.state !== "loaded" || !loaded.module.openDropRecords || !loaded.module.openDropAgreement) throw new Error("Native Drop records missing");
   const core = new RustCore(null, () => {}, "rust");
-  const base = dropProtocolWithCore(() => core, () => loaded.module.openDropRecords, () => {}, () => loaded.module.openDropAgreement);
+  const base = dropProtocolWithCore(() => core, () => loaded.module.openDropRecords, () => {}, () => loaded.module.openDropAgreement, () => loaded.module.openDropSource);
   const retained: protocol.SessionKeys[] = [];
-  let closed = 0; let agreements = 0; let agreementsClosed = 0;
-  const native: DropProtocol = { ...base, createAgreement: (identity) => {
+  let closed = 0; let agreements = 0; let agreementsClosed = 0; let sources = 0; let sourcesClosed = 0;
+  const native: DropProtocol = { ...base, createSource: (file, offset, prefix) => {
+    const source = base.createSource?.(file, offset, prefix); if (!source) return null;
+    sources++; return { read: source.read, digest: source.digest, close: () => { sourcesClosed++; source.close(); } };
+  }, createAgreement: (identity) => {
     const agreement = base.createAgreement?.(identity);
     if (!agreement) throw new Error("TEST native agreement was not selected");
     agreements++;
@@ -442,9 +445,9 @@ function nativeProtocol() {
     if (!records) throw new Error("TEST native codec was not selected");
     return { seal: records.seal, open: records.open, close: () => { closed++; records.close(); } };
   } };
-  return { protocol: native, created: () => retained.length, agreementsCreated: () => agreements, verifyRetired: (count: number) => {
+  return { protocol: native, created: () => retained.length, agreementsCreated: () => agreements, sourcesCreated: () => sources, sourcesSupported: !!loaded.module.openDropSource, verifyRetired: (count: number) => {
     expect(closed).toBe(count); expect(retained).toHaveLength(count);
-    expect(agreements).toBeGreaterThanOrEqual(count); expect(agreementsClosed).toBe(agreements);
+    expect(agreements).toBeGreaterThanOrEqual(count); expect(agreementsClosed).toBe(agreements); expect(sourcesClosed).toBe(sources);
     for (const keys of retained) for (const bytes of [keys.sr, keys.rs, keys.lan]) expect(bytes.every((byte) => byte === 0)).toBe(true);
   } };
 }
@@ -476,6 +479,7 @@ describe.skipIf(!nativeModulePath)("real Rust/Node Drop transfer", () => {
     expect(result.sender).toEqual({ kind: "done" }); expect(result.receiver).toEqual({ kind: "done" });
     expect(result.codes[0]).toBe(result.codes[1]); expect((await readFile(join(context.target, "native.bin"))).equals(content)).toBe(true);
     expect((await readFile(join(context.target, "empty.txt"))).length).toBe(0); native.verifyRetired(side === "both" ? 2 : 1);
+    if (native.sourcesSupported && side !== "receiver") expect(native.sourcesCreated()).toBe(2);
   });
   it("keeps the v2 relay data markers and survives interrupted transfer with fresh owners", async () => {
     const content = randomBytes(3 * 1024 * 1024 + 123);
