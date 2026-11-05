@@ -1,6 +1,6 @@
 import { createPublicKey, verify, type KeyObject } from "node:crypto";
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
-import { dirname } from "node:path";
+import { ConfigCacheFile, type OpenConfigCache } from "../core/nativeConfigCache";
+import type { RustCore } from "../core/rustCore";
 
 /**
  * Where the app finds the Levik servers. A signed document (config/levik-config-v1.json
@@ -178,15 +178,19 @@ export class ServiceEndpointsStore {
   private refreshing: Promise<boolean> | null = null;
   private lastAttemptAt = 0;
 
+  private readonly cache: ConfigCacheFile;
+
   constructor(
-    private readonly path: string,
+    path: string,
     private readonly fetchImpl: Fetch = fetch,
     private readonly verify: (body: Buffer, signature: string) => ServiceEndpointsDocument | null = verifyEndpointsDocument,
-  ) {}
+  ) { this.cache = new ConfigCacheFile(path, "service-endpoints"); }
+
+  useRustCore(core: RustCore, open: OpenConfigCache | undefined, report: () => void): void { this.cache.useRustCore(core, open, report); }
 
   async load(): Promise<void> {
     try {
-      const value: unknown = JSON.parse(await readFile(this.path, "utf8"));
+      const value: unknown = JSON.parse(await this.cache.read() ?? "null");
       if (typeof value !== "object" || value === null) return;
       const { body, signature } = value as Record<string, unknown>;
       if (typeof body !== "string" || typeof signature !== "string") return;
@@ -209,10 +213,7 @@ export class ServiceEndpointsStore {
       const fetched = await fetchEndpointsDocument(before.configUrls, Math.max(1, before.sequence), this.fetchImpl, this.verify);
       if (!fetched || (fetched.document.sequence === before.sequence && before.sequence > 0)) return false;
       useEndpointsDocument(fetched.document);
-      await mkdir(dirname(this.path), { recursive: true });
-      const temporary = `${this.path}.tmp`;
-      await writeFile(temporary, JSON.stringify({ body: fetched.body.toString("base64"), signature: fetched.signature }), { mode: 0o600 });
-      await rename(temporary, this.path);
+      await this.cache.write(JSON.stringify({ body: fetched.body.toString("base64"), signature: fetched.signature }));
       return true;
     })().catch(() => false).finally(() => {
       this.refreshing = null;

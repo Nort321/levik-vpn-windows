@@ -1,3 +1,4 @@
+import { isNativeConfigCache, type NativeConfigCache, type OpenConfigCache } from "./nativeConfigCache";
 import { isNativeTelemetryQueue, type NativeTelemetryQueue, type OpenTelemetryQueue } from "./nativeTelemetry";
 import { isNativeSecureStore, type OpenNativeStore, type NativeSecureStore } from "./nativeStore";
 import { isNativePublicClient, type NativePublicClient } from "./publicFetch";
@@ -29,6 +30,7 @@ export interface LevikCoreModule {
   createPublicClient?(): NativePublicClient;
   openSecureStore?: OpenNativeStore;
   openTelemetryQueue?: OpenTelemetryQueue;
+  openConfigCache?: OpenConfigCache;
   /** Names of the core functions this build offers. */
   functions(): string[];
   /** Runs a core function: JSON in, JSON out; throws on bad input. */
@@ -94,7 +96,7 @@ export function loadLevikCore(path: string, options: {
   if (!isRecord(loaded) || typeof loaded.coreInfo !== "function") {
     return { state: "rejected", reason: "нет coreInfo()" };
   }
-  const { coreInfo, functions, call, restoreIdentity, createReplyKey, sealReply, createPublicClient, openSecureStore, openTelemetryQueue } = loaded;
+  const { coreInfo, functions, call, restoreIdentity, createReplyKey, sealReply, createPublicClient, openSecureStore, openTelemetryQueue, openConfigCache } = loaded;
   let info: unknown;
   try {
     info = coreInfo();
@@ -117,6 +119,11 @@ export function loadLevikCore(path: string, options: {
   const described: LevikCoreInfo = info;
   const module: LevikCoreModule = {
     coreInfo: () => described,
+    ...(typeof openConfigCache === "function" ? { openConfigCache: async (directory: string): Promise<NativeConfigCache> => {
+      const cache: unknown = await openConfigCache(directory);
+      if (!isNativeConfigCache(cache)) throw new Error("Invalid native configuration cache");
+      return cache;
+    } } : {}),
     ...(typeof openTelemetryQueue === "function" ? { openTelemetryQueue: async (directory: string, initial?: string): Promise<NativeTelemetryQueue> => {
       const queue: unknown = await openTelemetryQueue(directory, initial);
       if (!isNativeTelemetryQueue(queue)) throw new Error("Invalid native anonymous queue");

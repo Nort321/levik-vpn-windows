@@ -544,6 +544,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
       (signal) => this.api.openEvents(this.requireToken(), signal),
       isAuthenticationRejected,
     );
+    this.liveEvents.useRustCore(this.core);
     this.liveEvents.on("event", (event) => this.handleLiveEvent(event));
     this.drop = new DropEngine({
       api: this.dropApi(),
@@ -3270,6 +3271,11 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     this.telemetry.useCore(() => this.core.tally());
     this.telemetry.useRustCore(this.core, status.state === "loaded" ? status.module.openTelemetryQueue : undefined,
       () => this.recordDiagnostic("Rust-ядро: очередь анонимных отчётов использует резервную реализацию"));
+    const openConfigCache = status.state === "loaded" ? status.module.openConfigCache : undefined;
+    const reportCache = () => this.recordDiagnostic("Rust-ядро: кэш конфигурации использует резервную реализацию");
+    this.liveEvents?.useRustCore(this.core);
+    this.remoteConfigStore.useRustCore(this.core, openConfigCache, reportCache);
+    this.endpointsStore.useRustCore(this.core, openConfigCache, reportCache);
     this.applyCoreMode();
     this.identity.useRustCore(this.core, status.state === "loaded" ? status.module.restoreIdentity : undefined);
     this.replyCrypto = status.state === "loaded" ? status.module.replyCrypto ?? null : null;
