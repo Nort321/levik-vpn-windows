@@ -735,7 +735,7 @@ export class DropEngine extends EventEmitter<DropEngineEvents> {
       files = new TargetFiles(stored.folder, stored.targets, async (path) => {
         this.store.save();
         await this.options.markDownloaded(path);
-      });
+      }, this.options.protocol?.createTargets?.(stored.folder, stored.targets) ?? null);
       this.targets.set(stored.id, files);
     }
     return files;

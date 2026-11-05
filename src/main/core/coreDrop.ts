@@ -1,3 +1,4 @@
+import { dropTargetsWithCore, type OpenDropTargets } from "./nativeDropTargets";
 import { dropSourceWithCore, type OpenDropSource } from "./nativeDropSource";
 import { dropAgreementWithCore, type OpenDropAgreement } from "./nativeDropAgreement";
 import { dropRecordsWithCore, type OpenDropRecords } from "./nativeDropRecords";
@@ -64,11 +65,11 @@ function decide<T>(core: RustCore, name: string, input: unknown, typescript: () 
  * (docs/rust-desktop-migration-plan.md, wave A): the handshake messages, the
  * commitment, the transcript and its signature, and control messages. File
  * data parsing stays in TypeScript; optional typed handles own P-256 agreement
- * and AES-GCM state. Ephemeral private bytes never cross the bridge. `current` is read on every
+ * and AES-GCM state, plus selected source/recipient I/O. Ephemeral private bytes never cross the bridge. `current` is read on every
  * call because the app loads the module after the engine exists.
  */
 export function dropProtocolWithCore(current: () => RustCore, records: () => OpenDropRecords | undefined = () => undefined,
-  report: () => void = () => {}, agreement: () => OpenDropAgreement | undefined = () => undefined, source: () => OpenDropSource | undefined = () => undefined): DropProtocol {
+  report: () => void = () => {}, agreement: () => OpenDropAgreement | undefined = () => undefined, source: () => OpenDropSource | undefined = () => undefined, targets: () => OpenDropTargets | undefined = () => undefined): DropProtocol {
   const ready = (name: string): RustCore | null => {
     const core = current();
     return core.mode === "ts" || !core.has(name) ? null : core;
@@ -81,6 +82,7 @@ export function dropProtocolWithCore(current: () => RustCore, records: () => Ope
   };
 
   return {
+    createTargets: (folder, files) => dropTargetsWithCore(current(), targets(), folder, files, report),
     createSource: (file, offset, prefix) => dropSourceWithCore(current(), source(), file, offset, prefix, report),
     createAgreement: (identity) => dropAgreementWithCore(current(), agreement(), identity, report),
     createRecords: (role, keys) => dropRecordsWithCore(current(), records(), keys, role, report),

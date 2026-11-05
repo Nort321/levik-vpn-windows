@@ -95,6 +95,21 @@ async function checkAsyncHandles() {
       source.close(); await assert.rejects(source.read());
     } finally { source.close(); }
   } finally { await rm(sourceDirectory,{recursive:true,force:true}); }
+  const targetDirectory = await mkdtemp(join(tmpdir(), "levik-bundled-targets-"));
+  try {
+    const partial = join(targetDirectory,".TEST.bin.levikdrop"), bytes = Buffer.alloc(700000,0x5a);
+    await writeFile(partial,Buffer.alloc(0)); await writeFile(join(targetDirectory,"TEST.bin"),"original");
+    const targets = core.openDropTargets(targetDirectory,[{name:"TEST.bin",size:bytes.length,partial,finalPath:null}]);
+    assert.deepEqual(await targets.offsets(),{offsets:[0],prefix:[null]});
+    const chunk = Buffer.from(bytes.subarray(0,262144)), writing = targets.write(0,0,chunk); chunk.fill(0);
+    assert.equal(await writing,262144); await targets.closeWriting();
+    assert.deepEqual(await targets.offsets(),{offsets:[262144],prefix:[createHash("sha256").update(bytes.subarray(0,262144)).digest("hex")]});
+    for(let offset=262144;offset<bytes.length;offset+=262144) await targets.write(0,offset,bytes.subarray(offset,offset+262144));
+    const final = await targets.finish(0,createHash("sha256").update(bytes).digest("hex"));
+    assert.equal(final,join(targetDirectory,"TEST (1).bin")); assert.deepEqual(await readFile(final),bytes);
+    assert.equal(await readFile(join(targetDirectory,"TEST.bin"),"utf8"),"original");
+    await targets.discardPartials(); assert.deepEqual(await readFile(final),bytes);
+  } finally { await rm(targetDirectory,{recursive:true,force:true}); }
   const directory = await mkdtemp(join(tmpdir(), "levik-bundled-queue-"));
   try {
     const queue = await core.openTelemetryQueue(directory);

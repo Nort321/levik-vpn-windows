@@ -117,6 +117,15 @@ export interface TargetFile {
   final: string | null;
 }
 
+export interface DropTargetIO {
+  offsets(): Promise<{ offsets: number[]; prefix: Array<string | null> }>;
+  write(index: number, offset: number, bytes: Buffer): Promise<number>;
+  finish(index: number, sha256: string): Promise<string>;
+  /** Releases open descriptors and never throws. The transfer may resume. */
+  closeWriting(): Promise<void>;
+  discardPartials(): Promise<void>;
+}
+
 export type MarkDownloaded = (path: string) => Promise<void>;
 
 /** Atomically reserve partial files, including across simultaneous local transfers. */
@@ -167,13 +176,14 @@ export class TargetFiles {
   /** Hashes of partial files as of `offsets()`, so writing continues them. */
   private readonly hashes = new Map<number, { length: number; hash: Hash }>();
 
-  constructor(readonly folder: string, readonly targets: TargetFile[], private readonly mark: MarkDownloaded) {}
+  constructor(readonly folder: string, readonly targets: TargetFile[], private readonly mark: MarkDownloaded, private readonly native: DropTargetIO | null = null) {}
 
   /**
    * offsets/prefix for `accept`: what is kept of each file. A partial file that
    * already has every byte is cut by one, so the sender's `end` still checks it.
    */
   async offsets(): Promise<{ offsets: number[]; prefix: Array<string | null> }> {
+    if (this.native) return this.native.offsets();
     await this.closeWriting();
     const offsets: number[] = [];
     const prefix: Array<string | null> = [];
@@ -230,6 +240,7 @@ export class TargetFiles {
 
   /** Writes the next bytes of `index`; anything but the next offset is a protocol error. */
   async write(index: number, offset: number, bytes: Buffer): Promise<number> {
+    if (this.native) return this.native.write(index, offset, bytes);
     const target = this.targets[index];
     if (!target || target.final) throw new TransferFailure("protocol");
     let writing = this.writing;
@@ -260,6 +271,11 @@ export class TargetFiles {
 
   /** `end`: the hash of the whole file must match; then it moves to its final name. */
   async finish(index: number, sha256: string): Promise<string> {
+    if (this.native) {
+      const final = await this.native.finish(index, sha256);
+      const target = this.targets[index]; if (!target) throw new TransferFailure("protocol");
+      target.final = final; await this.mark(final).catch(() => {}); return final;
+    }
     const target = this.targets[index];
     if (!target || target.final) throw new TransferFailure("protocol");
     let writing = this.writing;
@@ -320,6 +336,7 @@ export class TargetFiles {
   }
 
   async closeWriting(): Promise<void> {
+    if (this.native) return this.native.closeWriting();
     const writing = this.writing;
     this.writing = null;
     if (!writing) return;
@@ -329,6 +346,7 @@ export class TargetFiles {
 
   /** Cancel, failure or expiry: partial files go, finished files stay. */
   async discardPartials(): Promise<void> {
+    if (this.native) return this.native.discardPartials();
     await this.closeWriting();
     await removePartials(this.targets);
   }

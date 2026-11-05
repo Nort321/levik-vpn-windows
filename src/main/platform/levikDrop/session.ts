@@ -2,7 +2,7 @@ import { createHash, randomBytes } from "node:crypto";
 import type { KeyObject } from "node:crypto";
 import { ChannelClosed, FrameSocket } from "./framing";
 import { TargetFiles, TransferFailure, readSource } from "./files";
-import type { SourceFile, DropSource } from "./files";
+import type { SourceFile, DropSource, TargetFile, DropTargetIO } from "./files";
 import { LanListener, dialLan } from "./lan";
 import {
   ACK_EVERY,
@@ -61,6 +61,7 @@ export interface DropAgreement {
 }
 
 export interface DropProtocol {
+  createTargets?(folder: string, targets: TargetFile[]): DropTargetIO | null;
   createSource?(file: SourceFile, offset: number, prefix: string | null): DropSource | null;
   createAgreement?(identity: Identity): DropAgreement | null;
   createRecords?(role: "sender" | "receiver", keys: SessionKeys): DropRecords | null;
