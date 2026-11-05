@@ -1,3 +1,4 @@
+import { isNativeApiDiscovery, type NativeApiDiscovery, type CreateApiDiscovery } from "./nativeApiDiscovery";
 import { isNativeConfigCache, type NativeConfigCache, type OpenConfigCache } from "./nativeConfigCache";
 import { isNativeTelemetryQueue, type NativeTelemetryQueue, type OpenTelemetryQueue } from "./nativeTelemetry";
 import { isNativeSecureStore, type OpenNativeStore, type NativeSecureStore } from "./nativeStore";
@@ -31,6 +32,7 @@ export interface LevikCoreModule {
   openSecureStore?: OpenNativeStore;
   openTelemetryQueue?: OpenTelemetryQueue;
   openConfigCache?: OpenConfigCache;
+  createApiDiscovery?: CreateApiDiscovery;
   /** Names of the core functions this build offers. */
   functions(): string[];
   /** Runs a core function: JSON in, JSON out; throws on bad input. */
@@ -96,7 +98,7 @@ export function loadLevikCore(path: string, options: {
   if (!isRecord(loaded) || typeof loaded.coreInfo !== "function") {
     return { state: "rejected", reason: "нет coreInfo()" };
   }
-  const { coreInfo, functions, call, restoreIdentity, createReplyKey, sealReply, createPublicClient, openSecureStore, openTelemetryQueue, openConfigCache } = loaded;
+  const { coreInfo, functions, call, restoreIdentity, createReplyKey, sealReply, createPublicClient, openSecureStore, openTelemetryQueue, openConfigCache, createApiDiscovery } = loaded;
   let info: unknown;
   try {
     info = coreInfo();
@@ -119,6 +121,11 @@ export function loadLevikCore(path: string, options: {
   const described: LevikCoreInfo = info;
   const module: LevikCoreModule = {
     coreInfo: () => described,
+    ...(typeof createApiDiscovery === "function" ? { createApiDiscovery: (origin: string): NativeApiDiscovery => {
+      const discovery: unknown = createApiDiscovery(origin);
+      if (!isNativeApiDiscovery(discovery)) throw new Error("Invalid native API discovery");
+      return discovery;
+    } } : {}),
     ...(typeof openConfigCache === "function" ? { openConfigCache: async (directory: string): Promise<NativeConfigCache> => {
       const cache: unknown = await openConfigCache(directory);
       if (!isNativeConfigCache(cache)) throw new Error("Invalid native configuration cache");

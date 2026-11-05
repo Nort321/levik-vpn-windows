@@ -1,3 +1,5 @@
+import type { CreateApiDiscovery } from "../core/nativeApiDiscovery";
+import type { RustCore } from "../core/rustCore";
 import { nativeEventSource } from "../core/nativeEvents";
 import type { EventSourceStream } from "../platform/liveEvents";
 import type { ServiceRouteStatus } from "../../shared/serviceRoutes";
@@ -47,6 +49,10 @@ export class MobileApiClient {
     publicFetch: typeof fetch = fetch,
   ) {
     this.endpoints = new ApiEndpoints(baseUrl, refreshEndpoints, publicFetch);
+  }
+
+  useRustCore(core: RustCore, create: CreateApiDiscovery | undefined, report: () => void): void {
+    this.endpoints.useRustCore(core, create, report);
   }
 
   createChallenge(payload: Record<string, unknown>): Promise<AuthChallengeResponse> {
