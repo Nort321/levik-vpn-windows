@@ -1,3 +1,4 @@
+import { CoreServerPinger } from "./core/nativeServerPinger";
 import type { CreateApiDiscovery } from "./core/nativeApiDiscovery";
 import { corePublicFetch, type NativePublicClient } from "./core/publicFetch";
 import { CoreApprovals } from "./core/coreApprovals";
@@ -325,6 +326,9 @@ export class AppController extends EventEmitter<AppControllerEvents> {
   private identity!: DeviceIdentity;
   private api!: MobileApiClient;
   private createApiDiscovery: CreateApiDiscovery | undefined;
+  private pingGeneration = 0;
+  private readonly serverPinger = new CoreServerPinger(() => this.core,
+    () => this.recordDiagnostic("Rust-ядро: замер доступности серверов не завершён"));
   private accessToken: string | null = null;
   private profile: PreparedTunnelProfile | null = null;
   private lastServiceRouteReport: string | null = null;
@@ -1209,6 +1213,8 @@ export class AppController extends EventEmitter<AppControllerEvents> {
   }
 
   async shutdown(reason: "quit" | "app_update" = "quit"): Promise<void> {
+    this.pingGeneration++;
+    this.serverPinger.cancel();
     this.cancelRouteProbes();
     if (this.serviceRoutesRetry) clearTimeout(this.serviceRoutesRetry);
     this.serviceRoutesRetry = null;
@@ -1245,9 +1251,10 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     // pings taken through it say nothing about the servers: keep the last real ones.
     if (this.tunnelCapturesPings()) return this.refreshLiveLoad();
     const servers = [...this.state.servers];
+    const generation = this.pingGeneration;
     this.pingPromise = (async () => {
-      const [latencies] = await Promise.all([measureServerLatencies(servers), this.refreshLiveLoad()]);
-      if (!sameServers(servers, this.state.servers) || this.tunnelCapturesPings()) return;
+      const [latencies] = await Promise.all([this.serverPinger.measure(servers, () => measureServerLatencies(servers)), this.refreshLiveLoad()]);
+      if (generation !== this.pingGeneration || !sameServers(servers, this.state.servers) || this.tunnelCapturesPings()) return;
       this.endpointLatencies = latencies;
       this.patch({ serverLatencies: this.displayedRouteLatencies(latencies) });
       this.latenciesMeasuredAt = Date.now();
@@ -3271,6 +3278,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
   /** Stage 2 of the Rust migration: the loaded module, compared with TypeScript or in charge per remote config. */
   useRustCore(status: LevikCoreStatus): void {
     this.createApiDiscovery = status.state === "loaded" ? status.module.createApiDiscovery : undefined;
+    this.serverPinger.useRustCore(status.state === "loaded" ? status.module.startServerPings : undefined);
     const version = status.state === "loaded" ? status.info.version : null;
     this.core = new RustCore(coreBridge(status), (line) => this.recordDiagnostic(line), "ts", version);
     this.telemetry.useCore(() => this.core.tally());

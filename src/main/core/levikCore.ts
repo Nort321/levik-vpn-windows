@@ -1,3 +1,4 @@
+import { isNativePingBatch, type NativePingBatch, type StartServerPings } from "./nativeServerPinger";
 import { isNativeApiDiscovery, type NativeApiDiscovery, type CreateApiDiscovery } from "./nativeApiDiscovery";
 import { isNativeConfigCache, type NativeConfigCache, type OpenConfigCache } from "./nativeConfigCache";
 import { isNativeTelemetryQueue, type NativeTelemetryQueue, type OpenTelemetryQueue } from "./nativeTelemetry";
@@ -33,6 +34,7 @@ export interface LevikCoreModule {
   openTelemetryQueue?: OpenTelemetryQueue;
   openConfigCache?: OpenConfigCache;
   createApiDiscovery?: CreateApiDiscovery;
+  startServerPings?: StartServerPings;
   /** Names of the core functions this build offers. */
   functions(): string[];
   /** Runs a core function: JSON in, JSON out; throws on bad input. */
@@ -98,7 +100,7 @@ export function loadLevikCore(path: string, options: {
   if (!isRecord(loaded) || typeof loaded.coreInfo !== "function") {
     return { state: "rejected", reason: "нет coreInfo()" };
   }
-  const { coreInfo, functions, call, restoreIdentity, createReplyKey, sealReply, createPublicClient, openSecureStore, openTelemetryQueue, openConfigCache, createApiDiscovery } = loaded;
+  const { coreInfo, functions, call, restoreIdentity, createReplyKey, sealReply, createPublicClient, openSecureStore, openTelemetryQueue, openConfigCache, createApiDiscovery, startServerPings } = loaded;
   let info: unknown;
   try {
     info = coreInfo();
@@ -121,6 +123,11 @@ export function loadLevikCore(path: string, options: {
   const described: LevikCoreInfo = info;
   const module: LevikCoreModule = {
     coreInfo: () => described,
+    ...(typeof startServerPings === "function" ? { startServerPings: (input: string): NativePingBatch => {
+      const batch: unknown = startServerPings(input);
+      if (!isNativePingBatch(batch)) throw new Error("Invalid native server ping batch");
+      return batch;
+    } } : {}),
     ...(typeof createApiDiscovery === "function" ? { createApiDiscovery: (origin: string): NativeApiDiscovery => {
       const discovery: unknown = createApiDiscovery(origin);
       if (!isNativeApiDiscovery(discovery)) throw new Error("Invalid native API discovery");
