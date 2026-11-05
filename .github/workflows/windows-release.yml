@@ -34,8 +34,8 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p core-input/windows-x64
-          gh api "repos/$GITHUB_REPOSITORY/releases/assets/713238942" -H "Accept: application/octet-stream" > core-input/windows-x64/levik_core.node
-          printf '%s\n' '22c2cdfd6891589a1f005cf4ca5124e6f2a0782ffb2cfb7062064fe66c6e64e8  core-input/windows-x64/levik_core.node' | sha256sum --check
+          gh api "repos/$GITHUB_REPOSITORY/releases/assets/713288868" -H "Accept: application/octet-stream" > core-input/windows-x64/levik_core.node
+          printf '%s\n' '3f8c3229f5524b49da21914be1f83e566b62a57b84fbe2f4430b2c005b586567  core-input/windows-x64/levik_core.node' | sha256sum --check
       - uses: actions/upload-artifact@v4
         with:
           name: levik-core-pinned
@@ -126,7 +126,7 @@ jobs:
         shell: pwsh
         run: |
           $env:ELECTRON_RUN_AS_NODE = "1"
-          $smoke = Start-Process -FilePath "./release/win-unpacked/Levik VPN.exe" -ArgumentList '"./scripts/smoke-bundled-core.cjs" "./release/win-unpacked/resources/levik-core/levik_core.node" "0.19.0"' -NoNewWindow -Wait -PassThru
+          $smoke = Start-Process -FilePath "./release/win-unpacked/Levik VPN.exe" -ArgumentList '"./scripts/smoke-bundled-core.cjs" "./release/win-unpacked/resources/levik-core/levik_core.node" "0.20.0"' -NoNewWindow -Wait -PassThru
           if ($smoke.ExitCode -ne 0) { throw "Bundled Rust core did not load in Electron (exit $($smoke.ExitCode))" }
 
       - name: Prepare release files
