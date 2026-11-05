@@ -1,3 +1,4 @@
+import { joinRelayWithCore, type StartDropRelay } from "./core/nativeDropRelay";
 import type { OpenDropTargets } from "./core/nativeDropTargets";
 import type { OpenDropSource } from "./core/nativeDropSource";
 import type { OpenDropAgreement } from "./core/nativeDropAgreement";
@@ -411,6 +412,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
   private openDropAgreement: OpenDropAgreement | undefined;
   private openDropSource: OpenDropSource | undefined;
   private openDropTargets: OpenDropTargets | undefined;
+  private startDropRelay: StartDropRelay | undefined;
   private readonly approvalsCore = new CoreApprovals(() => this.core);
   private readonly endpointsCore = new CoreEndpoints(() => this.core);
   private readonly settingsCore = new CoreSettings(() => this.core);
@@ -576,6 +578,8 @@ export class AppController extends EventEmitter<AppControllerEvents> {
       markDownloaded,
       errorCode: (error) => error instanceof MobileApiError ? error.code ?? (error.status ? `http_${error.status}` : null) : null,
       log: (line) => this.addLog(line),
+      join: joinRelayWithCore(() => this.core, () => this.startDropRelay,
+        () => this.recordDiagnostic("Rust-ядро: не удалось освободить соединение LevikDrop")),
       protocol: dropProtocolWithCore(() => this.core, () => this.openDropRecords,
         () => this.recordDiagnostic("Rust-ядро: не удалось освободить состояние LevikDrop"), () => this.openDropAgreement, () => this.openDropSource, () => this.openDropTargets),
     });
@@ -3298,6 +3302,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     this.openDropAgreement = status.state === "loaded" ? status.module.openDropAgreement : undefined;
     this.openDropSource = status.state === "loaded" ? status.module.openDropSource : undefined;
     this.openDropTargets = status.state === "loaded" ? status.module.openDropTargets : undefined;
+    this.startDropRelay = status.state === "loaded" ? status.module.startDropRelay : undefined;
     this.createApiDiscovery = status.state === "loaded" ? status.module.createApiDiscovery : undefined;
     this.serverPinger.useRustCore(status.state === "loaded" ? status.module.startServerPings : undefined);
     this.tunnelProbe.useRustCore(status.state === "loaded" ? status.module.startTunnelProbe : undefined);

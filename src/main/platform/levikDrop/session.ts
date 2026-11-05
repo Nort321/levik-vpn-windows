@@ -1,6 +1,6 @@
 import { createHash, randomBytes } from "node:crypto";
 import type { KeyObject } from "node:crypto";
-import { ChannelClosed, FrameSocket } from "./framing";
+import { ChannelClosed, type DropSocket } from "./framing";
 import { TargetFiles, TransferFailure, readSource } from "./files";
 import type { SourceFile, DropSource, TargetFile, DropTargetIO } from "./files";
 import { LanListener, dialLan } from "./lan";
@@ -214,8 +214,8 @@ export class Session {
   private readonly transfer: Buffer;
   private input: SessionPath = "relay";
   private output: SessionPath = "relay";
-  private lan: FrameSocket | null = null;
-  private lanReady: Promise<FrameSocket | null> | null = null;
+  private lan: DropSocket | null = null;
+  private lanReady: Promise<DropSocket | null> | null = null;
   private lanListener: LanListener | null = null;
   private lanBroke = false;
   private routeSettled = false;
@@ -244,7 +244,7 @@ export class Session {
 
   private readonly protocol: DropProtocol;
 
-  constructor(private readonly relay: FrameSocket, private readonly work: SenderWork | ReceiverWork) {
+  constructor(private readonly relay: DropSocket, private readonly work: SenderWork | ReceiverWork) {
     this.protocol = work.protocol ?? TYPESCRIPT_PROTOCOL;
     this.transfer = transferBytes(work.transferId);
     this.result = new Promise((resolve) => {
@@ -420,7 +420,7 @@ export class Session {
 
   // Records --------------------------------------------------------------------------
 
-  private socketFor(path: SessionPath): FrameSocket {
+  private socketFor(path: SessionPath): DropSocket {
     if (path === "relay") return this.relay;
     if (!this.lan) throw new ChannelClosed("no direct connection");
     return this.lan;
@@ -571,7 +571,7 @@ export class Session {
     void this.lanReady.then((socket) => this.onLanReady(socket));
   }
 
-  private onLanReady(socket: FrameSocket | null): void {
+  private onLanReady(socket: DropSocket | null): void {
     if (!socket) return;
     if (this.outcome || this.routeSettled) {
       socket.close();

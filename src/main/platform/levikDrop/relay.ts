@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { connect } from "node:tls";
 import type { TLSSocket } from "node:tls";
-import { FrameSocket } from "./framing";
+import { FrameSocket, type DropSocket } from "./framing";
 
 /** docs/levik-drop.md "Relay": TLS with the pinned key, then the join frame. */
 
@@ -53,7 +53,7 @@ function dialOne(endpoint: RelayEndpoint, signal: AbortSignal): Promise<TLSSocke
 }
 
 /** Tries the endpoints in order and joins the first that answers with its pin. */
-export async function joinRelay(endpoints: readonly RelayEndpoint[], token: string, signal: AbortSignal): Promise<FrameSocket> {
+export async function joinRelay(endpoints: readonly RelayEndpoint[], token: string, signal: AbortSignal): Promise<DropSocket> {
   let last: unknown = new Error("no relay endpoints");
   for (const endpoint of endpoints) {
     if (signal.aborted) throw new Error("aborted");

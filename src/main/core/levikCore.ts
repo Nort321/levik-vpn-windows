@@ -1,3 +1,5 @@
+import { isNativeDropRelay, type NativeDropRelay, type StartDropRelay } from "./nativeDropRelay";
+import type { RelayEndpoint } from "../platform/levikDrop/relay";
 import { isNativeDropTargets, type NativeDropTarget, type NativeDropTargets, type OpenDropTargets } from "./nativeDropTargets";
 import { isNativeDropSource, type NativeDropSource, type OpenDropSource } from "./nativeDropSource";
 import { isNativeDropAgreement, type NativeDropAgreement, type OpenDropAgreement } from "./nativeDropAgreement";
@@ -51,6 +53,7 @@ export interface LevikCoreModule {
   openDropAgreement?: OpenDropAgreement;
   openDropSource?: OpenDropSource;
   openDropTargets?: OpenDropTargets;
+  startDropRelay?: StartDropRelay;
   /** Names of the core functions this build offers. */
   functions(): string[];
   /** Runs a core function: JSON in, JSON out; throws on bad input. */
@@ -116,7 +119,7 @@ export function loadLevikCore(path: string, options: {
   if (!isRecord(loaded) || typeof loaded.coreInfo !== "function") {
     return { state: "rejected", reason: "нет coreInfo()" };
   }
-  const { coreInfo, functions, call, restoreIdentity, createReplyKey, sealReply, createPublicClient, openSecureStore, openTelemetryQueue, openConfigCache, createApiDiscovery, startServerPings, startTunnelProbe, startXrayRequest, startServiceProbe, openRouteProbe, openDropRecords, openDropAgreement, openDropSource, openDropTargets } = loaded;
+  const { coreInfo, functions, call, restoreIdentity, createReplyKey, sealReply, createPublicClient, openSecureStore, openTelemetryQueue, openConfigCache, createApiDiscovery, startServerPings, startTunnelProbe, startXrayRequest, startServiceProbe, openRouteProbe, openDropRecords, openDropAgreement, openDropSource, openDropTargets, startDropRelay } = loaded;
   let info: unknown;
   try {
     info = coreInfo();
@@ -139,6 +142,11 @@ export function loadLevikCore(path: string, options: {
   const described: LevikCoreInfo = info;
   const module: LevikCoreModule = {
     coreInfo: () => described,
+    ...(typeof startDropRelay === "function" ? { startDropRelay: (endpoints: RelayEndpoint[], token: string, onClosed: () => void): NativeDropRelay => {
+      const owner: unknown = startDropRelay(endpoints,token,onClosed);
+      if (!isNativeDropRelay(owner)) throw new Error("Invalid native Drop relay owner");
+      return owner;
+    } } : {}),
     ...(typeof openDropTargets === "function" ? { openDropTargets: (folder: string, targets: NativeDropTarget[]): NativeDropTargets => {
       const owner: unknown = openDropTargets(folder,targets);
       if (!isNativeDropTargets(owner)) throw new Error("Invalid native Drop targets owner");

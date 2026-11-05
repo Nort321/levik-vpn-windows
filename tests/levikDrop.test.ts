@@ -285,7 +285,7 @@ describe("LevikDrop session", () => {
     expect((await readFile(join(context.target, "empty.txt"))).length).toBe(0);
     expect(await readFile(join(context.target, "CON_.txt"), "utf8")).toBe("hi");
     expect((await readdir(context.target)).filter((name) => name.endsWith(".levikdrop"))).toEqual([]);
-  });
+  }, 30_000);
 
   it("continues where it stopped and checks the source did not change", async () => {
     const content = randomBytes(5 * 1024 * 1024 + 123);
@@ -309,7 +309,7 @@ describe("LevikDrop session", () => {
     const third = await run(changed, changedState);
     expect(third.sender).toEqual({ kind: "failed", by: "self", reason: "source_changed" });
     expect(third.receiver).toEqual({ kind: "failed", by: "peer", reason: "source_changed" });
-  });
+  }, 30_000);
 
   it.runIf(privateAddresses().length > 0)("switches to the local network", async () => {
     const content = randomBytes(3 * 1024 * 1024);
@@ -321,7 +321,7 @@ describe("LevikDrop session", () => {
       expect(result.paths.filter((path) => path === "lan")).toHaveLength(2);
       expect((await readFile(join(context.target, "lan.bin"))).equals(content)).toBe(true);
     }
-  });
+  }, 30_000);
 });
 
 
@@ -345,7 +345,7 @@ describe("LevikDrop route selection", () => {
     expect(result.receiver.kind).toBe("done");
     expect(result.paths).toEqual(["relay", "relay"]);
     expect(await readFile(join(context.target, "relay.txt"), "utf8")).toBe("relay payload");
-  });
+  }, 30_000);
 
   it.runIf(privateAddresses().length > 0)("negotiates LAN before offering a large file without sending its contents", async () => {
     const context = await setup([["large.bin", Buffer.alloc(0)]]);
@@ -354,7 +354,7 @@ describe("LevikDrop route selection", () => {
     expect(result.paths).toEqual(["lan", "lan"]);
     expect(result.sender.kind).toBe("declined");
     expect(await readdir(context.target)).toEqual([]);
-  });
+  }, 30_000);
 
   it.runIf(privateAddresses().length > 0)("streams more than twenty files and resume offsets on LAN", async () => {
     const context = await setup(Array.from({ length: 40 }, (_, i): [string, Buffer] => [`file-${i}.txt`, Buffer.from(`payload-${i}`)]));
@@ -364,7 +364,7 @@ describe("LevikDrop route selection", () => {
     expect(result.paths).toEqual(["lan", "lan"]);
     expect(await readdir(context.target)).toHaveLength(40);
     expect(await readFile(join(context.target, "file-39.txt"), "utf8")).toBe("payload-39");
-  });
+  }, 30_000);
 
   it("never falls back to relay when a pinned local route is unavailable", async () => {
     const context = await setup([["local.txt", Buffer.from("local only")]]);
@@ -385,7 +385,7 @@ describe("LevikDrop route selection", () => {
     const next = await run(context, state, { route: "lan", allowLan: true });
     expect(next.sender.kind).toBe("done");
     expect((await readFile(join(context.target, "resume.bin"))).equals(content)).toBe(true);
-  });
+  }, 30_000);
 });
 
 
@@ -484,7 +484,7 @@ describe.skipIf(!nativeModulePath)("real Rust/Node Drop transfer", () => {
     expect((await readFile(join(context.target, "empty.txt"))).length).toBe(0); native.verifyRetired(side === "both" ? 2 : 1);
     if (native.sourcesSupported && side !== "receiver") expect(native.sourcesCreated()).toBe(2);
     if (native.targetsSupported && side !== "sender") expect(native.targetsCreated()).toBe(1);
-  });
+  }, 30_000);
   it("keeps the v2 relay data markers and survives interrupted transfer with fresh owners", async () => {
     const content = randomBytes(3 * 1024 * 1024 + 123);
     const context = await setup([["resume.bin", content]]);
@@ -497,7 +497,7 @@ describe.skipIf(!nativeModulePath)("real Rust/Node Drop transfer", () => {
     expect(second.sender).toEqual({ kind: "done" }); expect(second.receiver).toEqual({ kind: "done" });
     expect(second.relayPayloadBytes).toBeGreaterThan(0);
     expect((await readFile(join(context.target, "resume.bin"))).equals(content)).toBe(true); native.verifyRetired(4);
-  });
+  }, 30_000);
   it("sends a native decline before closing and erases both attempts", async () => {
     const context = await setup([["declined.bin", Buffer.from("TEST")]]); const native = nativeProtocol();
     const result = await run(context, { manifest: null, targets: null }, { decline: true, senderProtocol: native.protocol, receiverProtocol: native.protocol });

@@ -23,7 +23,19 @@ interface Waiter {
   timer: ReturnType<typeof setTimeout> | null;
 }
 
-export class FrameSocket {
+/** A selected transport; Node and Rust keep the same framing/lifetime contract. */
+export interface DropSocket {
+  readonly closed: boolean;
+  next(timeoutMs?: number): Promise<Buffer>;
+  send(bytes: Buffer): Promise<void>;
+  startKeepalive(millis?: number): void;
+  watchIdle(millis: number): void;
+  onClose(listener: (error: Error) => void): void;
+  close(): void;
+  closeGracefully(): void;
+}
+
+export class FrameSocket implements DropSocket {
   private chunks: Buffer[] = [];
   private buffered = 0;
   private readonly queue: Buffer[] = [];

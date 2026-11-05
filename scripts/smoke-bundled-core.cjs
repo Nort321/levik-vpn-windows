@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 // Run with ELECTRON_RUN_AS_NODE=1 on the packaged executable. Uses a fresh TEST
-// identity in memory and uses only disposable TEST queue/cache directories; never initializes the app, OS key store, network or VPN.
+// identity in memory and uses only disposable TEST queue/cache directories; never initializes the app, OS key store or VPN; network checks use TEST loopback TLS only.
 const assert = require("node:assert/strict");
-const { createHash, createECDH, generateKeyPairSync, hkdfSync, sign, verify } = require("node:crypto");
+const { createHash, createPublicKey, createECDH, generateKeyPairSync, hkdfSync, sign, verify } = require("node:crypto");
 const { resolve, join } = require("node:path");
 const { mkdtemp, readFile, readdir, rm, stat, writeFile } = require("node:fs/promises");
 const { tmpdir } = require("node:os");
@@ -24,7 +24,52 @@ const spki = pair.publicKey.export({ type: "spki", format: "der" });
 assert.equal(identity.deviceId(), createHash("sha256").update(spki).digest("hex"));
 const payload = Buffer.from("Levik bundled module check: TEST ONLY");
 assert.equal(identity.sign(payload), sign("RSA-SHA256", payload, pair.privateKey).toString("base64url"));
+async function checkDropRelay() {
+  const { createServer } = require("node:tls");
+  const cert = await readFile(resolve(__dirname,"../tests/fixtures/health-test-cert.pem"));
+  const key = await readFile(resolve(__dirname,"../tests/fixtures/health-test-key.pem"));
+  const pin = createHash("sha256").update(createPublicKey(cert).export({type:"spki",format:"der"})).digest("base64url");
+  const frame = bytes => { const header = Buffer.alloc(4); header.writeUInt32BE(bytes.length); return Buffer.concat([header,bytes]); };
+  let finish, fail; const completed = new Promise((yes,no)=>{finish=yes;fail=no;}); void completed.catch(()=>{});
+  const sockets = new Set();
+  const server = createServer({cert,key},socket=>{
+    sockets.add(socket); socket.on("close",()=>sockets.delete(socket)); socket.on("error",fail);
+    let pending = Buffer.alloc(0), joined = false;
+    socket.on("data",bytes=>{
+      try {
+        pending = Buffer.concat([pending,bytes]);
+        while(pending.length>=4) {
+          const size = pending.readUInt32BE(); assert.ok(size>0 && size<=270336);
+          if(pending.length<4+size) break;
+          const body = pending.subarray(4,4+size); pending = pending.subarray(4+size);
+          if(!joined) {
+            assert.deepEqual(JSON.parse(body.toString()),{v:1,token:"TEST bundled relay"}); joined = true;
+            socket.write(Buffer.concat([frame(Buffer.from([0x7f])),frame(Buffer.from("TEST reply"))]));
+          } else { assert.equal(body.toString(),"TEST final"); socket.end(); finish(); }
+        }
+      } catch(error) { fail(error); socket.destroy(); }
+    });
+  });
+  await new Promise(done=>server.listen(0,"127.0.0.1",done));
+  let native, timer;
+  try {
+    let closed; const ended = new Promise(done=>{closed=done;});
+    native = core.startDropRelay([{host:"127.0.0.1",port:server.address().port,pin}],"TEST bundled relay",closed);
+    await Promise.race([(async()=>{
+      await native.connected();
+      assert.equal((await native.read(10000)).toString(),"TEST reply");
+      const bytes = Buffer.from("TEST final"), writing = native.send(bytes); bytes.fill(0); native.closeGracefully();
+      await writing; await completed; await ended;
+      assert.equal(native.isClosed(),true);
+    })(),new Promise((_,reject)=>{timer=setTimeout(()=>reject(new Error("TEST relay timed out")),15000);})]);
+  } finally {
+    clearTimeout(timer); native?.close();
+    for(const socket of sockets) socket.destroy();
+    await new Promise(done=>server.close(done));
+  }
+}
 async function checkAsyncHandles() {
+  await checkDropRelay();
   assert.equal(typeof core.openSecureStore, "function");
   await assert.rejects(core.openSecureStore("relative-path-is-rejected", "secret_service"));
   const events = identity.openEventStream(JSON.stringify({ origin: "https://unused.invalid", method: "GET",
