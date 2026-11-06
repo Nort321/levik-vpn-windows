@@ -61,6 +61,8 @@ jobs:
       - run: npm run download:singbox
       - run: npm run lint
       - run: npm run build
+      - name: Run Windows unit and runtime tests
+        run: npm test -- --maxWorkers=2
       - name: Verify manual HotSwitch on the pinned Windows Xray
         run: node scripts/smoke-smart-auto-flows.mjs
 
