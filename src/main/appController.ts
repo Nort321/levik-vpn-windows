@@ -283,6 +283,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
   private readonly dnsLeakProtection = new DnsLeakProtection(this.secureStore);
   private readonly killSwitch = new WindowsKillSwitch(() => this.xray.executablePath(), {
     tuicExecutablePath: () => this.xray.tuicExecutablePath(),
+    trustTunnelExecutablePath: () => this.xray.trustTunnelExecutablePath(),
   });
   private readonly guestConnection = new GuestConnection({
     interfaceFor: guestInterface,
@@ -333,6 +334,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
   private reconnectAttempts = 0;
   private lastConfig: Record<string, unknown> | null = null;
   private lastTuic: TuicEndpoint | undefined;
+  private lastTrustTunnel: TunnelServer["trustTunnel"];
   private connectionGeneration = 0;
   private manualSwitchIntent = 0;
   private manualSwitchPending: number | null = null;
@@ -656,7 +658,9 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     const hotSwitch = this.state.status === "connected" && this.xray.serviceRoutes?.mainSelectionCertain === false
       ? { phase: "uncertain" as const, targetServerId: this.state.hotSwitch?.targetServerId ?? this.state.selectedServerId ?? "",
         message: "Не удалось подтвердить маршрут. Переподключитесь или повторите выбор." } : this.state.hotSwitch;
-    return structuredClone({ ...this.state, ...(hotSwitch ? { hotSwitch } : {}), hotSwitchServerIds });
+    const snapshot = structuredClone({ ...this.state, ...(hotSwitch ? { hotSwitch } : {}), hotSwitchServerIds });
+    for (const server of snapshot.servers) delete server.trustTunnel;
+    return snapshot;
   }
 
   async beginLogin(): Promise<LoginChallenge> {
@@ -958,6 +962,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     this.cancelRouteProbes();
     this.cancelTunnelRecovery();
     this.lastConfig = null;
+    this.lastTrustTunnel = undefined;
     this.lastTuic = undefined;
     this.resetTrafficStats();
     this.liveEvents?.stop();
@@ -1048,6 +1053,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
       const config = buildXrayConfig(this.serviceProfileFor(server), server, this.state.settings, this.gamePassword);
       this.lastConfig = config;
       this.lastTuic = server.tuic;
+      this.lastTrustTunnel = server.trustTunnel;
       progress.reach("core", "core_start_failed");
       await this.startXray(config, generation);
       this.recordNetwork();
@@ -1073,6 +1079,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
       this.recordConnected();
     } catch (error) {
       this.lastConfig = null;
+      this.lastTrustTunnel = undefined;
       this.lastTuic = undefined;
       let failure: unknown = error;
       try {
@@ -1140,6 +1147,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     void this.telemetry.finish(by, code);
     this.cancelTunnelRecovery();
     this.lastConfig = null;
+    this.lastTrustTunnel = undefined;
     this.lastTuic = undefined;
     this.patch({ status: "disconnecting", statusDetail: "Отключение…" });
     return this.runTunnelOperation(async () => {
@@ -2628,6 +2636,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     this.lastServiceRouteReport = null;
     this.patch({ serviceRoutes: null, serviceRouteNotice: null, serviceRouteDetails: [] });
     this.lastConfig = null;
+    this.lastTrustTunnel = undefined;
     this.lastTuic = undefined;
     this.settingsRevision = 0;
     this.pendingSync = {};
@@ -2749,6 +2758,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
               await this.persistSelectedServer(server.id);
               this.lastConfig = buildXrayConfig(this.profile, server, this.state.settings, this.gamePassword);
               this.lastTuic = server.tuic;
+              this.lastTrustTunnel = server.trustTunnel;
             }
           }
           this.assertCurrentConnection(generation);
@@ -3062,12 +3072,12 @@ export class AppController extends EventEmitter<AppControllerEvents> {
       ? this.profile.game.servers.flatMap((server, index) => server.tuic ? [{ tag: gameTag(index), endpoint: server.tuic }] : []) : [];
     const current = (): boolean => generation === this.connectionGeneration;
     try {
-      await this.xray.start(config, this.lastTuic, gameTuic, current);
+      await this.xray.start(config, this.lastTuic, gameTuic, current, undefined, this.lastTrustTunnel);
     } catch (error) {
       // A core left from a crash holds the adapter or a port: it is always ours to end.
       if (!(error instanceof CoreStartError) || !error.retryable || !current() || !await this.stopLeftoverCores()) throw error;
       this.assertCurrentConnection(generation);
-      await this.xray.start(config, this.lastTuic, gameTuic, current);
+      await this.xray.start(config, this.lastTuic, gameTuic, current, undefined, this.lastTrustTunnel);
     }
     try {
       this.assertCurrentConnection(generation);
@@ -3241,6 +3251,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
     this.patch({ status: "reconnecting", statusDetail: "Применение изменений соединения…" });
     await this.runTunnelOperation(() => this.xray.stop());
     this.lastConfig = null;
+    this.lastTrustTunnel = undefined;
     this.lastTuic = undefined;
   }
 
@@ -3501,6 +3512,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
 
   /** Servers the automatic choice may take. */
   private automaticCandidates(servers: TunnelServer[]): TunnelServer[] {
+    servers = servers.filter((server) => !server.trustTunnel);
     // A home exit («🏠») is only ever the user's own choice.
     const ordinary = servers.filter((item) => !isHomeRoadServer(item.name));
     const offered = ordinary.length ? ordinary : servers;
@@ -3943,7 +3955,7 @@ export class AppController extends EventEmitter<AppControllerEvents> {
 
   /** A refreshed profile may reuse an id with different credentials or transport settings. */
   private mainServerSourceKey(server: TunnelServer): string {
-    return createHash("sha256").update(JSON.stringify([server.outbound, server.tuic ?? null,
+    return createHash("sha256").update(JSON.stringify([server.outbound, server.tuic ?? null, server.trustTunnel ?? null,
       server.countryCode, server.nodeId ?? null])).digest("hex");
   }
 

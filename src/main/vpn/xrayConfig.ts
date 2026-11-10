@@ -46,8 +46,9 @@ export function buildXrayConfig(
   const games = settings.gameEnabled && profile.game?.enabled ? profile.game.servers : [];
   const gaming = games.length > 0 && Boolean(gameProbePassword);
   const gameRules = gameRoutingRules(settings, gaming);
-  const antiDpiOutbound = server.tuic ? server.outbound : withAntiDpi(server, settings);
-  const selectedOutbound = server.tuic
+  const sidecar = server.tuic || server.trustTunnel;
+  const antiDpiOutbound = sidecar ? server.outbound : withAntiDpi(server, settings);
+  const selectedOutbound = sidecar
     ? tuicLocalOutbound(server.tag)
     : withBootstrapResolution(withAlternateXhttpMux(antiDpiOutbound));
   const bootstrapDomains = unique([server, ...games].flatMap((item) => endpointDomains(item.outbound.settings)));

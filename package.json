@@ -13,6 +13,7 @@
     "test": "vitest run",
     "download:xray": "node scripts/download-xray.mjs",
     "download:singbox": "node scripts/download-singbox.mjs",
+    "download:trusttunnel": "node scripts/download-trusttunnel.mjs",
     "verify:xray": "node scripts/verify-xray.mjs",
     "package:win": "npm run build && npm run build:win-helper && npm run verify:xray && electron-builder --win nsis --x64",
     "check": "npm run lint && npm run build && npm test"
@@ -37,6 +38,11 @@
       "package.json"
     ],
     "extraResources": [
+      {
+        "from": "vendor/trusttunnel/windows-x64",
+        "to": "trusttunnel",
+        "filter": ["sing-box.exe", "LICENSE"]
+      },
       {
         "from": "vendor/xray/windows-x64",
         "to": "xray",

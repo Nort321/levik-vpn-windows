@@ -14,7 +14,8 @@ import { RemoteGameDataPlane } from "./multipath/remote";
 import { networkInterfaces } from "node:os";
 import { findWindowsOutboundInterface, type WindowsOutboundInterface } from "../windows/outboundInterface";
 import { TuicSidecar, withTuicProxy } from "./tuicSidecar";
-import type { TuicEndpoint, GameMultipathStats, GameRuntimeSnapshot, GameRouteQuality } from "../../shared/contracts";
+import type { TrustTunnelEndpoint, TuicEndpoint, GameMultipathStats, GameRuntimeSnapshot, GameRouteQuality } from "../../shared/contracts";
+import { existsSync } from "node:fs";
 import { GAME_BLOCK, gameTag } from "./gameRoutes";
 import type { AppSettings } from "../../shared/contracts";
 
@@ -40,6 +41,7 @@ export class XrayManager extends EventEmitter<XrayEvents> {
   private statsQueryRunning: ChildProcess | null = null;
   private statsErrorReported = false;
   private readonly tuic = new TuicSidecar(stopChild);
+  private readonly trustTunnel = new TuicSidecar(stopChild, "trusttunnel");
   private readonly gameTuic = new TuicSidecar(stopChild);
   private outboundName: string | null = null;
   private multipath: GameDataPlane | null = null;
@@ -142,6 +144,11 @@ export class XrayManager extends EventEmitter<XrayEvents> {
   constructor() {
     super();
     this.tuic.on("log", (line) => this.emit("log", line));
+    this.trustTunnel.on("log", (line) => this.emit("log", line));
+    this.trustTunnel.on("exit", () => {
+      this.emit("log", "TrustTunnel остановлен");
+      this.process?.kill();
+    });
     this.gameTuic.on("log", (line) => this.emit("log", `Game ${line}`));
     this.gameTuic.on("exit", () => this.emit("log", "Game: TUIC остановлен; переподключите VPN для восстановления"));
     // Without its sidecar a TUIC session blackholes traffic. Ending the core
@@ -161,7 +168,7 @@ export class XrayManager extends EventEmitter<XrayEvents> {
 
   /** shouldContinue: false once the caller no longer wants this tunnel, so a retry is never started for it. */
   async start(config: Record<string, unknown>, tuic?: TuicEndpoint, gameTuic: Array<{ tag: string; endpoint: TuicEndpoint }> = [],
-    shouldContinue: () => boolean = () => true, localInterface?: WindowsOutboundInterface): Promise<void> {
+    shouldContinue: () => boolean = () => true, localInterface?: WindowsOutboundInterface, trustTunnel?: TrustTunnelEndpoint): Promise<void> {
     if (process.platform !== "win32") throw new Error("VPN-туннель запускается только в Windows-сборке");
     const { stdout: version } = await execFileAsync(this.executablePath(), ["version"], {
       windowsHide: true, timeout: 5_000, maxBuffer: 64 * 1024,
@@ -204,6 +211,15 @@ export class XrayManager extends EventEmitter<XrayEvents> {
       this.multipath = await RemoteGameDataPlane.create((line) => this.emit("log", line), () => void this.gameDataPlaneDown());
       const local = await this.multipath.listen();
       launchConfig = withTuicProxy(launchConfig, { port: local.port, id: local.uuid }, GAME_MULTIPATH);
+    }
+    if (trustTunnel) {
+      try {
+        const proxy = await this.trustTunnel.startTrustTunnel(trustTunnel, interfaceName);
+        launchConfig = withTuicProxy(launchConfig, proxy);
+      } catch (error) {
+        await this.stop();
+        throw error;
+      }
     }
     this.tunnelTag = ordinaryTunnelTag(launchConfig);
     const loopback = Object.entries(networkInterfaces()).find(([, addresses]) => addresses?.some((address) => address.address === "127.0.0.1"))?.[0];
@@ -287,11 +303,17 @@ export class XrayManager extends EventEmitter<XrayEvents> {
       if (this.process === child) this.process = null;
     }
     await this.tuic.stop();
+    await this.trustTunnel.stop();
     await this.gameTuic.stop();
   }
 
   tuicExecutablePath(): string {
     return this.tuic.executablePath();
+  }
+
+  trustTunnelExecutablePath(): string | undefined {
+    const path = this.trustTunnel.executablePath();
+    return existsSync(path) ? path : undefined;
   }
 
   isRunning(): boolean {

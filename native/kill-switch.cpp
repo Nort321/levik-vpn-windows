@@ -35,6 +35,8 @@ constexpr GUID kXrayV6Key = {0x99665898, 0x65cb, 0x4a1c, {0xa7, 0x82, 0xe6, 0x7b
 // by Status so that a boundary without a TUIC permit still reports complete.
 constexpr GUID kTuicV4Key = {0x29a0c33b, 0xbb57, 0x457b, {0xb7, 0xf0, 0xcf, 0xb5, 0xa4, 0xe9, 0x08, 0xf4}};
 constexpr GUID kTuicV6Key = {0xa5844220, 0xf6a7, 0x4ce0, {0x9b, 0x39, 0x1a, 0x34, 0x9c, 0xc3, 0x88, 0x98}};
+constexpr GUID kTrustTunnelV4Key = {0xfa49d169, 0x1d0b, 0x4b7d, {0xb5, 0x36, 0xa4, 0x90, 0xe1, 0x49, 0xa7, 0xd1}};
+constexpr GUID kTrustTunnelV6Key = {0x027ebbd3, 0x6335, 0x41ae, {0x99, 0xf0, 0xd7, 0x54, 0x29, 0xd0, 0x1b, 0xfb}};
 constexpr GUID kTunnelV4Key = {0x3936c136, 0xe200, 0x4ce6, {0xb3, 0xe1, 0xe8, 0x3a, 0x8b, 0x45, 0x15, 0xf7}};
 constexpr GUID kTunnelV6Key = {0xb13e795b, 0xcb1b, 0x4ed8, {0x9e, 0x32, 0xc2, 0x24, 0xe1, 0x4a, 0x48, 0xf5}};
 constexpr GUID kLoopbackV4Key = {0x4f785bc2, 0x630c, 0x43fa, {0xb2, 0x15, 0xd1, 0x38, 0x41, 0x70, 0xac, 0x92}};
@@ -63,6 +65,8 @@ std::vector<GUID> RemovableKeys() {
   std::vector<GUID> keys = BoundaryKeys(true);
   keys.push_back(kTuicV4Key);
   keys.push_back(kTuicV6Key);
+  keys.push_back(kTrustTunnelV4Key);
+  keys.push_back(kTrustTunnelV6Key);
   return keys;
 }
 
@@ -309,7 +313,7 @@ DWORD CommitTransaction(HANDLE engine, DWORD result) {
   return FwpmTransactionCommit0(engine);
 }
 
-DWORD Enable(const std::wstring& appPath, const std::wstring& xrayPath, const std::wstring* tuicPath) {
+DWORD Enable(const std::wstring& appPath, const std::wstring& xrayPath, const std::wstring* tuicPath, const std::wstring* trustTunnelPath = nullptr) {
   EngineHandle engine;
   DWORD result = OpenEngine(engine);
   if (result != ERROR_SUCCESS) return result;
@@ -334,6 +338,10 @@ DWORD Enable(const std::wstring& appPath, const std::wstring& xrayPath, const st
   if (tuicPath != nullptr) {
     if (result == ERROR_SUCCESS) result = AddApplicationPermit(engine.get(), *tuicPath, FWPM_LAYER_ALE_AUTH_CONNECT_V4, kTuicV4Key);
     if (result == ERROR_SUCCESS) result = AddApplicationPermit(engine.get(), *tuicPath, FWPM_LAYER_ALE_AUTH_CONNECT_V6, kTuicV6Key);
+  }
+  if (trustTunnelPath != nullptr) {
+    if (result == ERROR_SUCCESS) result = AddApplicationPermit(engine.get(), *trustTunnelPath, FWPM_LAYER_ALE_AUTH_CONNECT_V4, kTrustTunnelV4Key);
+    if (result == ERROR_SUCCESS) result = AddApplicationPermit(engine.get(), *trustTunnelPath, FWPM_LAYER_ALE_AUTH_CONNECT_V6, kTrustTunnelV6Key);
   }
   if (result == ERROR_SUCCESS) result = AddLoopbackPermit(engine.get(), kProviderKey, kSubLayerKey, FWPM_LAYER_ALE_AUTH_CONNECT_V4, kLoopbackV4Key);
   if (result == ERROR_SUCCESS) result = AddLoopbackPermit(engine.get(), kProviderKey, kSubLayerKey, FWPM_LAYER_ALE_AUTH_CONNECT_V6, kLoopbackV6Key);
@@ -802,16 +810,17 @@ DWORD SelfTest() {
 
 int wmain(int argc, wchar_t* argv[]) {
   if (argc < 2) {
-    std::wcerr << L"Usage: levik-kill-switch <enable APP XRAY [TUIC]|allow-tunnel NAME [GATEWAY]|disable|status|cleanup-legacy|outbound-interfaces|game-probe SOURCE TARGET TTL|self-test>\n";
+    std::wcerr << L"Usage: levik-kill-switch <enable APP XRAY [TUIC [TRUSTTUNNEL]]|allow-tunnel NAME [GATEWAY]|disable|status|cleanup-legacy|outbound-interfaces|game-probe SOURCE TARGET TTL|self-test>\n";
     return ERROR_INVALID_PARAMETER;
   }
 
   const std::wstring command = argv[1];
   DWORD result = ERROR_INVALID_PARAMETER;
   if (command == L"enable" && argc == 4) result = Enable(argv[2], argv[3], nullptr);
-  else if (command == L"enable" && argc == 5) {
+  else if (command == L"enable" && (argc == 5 || argc == 6)) {
     const std::wstring tuicPath = argv[4];
-    result = Enable(argv[2], argv[3], &tuicPath);
+    const std::wstring trustTunnelPath = argc == 6 ? argv[5] : L"";
+    result = Enable(argv[2], argv[3], &tuicPath, argc == 6 ? &trustTunnelPath : nullptr);
   }
   else if (command == L"allow-tunnel" && argc == 3) result = AllowTunnel(argv[2], nullptr);
   else if (command == L"allow-tunnel" && argc == 4) {

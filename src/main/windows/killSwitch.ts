@@ -23,6 +23,7 @@ interface WindowsKillSwitchOptions {
   helperExecutablePath?: string;
   /** sing-box for TUIC; permitted like Xray because it dials the VPN server itself. */
   tuicExecutablePath?: () => string;
+  trustTunnelExecutablePath?: () => string | undefined;
   run?: KillSwitchCommandRunner;
 }
 
@@ -37,6 +38,7 @@ export class WindowsKillSwitch {
   private readonly helperExecutablePath: string;
   private readonly run: KillSwitchCommandRunner;
   private readonly tuicExecutablePath: (() => string) | undefined;
+  private readonly trustTunnelExecutablePath: (() => string | undefined) | undefined;
 
   constructor(
     private readonly xrayExecutablePath: () => string,
@@ -47,6 +49,7 @@ export class WindowsKillSwitch {
     this.helperExecutablePath = options.helperExecutablePath ?? windowsHelperPath();
     this.run = options.run ?? ((arguments_) => runHelper(this.helperExecutablePath, arguments_));
     this.tuicExecutablePath = options.tuicExecutablePath;
+    this.trustTunnelExecutablePath = options.trustTunnelExecutablePath;
   }
 
   async recover(): Promise<boolean> {
@@ -129,7 +132,9 @@ export class WindowsKillSwitch {
 
   private enableArguments(): string[] {
     const tuic = this.tuicExecutablePath?.();
-    return ["enable", this.appExecutablePath, this.xrayExecutablePath(), ...(tuic ? [tuic] : [])];
+    const trustTunnel = this.trustTunnelExecutablePath?.();
+    return ["enable", this.appExecutablePath, this.xrayExecutablePath(), ...(tuic ? [tuic] : []),
+      ...(tuic && trustTunnel ? [trustTunnel] : [])];
   }
 
   private async execute(...arguments_: string[]): Promise<void> {

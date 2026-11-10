@@ -4,7 +4,7 @@ import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { connect, createServer } from "node:net";
 import { join } from "node:path";
-import type { TuicEndpoint } from "../../shared/contracts";
+import type { TrustTunnelEndpoint, TuicEndpoint } from "../../shared/contracts";
 import { TUIC_PLACEHOLDER_ID, TUIC_PLACEHOLDER_PORT } from "./xrayConfig";
 
 export interface TuicLocalProxy {
@@ -43,6 +43,20 @@ export function buildTuicSidecarConfig(tuic: TuicEndpoint, proxy: TuicLocalProxy
   };
 }
 
+export function buildTrustTunnelSidecarConfig(endpoint: TrustTunnelEndpoint, proxy: TuicLocalProxy, interfaceName: string): Record<string, unknown> {
+  return {
+    log: { disabled: true },
+    inbounds: [{ type: "vless", listen: "127.0.0.1", listen_port: proxy.port, users: [{ uuid: proxy.id }] }],
+    outbounds: [{
+      type: "trusttunnel", tag: "trusttunnel", server: endpoint.address, server_port: endpoint.port,
+      username: endpoint.username, password: endpoint.password, quic: endpoint.quic, bind_interface: interfaceName,
+      tls: { enabled: true, server_name: endpoint.serverName,
+        ...(!endpoint.quic ? { utls: { enabled: true, fingerprint: "chrome" } } : {}) },
+    }],
+    route: { final: "trusttunnel" },
+  };
+}
+
 /** Points the TUIC placeholder outbound at the running sidecar. */
 export function withTuicProxy(config: Record<string, unknown>, proxy: TuicLocalProxy, tag?: string): Record<string, unknown> {
   const outbounds = Array.isArray(config.outbounds) ? [...config.outbounds] : [];
@@ -66,14 +80,17 @@ export class TuicSidecar extends EventEmitter<TuicSidecarEvents> {
   private child: ChildProcessWithoutNullStreams | null = null;
   private readonly stopping = new WeakSet<ChildProcess>();
 
-  constructor(private readonly stopProcess: (child: ChildProcess) => Promise<void>) {
+  constructor(
+    private readonly stopProcess: (child: ChildProcess) => Promise<void>,
+    private readonly binary: "singbox" | "trusttunnel" = "singbox",
+  ) {
     super();
   }
 
   executablePath(): string {
     return app.isPackaged
-      ? join(process.resourcesPath, "singbox", "sing-box.exe")
-      : join(app.getAppPath(), "vendor", "singbox", "windows-x64", "sing-box.exe");
+      ? join(process.resourcesPath, this.binary, "sing-box.exe")
+      : join(app.getAppPath(), "vendor", this.binary, "windows-x64", "sing-box.exe");
   }
 
   isRunning(): boolean {
@@ -84,6 +101,13 @@ export class TuicSidecar extends EventEmitter<TuicSidecarEvents> {
     await this.stop();
     const proxy: TuicLocalProxy = { port: await freeLoopbackPort(), id: randomUUID() };
     await this.startConfig(buildTuicSidecarConfig(tuic, proxy, interfaceName), [proxy.port]);
+    return proxy;
+  }
+
+  async startTrustTunnel(endpoint: TrustTunnelEndpoint, interfaceName: string): Promise<TuicLocalProxy> {
+    await this.stop();
+    const proxy = { port: await freeLoopbackPort(), id: randomUUID() };
+    await this.startConfig(buildTrustTunnelSidecarConfig(endpoint, proxy, interfaceName), [proxy.port]);
     return proxy;
   }
 
@@ -121,12 +145,14 @@ export class TuicSidecar extends EventEmitter<TuicSidecarEvents> {
     });
     this.child = child;
     const emitLines = (chunk: Buffer): void => {
+      if (this.binary === "trusttunnel") return;
       chunk.toString("utf8").split(/\r?\n/).map((line) => line.trim()).filter(Boolean)
         .forEach((line) => this.emit("log", `TUIC: ${line.replace(/[\u0000-\u001f]/g, "")}`));
     };
     child.stdout.on("data", emitLines);
     child.stderr.on("data", emitLines);
-    child.once("error", (error) => this.emit("log", `TUIC: ${error.message}`));
+    child.once("error", (error) => this.emit("log", this.binary === "trusttunnel"
+      ? "Не удалось запустить TrustTunnel" : `TUIC: ${error.message}`));
     child.once("exit", (code) => {
       if (this.child === child) this.child = null;
       if (!this.stopping.has(child)) this.emit("exit", code);

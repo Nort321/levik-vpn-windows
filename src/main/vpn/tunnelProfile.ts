@@ -1,4 +1,5 @@
 import { parseServiceRoutePolicy, type ServiceRoutePolicy } from "./serviceRoutes";
+import { isIPv4 } from "node:net";
 import { createDecipheriv, createHash, X509Certificate } from "node:crypto";
 import type { TunnelProfileEnvelope } from "../api/models";
 import { decodeBase64Url } from "../../shared/base64";
@@ -170,6 +171,7 @@ function parseSource(source: string): TunnelServer[] {
     if (line.startsWith("vless://")) return [parseVless(line, index)];
     if (line.startsWith("trojan://")) return [parseTrojan(line, index)];
     if (line.startsWith("hysteria2://") || line.startsWith("hy2://")) return [parseHysteria2(line, index)];
+    if (line.startsWith("levik-trusttunnel://")) return parseTrustTunnel(line, index);
     if (line.startsWith("tuic://")) return parseTuic(line, index);
     return [];
   });
@@ -230,6 +232,30 @@ function pinnedCertificatePem(encoded: string | null): string | null {
     return `-----BEGIN CERTIFICATE-----\n${lines.join("\n")}\n-----END CERTIFICATE-----\n`;
   } catch {
     return null;
+  }
+}
+
+export function parseTrustTunnel(value: string, index: number): TunnelServer[] {
+  if (value.length > 1024) return [];
+  try {
+    const url = new URL(value);
+    const mode = url.searchParams.get("mode");
+    const serverName = url.searchParams.get("sni");
+    const port = Number(url.port);
+    if (url.protocol !== "levik-trusttunnel:" || url.pathname || !isIPv4(url.hostname) ||
+        !Number.isInteger(port) || port < 1 || port > 65535 ||
+        !/^[a-f0-9]{32}$/.test(url.username) || !/^[A-Za-z0-9_-]{43}$/.test(url.password) ||
+        (mode !== "h2" && mode !== "h3") || !serverName ||
+        !/^(?=.{1,253}$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$/.test(serverName) ||
+        [...url.searchParams].length !== 2) return [];
+    const server = createServer({
+      protocol: `trusttunnel-${mode}`, settings: { address: url.hostname, port },
+    }, url.hash, `TrustTunnel ${mode.toUpperCase()}`, index);
+    return [{ ...server, trustTunnel: {
+      address: url.hostname, port, username: url.username, password: url.password, serverName, quic: mode === "h3",
+    } }];
+  } catch {
+    return [];
   }
 }
 

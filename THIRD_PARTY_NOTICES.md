@@ -25,6 +25,12 @@ Modified MPL-covered source files, the patch and its upstream source manifest ar
 
 The upstream license is included in the installed `resources/singbox` directory.
 
+## sing-box-lx
+
+- Source: [sing-box-lx v1.14.4-lx.31](https://github.com/Leadaxe/sing-box-lx/tree/v1.14.4-lx.31)
+- License: GPL-3.0-or-later
+- Use: separate TrustTunnel process. The release archive is verified by SHA-256, and the upstream LICENSE is installed next to the binary.
+
 ## Wintun
 
 - Project: https://www.wintun.net/

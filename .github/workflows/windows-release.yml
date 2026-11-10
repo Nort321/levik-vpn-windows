@@ -59,6 +59,7 @@ jobs:
 
       - run: npm run download:xray
       - run: npm run download:singbox
+      - run: npm run download:trusttunnel
       - run: npm run lint
       - run: npm run build
       - name: Run Windows unit and runtime tests

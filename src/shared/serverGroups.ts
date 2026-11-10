@@ -1,6 +1,6 @@
 import type { TunnelServer } from "./contracts";
 
-export type ServerProtocol = "vless" | "hysteria" | "tuic" | "other";
+export type ServerProtocol = "vless" | "hysteria" | "tuic" | "trusttunnel-h2" | "trusttunnel-h3" | "other";
 
 /** One physical server with the protocols the subscription offers for it. */
 export interface ServerGroup {
@@ -10,7 +10,7 @@ export interface ServerGroup {
   variants: TunnelServer[];
 }
 
-const PROTOCOL_ORDER: readonly ServerProtocol[] = ["vless", "hysteria", "tuic", "other"];
+const PROTOCOL_ORDER: readonly ServerProtocol[] = ["vless", "hysteria", "tuic", "trusttunnel-h2", "trusttunnel-h3", "other"];
 
 export function serverProtocolKey(server: TunnelServer): ServerProtocol {
   if (server.tuic) return "tuic";
@@ -18,6 +18,7 @@ export function serverProtocolKey(server: TunnelServer): ServerProtocol {
   if (protocol === "vless") return "vless";
   if (protocol === "hysteria" || protocol === "hysteria2" || protocol === "hy2") return "hysteria";
   if (protocol === "tuic") return "tuic";
+  if (protocol === "trusttunnel-h2" || protocol === "trusttunnel-h3") return protocol;
   return "other";
 }
 
@@ -26,6 +27,8 @@ export function serverProtocolShortLabel(server: TunnelServer): string {
     case "vless": return "VLESS";
     case "hysteria": return "Hysteria 2";
     case "tuic": return "TUIC";
+    case "trusttunnel-h2": return "TrustTunnel H2";
+    case "trusttunnel-h3": return "TrustTunnel H3";
     default: {
       const protocol = typeof server.outbound.protocol === "string" ? server.outbound.protocol : "VPN";
       return protocol.toUpperCase();
