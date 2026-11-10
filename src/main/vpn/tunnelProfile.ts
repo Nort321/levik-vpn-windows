@@ -241,17 +241,23 @@ export function parseTrustTunnel(value: string, index: number): TunnelServer[] {
     const url = new URL(value);
     const mode = url.searchParams.get("mode");
     const serverName = url.searchParams.get("sni");
+    const sourceHost = url.searchParams.get("sourceHost");
+    const sourcePort = url.searchParams.get("sourcePort");
+    const hasAnchor = sourceHost !== null || sourcePort !== null;
+    const dnsName = /^(?=.{1,253}$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$/;
+    const anchorPort = Number(sourcePort);
     const port = Number(url.port);
     if (url.protocol !== "levik-trusttunnel:" || url.pathname || !isIPv4(url.hostname) ||
         !Number.isInteger(port) || port < 1 || port > 65535 ||
         !/^[a-f0-9]{32}$/.test(url.username) || !/^[A-Za-z0-9_-]{43}$/.test(url.password) ||
         (mode !== "h2" && mode !== "h3") || !serverName ||
-        !/^(?=.{1,253}$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$/.test(serverName) ||
-        [...url.searchParams].length !== 2) return [];
+        !dnsName.test(serverName) || [...url.searchParams].length !== (hasAnchor ? 4 : 2) ||
+        (hasAnchor && (!sourceHost || (!isIPv4(sourceHost) && !dnsName.test(sourceHost))
+          || !sourcePort || !/^\d{1,5}$/.test(sourcePort) || anchorPort < 1 || anchorPort > 65535))) return [];
     const server = createServer({
       protocol: `trusttunnel-${mode}`, settings: { address: url.hostname, port },
     }, url.hash, `TrustTunnel ${mode.toUpperCase()}`, index);
-    return [{ ...server, trustTunnel: {
+    return [{ ...server, ...(sourceHost ? { groupWithVless: { host: sourceHost, port: anchorPort } } : {}), trustTunnel: {
       address: url.hostname, port, username: url.username, password: url.password, serverName, quic: mode === "h3",
     } }];
   } catch {

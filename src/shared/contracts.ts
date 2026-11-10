@@ -135,6 +135,7 @@ export interface TunnelServer {
   countryCode: string;
   outbound: Record<string, unknown>;
   trustTunnel?: TrustTunnelEndpoint;
+  groupWithVless?: { host: string; port: number };
   tuic?: TuicEndpoint;
   /** Stable Game exit identity; older profiles are grouped by endpoint address. */
   nodeId?: string;

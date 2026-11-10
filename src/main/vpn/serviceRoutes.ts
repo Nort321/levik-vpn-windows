@@ -262,7 +262,7 @@ export function withServiceRoutes(base: Record<string, unknown>, input: {
   if (!input.policy && autoPolicy && !serviceExitForServer(autoPolicy, input.selected)) return base;
   const policy = input.policy ?? autoPolicy;
   if (!policy) return base;
-  const automatic = !input.gameOnly && !hasTuic(input.selected)
+  const automatic = !input.gameOnly && !hasLocalSidecar(input.selected)
     && serviceExitForServer(policy, input.selected) !== null;
   const status: ServiceRouteStatus = { revision: policy.revision, fingerprint: policy.fingerprint, state: "pending", routes: [] };
   const inactive = (state: ServiceRouteStatus["state"], detail?: string): Record<string, unknown> => {
@@ -278,8 +278,8 @@ export function withServiceRoutes(base: Record<string, unknown>, input: {
   if (serviceUnsupported) { status.state = "unsupported"; status.detail = serviceUnsupported; }
   // No rules: the runtime never reports route states, so the policy is applied once the core runs it.
   else if (!policy.rules.length) status.state = "applied";
-  if (hasTuic(input.selected)) return inactive("unsupported", "unsupported_transport");
-  const candidates = input.servers.filter((server) => !hasTuic(server) && serviceExitForServer(policy, server)?.state === "enabled");
+  if (hasLocalSidecar(input.selected)) return inactive("unsupported", "unsupported_transport");
+  const candidates = input.servers.filter((server) => !hasLocalSidecar(server) && serviceExitForServer(policy, server)?.state === "enabled");
   const selectedExit = serviceExitForServer(policy, input.selected)!;
   const ordered = [input.selected, ...candidates.filter((server) => server.id !== input.selected.id)]
     .filter((server, index, list) => list.findIndex((other) => other.id === server.id) === index);
@@ -395,7 +395,7 @@ export function withServiceRoutes(base: Record<string, unknown>, input: {
 
 /** Local metadata only; never sent to an account or substituted for saved user rules. */
 function automaticOrdinaryPolicy(servers: readonly TunnelServer[]): ServiceRoutePolicy | undefined {
-  const ordinary = servers.filter((server) => !hasTuic(server) && COUNTRY.test(server.countryCode.toUpperCase()) && server.countryCode.toUpperCase() !== "RU"
+  const ordinary = servers.filter((server) => !hasLocalSidecar(server) && COUNTRY.test(server.countryCode.toUpperCase()) && server.countryCode.toUpperCase() !== "RU"
     && !server.name.includes("🏠") && extractServerEndpoint(server.outbound) !== null);
   if (!ordinary.length) return undefined;
   const exits = new Map<string, ServiceRouteExit>();
@@ -412,3 +412,7 @@ function automaticOrdinaryPolicy(servers: readonly TunnelServer[]): ServiceRoute
 }
 
 function hasTuic(server: TunnelServer): boolean { return "tuic" in server && server.tuic !== undefined; }
+
+function hasLocalSidecar(server: TunnelServer): boolean {
+  return hasTuic(server) || server.trustTunnel !== undefined;
+}

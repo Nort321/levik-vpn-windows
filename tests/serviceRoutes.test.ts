@@ -6,6 +6,8 @@ import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 import { prepareTunnelProfile } from "../src/main/vpn/tunnelProfile";
 import { buildXrayConfig } from "../src/main/vpn/xrayConfig";
+import { groupByCountry } from "../src/shared/serverGroups";
+import { withTuicProxy } from "../src/main/vpn/tuicSidecar";
 import { compiledServiceRoutes, parseServiceRoutePolicy, serviceExitForServer, ServiceRouteRuntime, type ServiceRoutePolicy } from "../src/main/vpn/serviceRoutes";
 import type { AppSettings } from "../src/shared/contracts";
 
@@ -33,6 +35,29 @@ function profile() {
 }
 
 describe("ordinary service route policy", () => {
+  it("groups TrustTunnel by its VLESS endpoint and keeps its local hop out of ordinary Xray routes", () => {
+    const ordinary = profile();
+    const [selected] = ordinary.servers;
+    const username = "0".repeat(32);
+    const password = "a".repeat(43);
+    const links = ["h2", "h3"].map((mode) =>
+      `levik-trusttunnel://${username}:${password}@192.0.2.10:443?sni=trust.example&mode=${mode}&sourceHost=de.example&sourcePort=443#${encodeURIComponent("🇩🇪 Германия · TrustTunnel")}`);
+    const trustTunnel = prepareTunnelProfile(Buffer.from(JSON.stringify({
+      version: 1, profileId: "trust-tunnel-test", subscriptionId: "one", source: { content: links.join("\n") },
+    })), "one").servers;
+    expect(trustTunnel).toHaveLength(2);
+    const prepared = { ...ordinary, servers: [...trustTunnel, ...ordinary.servers] };
+    const group = groupByCountry(prepared.servers).flatMap((country) => country.nodes)
+      .find((node) => node.variants.some((server) => server.id === selected!.id));
+    expect(group?.variants).toEqual([selected, ...trustTunnel]);
+    const regularConfig = buildXrayConfig(prepared, selected!, settings);
+    expect(JSON.stringify(regularConfig.outbounds)).not.toContain("trusttunnel-h");
+    const trustConfig = buildXrayConfig(prepared, trustTunnel[0]!, settings);
+    expect(compiledServiceRoutes(trustConfig)?.automatic).toBeUndefined();
+    expect((trustConfig.outbounds as Array<Record<string, unknown>>)[0]?.protocol).toBe("vless");
+    expect(() => withTuicProxy(trustConfig, { port: 41000, id: "11111111-1111-4111-8111-111111111111" })).not.toThrow();
+  });
+
   it("validates policy strictly and rejects ambiguous endpoint ownership", () => {
     expect(parseServiceRoutePolicy(policy)).toEqual(policy);
     expect(parseServiceRoutePolicy(undefined)).toBeUndefined();

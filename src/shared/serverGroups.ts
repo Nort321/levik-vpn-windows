@@ -58,14 +58,19 @@ export function serverEndpointHost(server: TunnelServer): string | null {
  */
 export function groupServers(servers: readonly TunnelServer[]): ServerGroup[] {
   const groups: ServerGroup[] = [];
-  for (const server of servers) {
+  // Build the VLESS cards before attaching their TrustTunnel variants.
+  const ordered = [...servers.filter((server) => !server.groupWithVless), ...servers.filter((server) => server.groupWithVless)];
+  for (const server of ordered) {
     const host = serverEndpointHost(server);
     const protocol = serverProtocolKey(server);
     const country = server.countryCode.toUpperCase();
+    const anchor = server.groupWithVless;
     const existing = host === null ? undefined : groups.find((group) =>
-      group.id.startsWith(`${host}|`)
-      && group.countryCode === country
+      group.countryCode === country
       && protocol !== "other"
+      && (anchor
+        ? group.variants.some((variant) => matchesVlessAnchor(variant, anchor))
+        : group.id.startsWith(`${host}|`))
       && !group.variants.some((variant) => serverProtocolKey(variant) === protocol));
     if (existing) {
       existing.variants.push(server);
@@ -78,6 +83,16 @@ export function groupServers(servers: readonly TunnelServer[]): ServerGroup[] {
       PROTOCOL_ORDER.indexOf(serverProtocolKey(left)) - PROTOCOL_ORDER.indexOf(serverProtocolKey(right)));
   }
   return groups;
+}
+
+function matchesVlessAnchor(server: TunnelServer, anchor: NonNullable<TunnelServer["groupWithVless"]>): boolean {
+  if (server.groupWithVless) {
+    return server.groupWithVless.host === anchor.host && server.groupWithVless.port === anchor.port;
+  }
+  if (serverProtocolKey(server) !== "vless" || serverEndpointHost(server) !== anchor.host) return false;
+  const settings = server.outbound.settings;
+  const target = isRecord(settings) && Array.isArray(settings.vnext) ? settings.vnext[0] : undefined;
+  return isRecord(target) && Number(target.port) === anchor.port;
 }
 
 /** The variant a group connects with: the selected one, else the preferred protocol. */
