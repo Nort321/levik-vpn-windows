@@ -139,6 +139,7 @@ export function buildRouteProbeConfig(source: Record<string, unknown>, tag: stri
 }
 
 export interface RouteProbeSession {
+  verifyData?(): Promise<boolean>;
   latency(target: string): Promise<{ values: number[]; failed: number; setupMs: number; dataVerified?: boolean }>;
   transfer(target: string, direction: "down" | "up"): Promise<number | null>;
   close(): Promise<void>;
@@ -231,6 +232,19 @@ function proxyProbeSession(port: number, auth: { user: string; password: string 
     return { agent, setupMs: performance.now() - started };
   };
   return {
+    async verifyData() {
+      for (const target of ["https://speed.cloudflare.com/__down?bytes=65536", "https://proof.ovh.net/files/1Mb.dat"]) {
+        if (signal.aborted) return false;
+        let connection: { agent: Agent; setupMs: number } | undefined;
+        try {
+          connection = await connect(target);
+          const answer = await exchange(connection.agent, target, "GET", 0, 65536, signal, 65536);
+          if (answer && answer.bytes >= 65536) return true;
+        } catch { /* Try the independent HTTPS provider. */ }
+        finally { if (connection) { agents.delete(connection.agent); connection.agent.destroy(); } }
+      }
+      return false;
+    },
     async latency(target) {
       const url = checkedTarget(target);
       const verifyWarmup = verifyData && url.hostname === "speed.cloudflare.com" && url.pathname === "/__down";
@@ -306,7 +320,7 @@ function openTlsProxy(port: number, auth: { user: string; password: string }, ho
 }
 
 interface Exchange { firstByteMs: number; elapsedMs: number; bytes: number }
-function exchange(agent: Agent, target: string, method: "GET" | "POST", uploadBytes: number, maxBytes: number, signal: AbortSignal): Promise<Exchange | null> {
+function exchange(agent: Agent, target: string, method: "GET" | "POST", uploadBytes: number, maxBytes: number, signal: AbortSignal, minimumBytes?: number): Promise<Exchange | null> {
   const url = checkedTarget(target);
   return new Promise((resolve) => {
     const started = performance.now(); let bytes = 0; let firstByteMs = 0; let settled = false;
@@ -321,13 +335,17 @@ function exchange(agent: Agent, target: string, method: "GET" | "POST", uploadBy
     const timer = setTimeout(abort, ROUTE_PROBE_LIMITS.requestMs);
     signal.addEventListener("abort", abort, { once: true });
     outgoing = request({ host: url.hostname, port: 443, method, path: `${url.pathname}${url.search}`, agent,
-      headers: { Host: url.hostname, "Accept-Encoding": "identity", "Cache-Control": "no-cache", ...(method === "POST" ? { "Content-Type": "application/octet-stream", "Content-Length": uploadBytes } : {}) } }, (response) => {
+      headers: { Host: url.hostname, "Accept-Encoding": "identity", "Cache-Control": "no-cache", ...(minimumBytes ? { Range: `bytes=0-${minimumBytes - 1}` } : {}), ...(method === "POST" ? { "Content-Type": "application/octet-stream", "Content-Length": uploadBytes } : {}) } }, (response) => {
       firstByteMs = performance.now() - started;
-      if (response.statusCode !== 200 && response.statusCode !== 204) { response.destroy(); finish(false); return; }
-      response.on("data", (chunk: Buffer) => { bytes += chunk.length; if (bytes > maxBytes) finish(false); });
+      if (response.statusCode !== 200 && response.statusCode !== 204 && !(minimumBytes && response.statusCode === 206)) { response.destroy(); finish(false); return; }
+      response.on("data", (chunk: Buffer) => {
+        bytes += chunk.length;
+        if (minimumBytes && bytes >= minimumBytes) { finish(true); response.destroy(); }
+        else if (bytes > maxBytes) finish(false);
+      });
       response.once("error", () => finish(false));
       response.once("aborted", () => finish(false));
-      response.once("end", () => finish(true));
+      response.once("end", () => finish(minimumBytes === undefined || bytes >= minimumBytes));
     });
     outgoing.once("error", () => finish(false));
     if (signal.aborted) { abort(); return; }

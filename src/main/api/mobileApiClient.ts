@@ -119,7 +119,7 @@ export class MobileApiClient {
 
   tunnelProfile(accessToken: string, subscriptionId: string): Promise<TunnelProfileResponse> {
     // «🏠» servers of the account's home exits come with the profile (docs/app-platform.md "Home road").
-    return this.request("POST", "/api/mobile/v1/tunnel-profile", { subscriptionId }, accessToken, { "X-Levik-Road": "1", "X-Levik-Game": "2", "X-Levik-TrustTunnel": "2" });
+    return this.request("POST", "/api/mobile/v1/tunnel-profile", { subscriptionId }, accessToken, { "X-Levik-Road": "1", "X-Levik-Game": "2", "X-Levik-TrustTunnel": "2", "X-Levik-External-Pool": "1" });
   }
 
   /** This computer's home exit with a fresh relay token, or null. */
@@ -271,14 +271,15 @@ export class MobileApiClient {
       };
       if (hasBody) requestInit.body = body;
       const response = await fetch(url, requestInit);
+      const maxResponseBytes = path === "/api/mobile/v1/tunnel-profile" ? 36 * 1024 * 1024 : 4 * 1024 * 1024;
       const contentLength = Number(response.headers.get("content-length") ?? "0");
-      if (contentLength > 4 * 1024 * 1024) throw new MobileApiError("Ответ API слишком большой", response.status);
+      if (contentLength > maxResponseBytes) throw new MobileApiError("Ответ API слишком большой", response.status);
       const contentType = response.headers.get("content-type") ?? "";
       if (!contentType.toLowerCase().includes("json")) {
         throw new MobileApiError("API вернул неожиданный формат", response.status);
       }
       const raw = await response.text();
-      if (raw.length > 4 * 1024 * 1024) throw new MobileApiError("Ответ API слишком большой", response.status);
+      if (Buffer.byteLength(raw) > maxResponseBytes) throw new MobileApiError("Ответ API слишком большой", response.status);
       let decoded: unknown;
       try {
         decoded = JSON.parse(raw);

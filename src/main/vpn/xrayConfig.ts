@@ -1,3 +1,4 @@
+import { EXTERNAL_AUTO_ID } from "../../shared/externalPool";
 import { withServiceRoutes } from "./serviceRoutes";
 import type { AppSettings, TunnelServer } from "../../shared/contracts";
 import type { PreparedTunnelProfile } from "./tunnelProfile";
@@ -43,6 +44,8 @@ export function buildXrayConfig(
   settings: AppSettings,
   gameProbePassword?: string,
 ): Record<string, unknown> {
+  if (server.id === EXTERNAL_AUTO_ID) throw new Error("Сначала проверьте безлимитные серверы");
+  profile = { ...profile, servers: profile.servers.filter((item) => item.id !== EXTERNAL_AUTO_ID) };
   const games = settings.gameEnabled && profile.game?.enabled ? profile.game.servers : [];
   const gaming = games.length > 0 && Boolean(gameProbePassword);
   const gameRules = gameRoutingRules(settings, gaming);

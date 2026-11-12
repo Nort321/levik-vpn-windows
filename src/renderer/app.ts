@@ -1,3 +1,4 @@
+import { EXTERNAL_AUTO_ID } from "../shared/externalPool";
 import type { AppSettings, AppSnapshot, AppTab, DiagnosisAction, DiagnosisSummary, TunnelServer, WindowsProcess, PendingApproval, GameExitComparison, GameSessionRecord } from "../shared/contracts";
 import { isDiagnosisAction } from "../shared/contracts";
 import { activeVariant, countryName, groupByCountry, serverProtocolShortLabel, type CountryGroup, type CountryServer } from "../shared/serverGroups";
@@ -498,10 +499,11 @@ function renderHome(): string {
           <span class="home-server-flag" aria-hidden="true">${countryFlagSvg(server?.countryCode ?? null)}</span>
           <select id="home-server-select" aria-label="Сервер быстрого подключения" ${state.servers.length && !state.busy ? "" : "disabled"}>
             ${state.hotSwitch?.phase === "uncertain" ? `<option value="" selected disabled>Маршрут не подтверждён</option>` : ""}
-            ${state.servers.length ? `<option value="auto" ${state.settings.automaticServer && state.hotSwitch?.phase !== "uncertain" ? "selected" : ""}>${escapeHtml(state.settings.automaticServer && automaticServerName() ? `Автоматически · ${automaticServerName()}` : "Автоматически")}</option>${groupByCountry(state.servers).map(serverOptions).join("")}` : `<option>Сервер не выбран</option>`}
+            ${state.servers.length ? `<option value="auto" ${state.settings.automaticServer && state.hotSwitch?.phase !== "uncertain" ? "selected" : ""}>${escapeHtml(state.settings.automaticServer && automaticServerName() ? `Автоматически · ${automaticServerName()}` : "Автоматически")}</option>${state.servers.some((server) => server.id === EXTERNAL_AUTO_ID) ? `<option value="${EXTERNAL_AUTO_ID}" ${manualServerId() === EXTERNAL_AUTO_ID ? "selected" : ""}>Безлимитные серверы · Автовыбор</option>` : ""}${groupByCountry(state.servers.filter((server) => server.id !== EXTERNAL_AUTO_ID)).map(serverOptions).join("")}` : `<option>Сервер не выбран</option>`}
           </select>
         </label>
         <div class="connection-detail">${escapeHtml(state.hotSwitch?.phase === "uncertain" ? "VPN работает, но текущий маршрут не подтверждён." : state.statusDetail ?? "Нажмите кнопку, чтобы включить защиту")}</div>
+        ${externalPoolProgress()}
         ${renderHotSwitchNotice()}
       </section>
       <div class="side-stack">
@@ -511,6 +513,17 @@ function renderHome(): string {
     </div>`;
 }
 
+function externalPoolCard(): string {
+  if (!state?.servers.some((server) => server.id === EXTERNAL_AUTO_ID)) return "";
+  return `<div class="server-card ${manualServerId() === EXTERNAL_AUTO_ID ? "selected" : ""}" data-server-filter="безлимитные серверы автовыбор" data-server-favorite="false"><button class="server-select" data-server-id="${EXTERNAL_AUTO_ID}" aria-label="Выбрать безлимитные серверы"><span class="server-flag auto-flag" aria-hidden="true">${icon("servers")}</span><span class="server-copy"><span class="server-name">Безлимитные серверы</span><span class="server-meta">Автовыбор с проверкой интернета · список сохранён</span></span><span class="radio"></span></button></div>`;
+}
+
+function externalPoolProgress(): string {
+  const progress = state?.externalPoolProgress;
+  if (!progress) return "";
+  return `<div class="external-check" role="status" aria-live="polite"><div class="external-check-orbit" aria-hidden="true"><span></span><span></span><span></span></div><strong>Ищем рабочий маршрут</strong><p>Проверяем передачу данных через серверы. Это может занять несколько минут.</p><progress max="${progress.total}" value="${progress.checked}" aria-label="Проверено серверов"></progress><small>Проверено ${progress.checked} из ${progress.total} · нажмите кнопку питания для отмены</small></div>`;
+}
+
 function renderServers(): string {
   if (!state) return "";
   return `
@@ -518,7 +531,7 @@ function renderServers(): string {
     ${state.status === "connected" ? `<p class="server-switch-explainer">HotSwitch сохраняет открытые соединения. Переходы с пометкой «с переподключением» перезапускают VPN.</p>` : ""}
     ${renderHotSwitchNotice()}
     <label class="server-search"><span>${icon("search")}</span><input id="server-search-input" type="search" placeholder="Поиск по серверу или стране" autocomplete="off" value="${escapeAttribute(serverSearchQuery)}" /></label>
-    ${state.servers.length ? `<div class="server-list">${autoCard()}${groupByCountry(state.servers).map(countryCard).join("")}</div><div class="empty card-flat server-empty" hidden>Серверы не найдены</div>` : `<div class="empty card-flat">Для выбранной подписки нет совместимых серверов</div>`}`;
+    ${state.servers.length ? `<div class="server-list">${autoCard()}${externalPoolCard()}${groupByCountry(state.servers.filter((server) => server.id !== EXTERNAL_AUTO_ID)).map(countryCard).join("")}</div><div class="empty card-flat server-empty" hidden>Серверы не найдены</div>` : `<div class="empty card-flat">Для выбранной подписки нет совместимых серверов</div>`}`;
 }
 
 function renderHotSwitchNotice(): string {
@@ -549,7 +562,7 @@ function manualServerId(): string | null {
 /** «Германия · Франкфурт» for the server Smart Auto is on now. */
 function automaticServerName(): string | null {
   if (!state?.selectedServerId || state.hotSwitch?.phase === "uncertain") return null;
-  for (const country of groupByCountry(state.servers)) {
+  for (const country of groupByCountry(state.servers.filter((server) => server.id !== EXTERNAL_AUTO_ID))) {
     const node = country.nodes.find((item) => item.variants.some((variant) => variant.id === state?.selectedServerId));
     if (node) return country.nodes.length > 1 ? `${countryTitle(country)} · ${node.label}` : countryTitle(country);
   }

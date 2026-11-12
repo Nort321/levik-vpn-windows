@@ -206,6 +206,7 @@ export interface AppSnapshot {
   tab: AppTab;
   status: ConnectionStatus;
   statusDetail: string | null;
+  externalPoolProgress?: import("./externalPool").ExternalPoolProgress | null;
   sessionAvailable: boolean;
   account: AccountSummary | null;
   servers: TunnelServer[];
