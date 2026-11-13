@@ -1,4 +1,4 @@
-import { parseExternalPool, externalAutoServer, type ExternalPool } from "./externalPool";
+import { type ExternalPool } from "./externalPool";
 import { parseServiceRoutePolicy, type ServiceRoutePolicy } from "./serviceRoutes";
 import { isIPv4 } from "node:net";
 import { createDecipheriv, createHash, X509Certificate } from "node:crypto";
@@ -71,7 +71,6 @@ export function prepareTunnelProfile(plaintext: Uint8Array, expectedSubscription
   if (raw.version !== 1 || raw.subscriptionId !== expectedSubscriptionId) throw new Error("Профиль не соответствует подписке");
   if (!/^[A-Za-z0-9._:-]{1,128}$/.test(raw.profileId)) throw new Error("Некорректный идентификатор профиля");
   if (!raw.source || typeof raw.source.content !== "string") throw new Error("Профиль не содержит конфигурацию");
-  const externalPool = parseExternalPool(raw.externalPool);
   const parsed = parseSource(raw.source.content);
   // Remnawave's stub links (expired, traffic used up, no ordinary servers…) are never servers.
   const placeholders = parsed.filter(isSubscriptionPlaceholder);
@@ -80,16 +79,15 @@ export function prepareTunnelProfile(plaintext: Uint8Array, expectedSubscription
   const ordinary = servers.filter((server) => !game.servers.includes(server));
   // Only the explicit flag: game servers never fall into ordinary selection by accident.
   const gameOnly = game.servers.length > 0 && isRecord(raw.game) && raw.game.only === true;
-  if (!gameOnly && ordinary.length === 0 && placeholders[0] && !externalPool?.servers.length) throw new Error(placeholderMessage(placeholders[0].name));
-  if (servers.length === 0 && !externalPool?.servers.length || servers.length > 512) throw new Error("В профиле нет совместимых серверов");
+  if (!gameOnly && ordinary.length === 0 && placeholders[0]) throw new Error(placeholderMessage(placeholders[0].name));
+  if (servers.length === 0 || servers.length > 512) throw new Error("В профиле нет совместимых серверов");
   const serviceRoutes = parseServiceRoutePolicy(raw.serviceRoutes);
   return {
     ...(serviceRoutes ? { serviceRoutes } : {}),
     profileId: raw.profileId,
     subscriptionId: raw.subscriptionId,
     subscriptionExpiresAt: raw.subscriptionExpiresAt ?? null,
-    servers: gameOnly ? game.servers : [...ordinary, ...(externalPool?.servers.length ? [externalAutoServer()] : [])],
-    ...(!gameOnly && externalPool?.servers.length ? { externalPool } : {}),
+    servers: gameOnly ? game.servers : ordinary,
     ...(gameOnly ? { gameOnly: true } : {}),
     game,
     directCidrs: validateCidrs(raw.routing?.directCidrs ?? []),

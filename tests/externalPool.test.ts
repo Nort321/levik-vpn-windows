@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { externalAutoServer, findExternalServer, parseExternalPool, retainExternalPool, type ExternalPool } from "../src/main/vpn/externalPool";
+import { externalAutoServer, findExternalServer, parseExternalPool, retainExternalPool, removeDesktopExternalPool } from "../src/main/vpn/externalPool";
 import type { TunnelServer } from "../src/shared/contracts";
 import { prepareTunnelProfile } from "../src/main/vpn/tunnelProfile";
 
@@ -44,23 +44,20 @@ describe("external route selection", () => {
     expect(externalAutoServer().outbound.protocol).toBe("blackhole");
     expect(parseExternalPool(undefined)).toBeUndefined();
   });
-  it("shows one pool choice when the ordinary feed has only its traffic-limit notice", () => {
-    const prepared = prepareTunnelProfile(Buffer.from(JSON.stringify({ version: 1, profileId: "pool-profile", subscriptionId: "one",
-      issuedAt: new Date().toISOString(), source: { mediaType: "text/plain",
-        content: "vless://11111111-1111-4111-8111-111111111111@0.0.0.0:1#Traffic%20used" }, externalPool: pool(),
-    })), "one");
-    expect(prepared.servers.map((server) => server.id)).toEqual([externalAutoServer().id]);
-    expect(prepared.externalPool?.servers).toHaveLength(1);
+  it("does not turn a received external catalog into desktop servers", () => {
+    expect(() => prepareTunnelProfile(Buffer.from(JSON.stringify({ version: 1, profileId: "pool-profile", subscriptionId: "one",
+      source: { mediaType: "text/plain", content: "vless://11111111-1111-4111-8111-111111111111@0.0.0.0:1#Traffic%20used" }, externalPool: pool(),
+    })), "one")).toThrow();
   });
-  it("keeps the saved catalog on failed refresh without carrying it into another subscription or Game-only", () => {
-    const previous = { subscriptionId: "one", externalPool: parseExternalPool(pool())! };
-    const refreshed: { subscriptionId: string; servers: TunnelServer[]; externalPool?: ExternalPool; gameOnly?: boolean } = { subscriptionId: "one", servers: [] };
-    retainExternalPool(refreshed, previous);
-    expect(refreshed.externalPool).toBe(previous.externalPool);
-    expect(refreshed.servers.map((server) => server.id)).toEqual([externalAutoServer().id]);
-    for (const incoming of [{ subscriptionId: "two", servers: [] }, { subscriptionId: "one", servers: [], gameOnly: true }]) {
-      retainExternalPool(incoming, previous); expect(incoming).not.toHaveProperty("externalPool");
-    }
+  it("purges a legacy cached catalog without touching ordinary servers and cannot restore it", () => {
+    const ordinary = { ...externalAutoServer(), id: "ordinary", tag: "ordinary" };
+    const incoming = { subscriptionId: "one", servers: [ordinary, externalAutoServer()], externalPool: parseExternalPool(pool())! };
+    const previous = { ...incoming };
+    expect(removeDesktopExternalPool(incoming)).toBe(true);
+    expect(incoming.servers).toEqual([ordinary]); expect(incoming.externalPool).toBeUndefined();
+    retainExternalPool(incoming, previous);
+    expect(incoming.servers).toEqual([ordinary]); expect(incoming.externalPool).toBeUndefined();
+    expect(removeDesktopExternalPool(incoming)).toBe(false);
   });
   it("rejects LAN/rebound names, arbitrary dialers and insecure TLS", () => {
     for (const address of ["127.0.0.1", "10.0.0.1", "100.64.0.1", "192.168.1.1", "localhost", "evil.example", "::1", "2::1", "3::1", "2001:db8::1", "::ffff:127.0.0.1"]) {

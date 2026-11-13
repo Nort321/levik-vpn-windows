@@ -55,13 +55,17 @@ export function externalAutoServer(): TunnelServer {
     outbound: { tag: EXTERNAL_AUTO_ID, protocol: "blackhole", settings: {} } };
 }
 
-/** Refresh failures/empty snapshots preserve the last-good list only for the same subscription. */
+/** Desktop clients never retain or expose external routes, including legacy cached profiles. */
+export function removeDesktopExternalPool(profile: { servers: TunnelServer[]; externalPool?: ExternalPool }): boolean {
+  const changed = profile.externalPool !== undefined || profile.servers.some((server) => server.id === EXTERNAL_AUTO_ID || server.id.startsWith("external:"));
+  delete profile.externalPool;
+  profile.servers = profile.servers.filter((server) => server.id !== EXTERNAL_AUTO_ID && !server.id.startsWith("external:"));
+  return changed;
+}
+
 export function retainExternalPool(incoming: { subscriptionId: string; servers: TunnelServer[]; externalPool?: ExternalPool; gameOnly?: boolean },
-  previous: { subscriptionId: string; externalPool?: ExternalPool } | null): void {
-  if (!incoming.externalPool?.servers.length && !incoming.gameOnly && previous?.subscriptionId === incoming.subscriptionId && previous.externalPool?.servers.length) {
-    incoming.externalPool = previous.externalPool;
-    if (!incoming.servers.some((server) => server.id === EXTERNAL_AUTO_ID)) incoming.servers.push(externalAutoServer());
-  }
+  _previous: { subscriptionId: string; externalPool?: ExternalPool } | null): void {
+  removeDesktopExternalPool(incoming);
 }
 
 /** Every candidate is eligible, but only four cores/real transfers run at a time. */
